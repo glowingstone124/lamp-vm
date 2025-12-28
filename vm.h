@@ -19,8 +19,7 @@
 #define NEXT_INSTRUCTION vm->code[vm->ip++]
 #endif
 enum {
-    OP_LOADI = 1,
-    OP_ADD,
+    OP_ADD = 1,
     OP_SUB,
     OP_MUL,
     OP_PRINT,
@@ -37,6 +36,6 @@ enum {
     OP_STORE_IND,
     OP_CMP,
     OP_MOV,
-    OP_MOVI
+    OP_MOVI,
 };
 #endif

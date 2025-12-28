@@ -7,9 +7,8 @@
 | Type       | rd          | rs1              | rs2     | imm                 |
 |------------|-------------|------------------|---------|---------------------|
 | Calc       | destination | source1          | source2 | none                |
-| LOADI      | destination | /                | /       | Immediate Value     | 
-| LOAD       | target      | address register | /       | /                   |
-| STORE      | destination | address register | /       | /                   |
+| LOAD       | target      | address register | /       | Immediate Value     |
+| STORE      | destination | address register | /       | Immediate Value     |
 | JMP / JZ   | /           | /                | /       | Jump Instruction Id |
 | PUSH / POP | register    | /                | /       | /                   |
 | CMP        | register    | register         | /       | Immediate Value     |
@@ -20,11 +19,9 @@
 
 Calc: ALL math calculations such as ADD, SUB, MUL.
 
-LOADI: Load a immediate value to a register
+LOAD: Load a value in a memory address into other register. Address is `address register(rs1)'s value + imm`.
 
-LOAD: Load a value in a memory address into other register
-
-STORE: Store a value to a memory address
+STORE: Store a value to a memory address. Address is `address register(rs1)'s value + imm`.
 
 JMP: Jump to a command.
 
@@ -38,3 +35,5 @@ CMP: Compare two values and set ZFLAGS. If imm is 0, compare rd and rs1, or comp
 will be 0, otherwise it will be 1.
 
 MOV/MOVI: Move rs1's value or a immediate value to rd.
+
+STORE/LOAD v.s. STORE_IND/LOAD_IND: The former uses a constant value which is defined at the beginning of this cycle, unlike the latter uses the value in register dynamically.

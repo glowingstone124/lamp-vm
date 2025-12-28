@@ -43,12 +43,6 @@ void vm_run(VM *vm) {
         FETCH64(vm, op, rd, rs1, rs2, imm);
         vm->execution_times++;
         switch (op) {
-            case OP_LOADI: {
-                vm->regs[rd] = imm;
-                set_zf(vm, imm);
-                break;
-            }
-
             case OP_ADD: {
                 vm->regs[rd] = vm->regs[rs1] + vm->regs[rs2];
                 set_zf(vm, vm->regs[rd]);
@@ -101,21 +95,41 @@ void vm_run(VM *vm) {
                 break;
             }
             case OP_LOAD: {
-                vm->regs[rd] = vm->memory[rs1];
-                set_zf(vm, vm->regs[rd]);
-                break;
-            }
-            case OP_STORE: {
-                vm->memory[rs1] = vm->regs[rd];
+                int address = rs1 + imm;
+                if (address >= 0 && address < MEM_SIZE) {
+                    vm->regs[rd] = vm->memory[address];
+                    set_zf(vm, vm->regs[rd]);
+                } else {
+                    printf("LOAD out of bounds: %d\n", address);
+                }
                 break;
             }
             case OP_LOAD_IND: {
-                vm->regs[rd] = vm->memory[vm->regs[rs1]];
-                set_zf(vm, vm->regs[rd]);
+                int address = vm->regs[rs1] + imm;
+                if (address >= 0 && address < MEM_SIZE) {
+                    vm->regs[rd] = vm->memory[address];
+                    set_zf(vm, vm->regs[rd]);
+                } else {
+                    printf("LOAD_IND out of bounds: %d\n", address);
+                }
+                break;
+            }
+            case OP_STORE: {
+                int address = rs1 + imm;
+                if (address >= 0 && address < MEM_SIZE) {
+                    vm->memory[address] = vm->regs[rd];
+                } else {
+                    printf("STORE out of bounds: %d\n", address);
+                }
                 break;
             }
             case OP_STORE_IND: {
-                vm->memory[vm->regs[rs1]] = vm->regs[rd];
+                int address = vm->regs[rs1] + imm;
+                if (address >= 0 && address < MEM_SIZE) {
+                    vm->memory[address] = vm->regs[rd];
+                } else {
+                    printf("STORE_IND out of bounds: %d\n", address);
+                }
                 break;
             }
             case OP_CMP: {
@@ -188,14 +202,14 @@ int main() {
      * halt
      */
     uint64_t program[] = {
-        INST(OP_LOADI, 0, 0, 0, 0),
-        INST(OP_LOADI, 1, 0, 0, 0),
+        INST(OP_MOVI, 0, 0, 0, 0),
+        INST(OP_MOVI, 1, 0, 0, 0),
         // loop_start (index 2)
         INST(OP_CMP, 1, 0, 0, 5),
         INST(OP_JZ, 0, 0, 0, 9),
         INST(OP_LOAD_IND, 2, 1, 0, 0),
         INST(OP_ADD, 0, 0, 2, 0),
-        INST(OP_LOADI, 3, 0, 0, 1),
+        INST(OP_MOVI, 3, 0, 0, 1),
         INST(OP_ADD, 1, 1, 3, 0),
         INST(OP_JMP, 0, 0, 0, 2),
         // end (index 9)
