@@ -8,4 +8,7 @@ add_executable(vm
         vm.h
         stack.h
         fetch.h
-        instruction.h)
+        instruction.h
+        frame.c
+        io.h
+        io.c)

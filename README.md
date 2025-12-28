@@ -4,7 +4,9 @@
 
 ### Instructions Mapping
 
-| Type       | rd          | rs1              | rs2     | imm                 |
+A single instruction's length is 64bit.
+
+| Type(8)    | rd(8)       | rs1(8)           | rs2(8)  | imm(32)             |
 |------------|-------------|------------------|---------|---------------------|
 | Calc       | destination | source1          | source2 | none                |
 | LOAD       | target      | address register | /       | Immediate Value     |
@@ -14,6 +16,10 @@
 | CMP        | register    | register         | /       | Immediate Value     |
 | MOV        | register    | register         | /       | /                   |
 | MOVI       | register    | /                | /       | Immediate Value     |
+| MEMSET     | Start Addr  | Value            | /       | Length              |
+| MEMCPY     | destination | source           | /       | Length              |
+| IN         | receiver    | address          | /       | /                   |
+| OUT        | value       | address          | /       | /                   |
 
 ### Instructions Usage:
 
@@ -36,4 +42,13 @@ will be 0, otherwise it will be 1.
 
 MOV/MOVI: Move rs1's value or a immediate value to rd.
 
-STORE/LOAD v.s. STORE_IND/LOAD_IND: The former uses a constant value which is defined at the beginning of this cycle, unlike the latter uses the value in register dynamically.
+STORE/LOAD v.s. STORE_IND/LOAD_IND: The former uses a constant value which is defined at the beginning of this cycle,
+unlike the latter uses the value in register dynamically.**
+
+MEMSET: Fill a memory segment with the value in rs1; the segment starts at the address in rd and has a length of imm.
+
+MEMCPY: Copy a segment of memory to another destination.
+
+IN: Use rd register to receive a data from IO address rs1.
+
+OUT: Send rd register's data to IO address rs1.

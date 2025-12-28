@@ -5,19 +5,32 @@
 
 #ifndef VM_VM_H
 #define VM_VM_H
-#ifdef DEBUG
-#define NEXT_INSTRUCTION (
-{
-    if (vm->ip >= vm->code_size) {
-        fprintf(stderr, "IP out of range! \n");
-        exit(1);
-    }
-    vm->code[vm->ip++];
-}
-)
-#else
-#define NEXT_INSTRUCTION vm->code[vm->ip++]
-#endif
+#include <stdint.h>
+
+#define REG_COUNT 8
+#define MEM_SIZE 1024
+#define DATA_STACK_SIZE 256
+#define CALL_STACK_SIZE 256
+#define FLAG_ZF 1
+#define IO_SIZE 256
+typedef struct {
+    int regs[REG_COUNT];
+    uint64_t *code;
+    int ip;
+    int execution_times;
+    int code_size;
+    unsigned int flags;
+
+    int data_stack[DATA_STACK_SIZE];
+    int dsp;
+
+    int call_stack[CALL_STACK_SIZE];
+    int csp;
+
+    int memory[MEM_SIZE];
+
+    int io[IO_SIZE];
+} VM;
 enum {
     OP_ADD = 1,
     OP_SUB,
@@ -37,5 +50,9 @@ enum {
     OP_CMP,
     OP_MOV,
     OP_MOVI,
+    OP_MEMSET,
+    OP_MEMCPY,
+    OP_IN,
+    OP_OUT
 };
 #endif

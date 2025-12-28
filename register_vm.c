@@ -3,31 +3,10 @@
 
 #include "fetch.h"
 #include "vm.h"
+#include "frame.h"
 #include "stack.h"
 #include "instruction.h"
-#define REG_COUNT 8
-#define MEM_SIZE 1024
-#define DATA_STACK_SIZE 256
-#define CALL_STACK_SIZE 256
-#define FLAG_ZF 1
-
-typedef struct {
-    int regs[REG_COUNT];
-    uint64_t *code;
-    int ip;
-    int execution_times;
-    int code_size;
-    unsigned int flags;
-
-    int data_stack[DATA_STACK_SIZE];
-    int dsp;
-
-    int call_stack[CALL_STACK_SIZE];
-    int csp;
-
-    int memory[MEM_SIZE];
-} VM;
-
+#include "io.h"
 void set_zf(VM *vm, int value) {
     if (value == 0) {
         vm->flags |= FLAG_ZF;
@@ -148,6 +127,52 @@ void vm_run(VM *vm) {
                 set_zf(vm, vm->regs[rd]);
                 break;
             }
+            case OP_MEMSET: {
+                int base = vm->regs[rd];
+                int value = vm->regs[rs1];
+                for (int i = 0; i < imm; i++) {
+                    int addr = base + i;
+                    if (addr >= 0 && addr < MEM_SIZE) {
+                        vm->memory[addr] = value;
+                    } else {
+                        printf("MEMSET out of bounds; %d\n", addr);
+                    }
+                }
+                break;
+            }
+            case OP_MEMCPY: {
+                int dest = vm->regs[rd];
+                int src = vm->regs[rs1];
+                for (int i = 0; i < imm; i++) {
+                    int daddr = dest + i;
+                    int saddr = src + i;
+                    if (daddr >=0 && daddr < MEM_SIZE && saddr >=0 && saddr < MEM_SIZE) {
+                        vm->memory[daddr] = vm->memory[saddr];
+                    } else {
+                        printf("MEMCPY out of bounds: d=%d, s=%d\n", daddr, saddr);
+                    }
+                }
+                break;
+            }
+            case OP_IN: {
+                int addr = rs1;
+                if (addr >=0 && addr < IO_SIZE) {
+                    vm->regs[rd] = vm->io[addr];
+                } else {
+                    printf("IN invalid IO address %d", addr);
+                }
+                break;
+            }
+            case OP_OUT:{
+                int addr = rs1;
+                if (addr >= 0 && addr < IO_SIZE) {
+                    accept_io(vm, addr, vm->regs[rd]);
+                } else {
+                    printf("OUT invalid IO address %d\n", addr);
+                }
+                break;
+            }
+
             default: {
                 printf("Unknown opcode %d\n", op);
                 return;
@@ -202,18 +227,32 @@ int main() {
      * halt
      */
     uint64_t program[] = {
-        INST(OP_MOVI, 0, 0, 0, 0),
-        INST(OP_MOVI, 1, 0, 0, 0),
-        // loop_start (index 2)
-        INST(OP_CMP, 1, 0, 0, 5),
-        INST(OP_JZ, 0, 0, 0, 9),
-        INST(OP_LOAD_IND, 2, 1, 0, 0),
-        INST(OP_ADD, 0, 0, 2, 0),
-        INST(OP_MOVI, 3, 0, 0, 1),
-        INST(OP_ADD, 1, 1, 3, 0),
-        INST(OP_JMP, 0, 0, 0, 2),
-        // end (index 9)
-        INST(OP_PRINT, 0, 0, 0, 0),
+        INST(OP_MOVI, 0, 0, 0, 0x07),
+        INST(OP_OUT, 0, SCREEN_ATTRIBUTE, 0, 0),
+        INST(OP_MOVI, 0, 0, 0, 'H'),
+        INST(OP_OUT, 0, SCREEN, 0, 0),
+        INST(OP_MOVI, 0, 0, 0, 'e'),
+        INST(OP_OUT, 0, SCREEN, 0, 0),
+        INST(OP_MOVI, 0, 0, 0, 'l'),
+        INST(OP_OUT, 0, SCREEN, 0, 0),
+        INST(OP_MOVI, 0, 0, 0, 'l'),
+        INST(OP_OUT, 0, SCREEN, 0, 0),
+        INST(OP_MOVI, 0, 0, 0, 'o'),
+        INST(OP_OUT, 0, SCREEN, 0, 0),
+        INST(OP_MOVI, 0, 0, 0, ' '),
+        INST(OP_OUT, 0, SCREEN, 0, 0),
+        INST(OP_MOVI, 0, 0, 0, 'W'),
+        INST(OP_OUT, 0, SCREEN, 0, 0),
+        INST(OP_MOVI, 0, 0, 0, 'o'),
+        INST(OP_OUT, 0, SCREEN, 0, 0),
+        INST(OP_MOVI, 0, 0, 0, 'r'),
+        INST(OP_OUT, 0, SCREEN, 0, 0),
+        INST(OP_MOVI, 0, 0, 0, 'l'),
+        INST(OP_OUT, 0, SCREEN, 0, 0),
+        INST(OP_MOVI, 0, 0, 0, 'd'),
+        INST(OP_OUT, 0, SCREEN, 0, 0),
+        INST(OP_MOVI, 0, 0, 0, '\n'),
+        INST(OP_OUT, 0, SCREEN, 0, 0),
         INST(OP_HALT, 0, 0, 0, 0)
     };
 
@@ -235,8 +274,9 @@ int main() {
     for (int i = 0; i < 5; i++) {
         vm.memory[i] = i + 1;
     }
-
+    init_screen();
     vm_run(&vm);
+    render_screen();
     vm_dump(&vm, 16);
     printf("Execution complete in %d cycles.\n", vm.execution_times);
     return 0;
