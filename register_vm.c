@@ -1,5 +1,7 @@
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
 
 #include "fetch.h"
 #include "vm.h"
@@ -7,6 +9,8 @@
 #include "stack.h"
 #include "instruction.h"
 #include "io.h"
+#include "panic.h"
+#include "loadbin.h"
 
 void set_zf(VM *vm, int value) {
     if (value == 0) {
@@ -36,10 +40,6 @@ void vm_instruction_case(VM *vm) {
         case OP_MUL: {
             vm->regs[rd] = vm->regs[rs1] * vm->regs[rs2];
             set_zf(vm, vm->regs[rd]);
-            break;
-        }
-        case OP_PRINT: {
-            printf("%d\n", vm->regs[rd]);
             break;
         }
         case OP_HALT: {
@@ -80,7 +80,10 @@ void vm_instruction_case(VM *vm) {
                 vm->regs[rd] = vm->memory[address];
                 set_zf(vm, vm->regs[rd]);
             } else {
-                printf("LOAD out of bounds: %d\n", address);
+                panic(
+                    panic_format("LOAD out of bounds: %d\n", address),
+                    vm
+                );
             }
             break;
         }
@@ -90,7 +93,7 @@ void vm_instruction_case(VM *vm) {
                 vm->regs[rd] = vm->memory[address];
                 set_zf(vm, vm->regs[rd]);
             } else {
-                printf("LOAD_IND out of bounds: %d\n", address);
+                panic(panic_format("LOAD_IND out of bounds: %d\n", address),vm);
             }
             break;
         }
@@ -99,7 +102,7 @@ void vm_instruction_case(VM *vm) {
             if (address >= 0 && address < MEM_SIZE) {
                 vm->memory[address] = vm->regs[rd];
             } else {
-                printf("STORE out of bounds: %d\n", address);
+                panic(panic_format("STORE out of bounds: %d\n", address),vm);
             }
             break;
         }
@@ -108,7 +111,7 @@ void vm_instruction_case(VM *vm) {
             if (address >= 0 && address < MEM_SIZE) {
                 vm->memory[address] = vm->regs[rd];
             } else {
-                printf("STORE_IND out of bounds: %d\n", address);
+                panic(panic_format("STORE_IND out of bounds: %d\n", address),vm);
             }
             break;
         }
@@ -136,7 +139,7 @@ void vm_instruction_case(VM *vm) {
                 if (addr >= 0 && addr < MEM_SIZE) {
                     vm->memory[addr] = value;
                 } else {
-                    printf("MEMSET out of bounds; %d\n", addr);
+                    panic(panic_format("MEMSET out of bounds; %d\n", addr),vm);
                 }
             }
             break;
@@ -150,7 +153,7 @@ void vm_instruction_case(VM *vm) {
                 if (daddr >= 0 && daddr < MEM_SIZE && saddr >= 0 && saddr < MEM_SIZE) {
                     vm->memory[daddr] = vm->memory[saddr];
                 } else {
-                    printf("MEMCPY out of bounds: d=%d, s=%d\n", daddr, saddr);
+                    panic(panic_format("MEMCPY out of bounds: d=%d, s=%d\n", daddr, saddr),vm);
                 }
             }
             break;
@@ -160,7 +163,7 @@ void vm_instruction_case(VM *vm) {
             if (addr >= 0 && addr < IO_SIZE) {
                 vm->regs[rd] = vm->io[addr];
             } else {
-                printf("IN invalid IO address %d", addr);
+                panic(panic_format("IN invalid IO address %d", addr),vm);
             }
             break;
         }
@@ -169,13 +172,13 @@ void vm_instruction_case(VM *vm) {
             if (addr >= 0 && addr < IO_SIZE) {
                 accept_io(vm, addr, vm->regs[rd]);
             } else {
-                printf("OUT invalid IO address %d\n", addr);
+                panic(panic_format("OUT invalid IO address %d\n", addr),vm);
             }
             break;
         }
 
         default: {
-            printf("Unknown opcode %d\n", op);
+            panic(panic_format("Unknown opcode %d\n", op),vm);
             return;
         }
     }
@@ -183,6 +186,10 @@ void vm_instruction_case(VM *vm) {
 
 void vm_run(VM *vm) {
     while (!vm->halted && vm->ip < vm->code_size) {
+        if (vm->panic) {
+            printf("VM panic detected.\n");
+            return;
+        }
         vm_instruction_case(vm);
     }
 }
@@ -281,7 +288,7 @@ int main() {
     }
     init_screen();
     vm_run(&vm);
-    vm_dump(&vm, 16);
+    //vm_dump(&vm, 16);
     printf("Execution complete in %d cycles.\n", vm.execution_times);
     return 0;
 }

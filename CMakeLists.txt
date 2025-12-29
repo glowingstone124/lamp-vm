@@ -11,4 +11,8 @@ add_executable(vm
         instruction.h
         frame.c
         io.h
-        io.c)
+        io.c
+        loadbin.c
+        loadbin.h
+        panic.c
+        panic.h)

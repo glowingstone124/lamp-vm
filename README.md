@@ -4,6 +4,10 @@
 
 Use Cmake VERSION > 4.1.
 
+## Features
+
+VM will panic if a bad instruction was executed, and a debug message will be print.
+
 ## Roadmap
 
 Implements a standard VGA-like screen.

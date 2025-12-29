@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #define REG_COUNT 8
+#define DUMP_MEM_SEEK_LEN 16
 #define MEM_SIZE 1024
 #define DATA_STACK_SIZE 256
 #define CALL_STACK_SIZE 256
@@ -20,6 +21,7 @@ typedef struct {
     int execution_times;
     int code_size;
     int halted;
+    int panic;
     unsigned int flags;
 
     int data_stack[DATA_STACK_SIZE];
@@ -36,7 +38,6 @@ enum {
     OP_ADD = 1,
     OP_SUB,
     OP_MUL,
-    OP_PRINT,
     OP_HALT,
     OP_JMP,
     OP_JZ,
@@ -56,4 +57,5 @@ enum {
     OP_IN,
     OP_OUT
 };
+void vm_dump(VM *vm, int mem_preview);
 #endif
