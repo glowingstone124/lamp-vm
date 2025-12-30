@@ -9,7 +9,7 @@ add_executable(vm
         stack.h
         fetch.h
         instruction.h
-        frame.c
+        io_devices/frame/frame.c
         io.h
         io.c
         loadbin.c

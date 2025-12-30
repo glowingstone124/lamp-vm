@@ -1,7 +1,7 @@
 #include "vm.h"
 #include "io.h"
 
-#include "frame.h"
+#include "io_devices/frame/frame.h"
 void accept_io(VM *vm, int addr, int value) {
     if (addr < 0 || addr >= IO_SIZE) return;
 

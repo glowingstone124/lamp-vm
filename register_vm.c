@@ -5,7 +5,7 @@
 
 #include "fetch.h"
 #include "vm.h"
-#include "frame.h"
+#include "io_devices/frame/frame.h"
 #include "stack.h"
 #include "instruction.h"
 #include "io.h"

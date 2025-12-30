@@ -1,7 +1,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include "frame.h"
+#include "../frame.h"
 
 #include <stdlib.h>
 #define SCREEN_WIDTH 80
