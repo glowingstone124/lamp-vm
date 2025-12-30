@@ -11,6 +11,7 @@
 #include "io.h"
 #include "panic.h"
 #include "loadbin.h"
+#include "io_devices/disk/disk.h"
 
 void set_zf(VM *vm, int value) {
     if (value == 0) {
@@ -287,6 +288,7 @@ int main() {
         vm.memory[i] = i + 1;
     }
     init_screen();
+    disk_init(&vm, "disk.img");
     vm_run(&vm);
     //vm_dump(&vm, 16);
     printf("Execution complete in %d cycles.\n", vm.execution_times);

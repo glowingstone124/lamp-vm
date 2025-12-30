@@ -15,4 +15,6 @@ add_executable(vm
         loadbin.c
         loadbin.h
         panic.c
-        panic.h)
+        panic.h
+        io_devices/disk/disk.c
+        io_devices/disk/disk.h)

@@ -6,6 +6,7 @@
 #ifndef VM_VM_H
 #define VM_VM_H
 #include <stdint.h>
+#include <stdio.h>
 
 #define REG_COUNT 8
 #define DUMP_MEM_SEEK_LEN 16
@@ -14,6 +15,14 @@
 #define CALL_STACK_SIZE 256
 #define FLAG_ZF 1
 #define IO_SIZE 256
+typedef struct {
+    FILE *fp;
+    int lba;
+    int mem_addr;
+    int count;
+    int status;
+} Disk;
+
 typedef struct {
     int regs[REG_COUNT];
     uint64_t *code;
@@ -33,6 +42,8 @@ typedef struct {
     int memory[MEM_SIZE];
 
     int io[IO_SIZE];
+
+    Disk disk;
 } VM;
 enum {
     OP_ADD = 1,
