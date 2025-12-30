@@ -16,7 +16,7 @@ const char* panic_format(const char* fmt, ...) {
 }
 
 void panic(const char* msg, VM* vm) {
-    printf("VM panic detected. %s\n @ %d clock cycle, IP = %d", msg, vm->execution_times, vm->ip);
+    printf("VM panic detected. %s\n @ %lu clock cycle, IP = %lu", msg, vm->execution_times, vm->ip);
     printf("Creating VM dump...");
     vm_dump(vm, DUMP_MEM_SEEK_LEN);
     if (vm) vm->panic = 1;

@@ -367,6 +367,7 @@ int main() {
     }
     init_screen();
     vm_run(vm);
+    //v
     //vm_dump(vm, 16);
     printf("Execution complete in %lu cycles.\n", vm->execution_times);
     vm_destroy(vm);
