@@ -19,4 +19,5 @@ static inline void disk_set_free(VM *vm) {
 
 
 void disk_init(VM *vm, const char* path);
+void disk_cmd(VM *vm, int value);
 #endif //VM_DISK_H
