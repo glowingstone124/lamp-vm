@@ -17,4 +17,22 @@ add_executable(vm
         panic.c
         panic.h
         io_devices/disk/disk.c
-        io_devices/disk/disk.h)
+        io_devices/disk/disk.h
+        interrupt.c
+        interrupt.h)
+target_compile_options(vm PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(vm PRIVATE
+            -O3
+            -march=native
+            -flto
+    )
+    target_link_options(vm PRIVATE -flto)
+else()
+    target_compile_options(vm PRIVATE -g -O0)
+endif()

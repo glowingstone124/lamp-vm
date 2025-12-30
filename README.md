@@ -15,26 +15,29 @@ Implements a standard VGA-like screen.
 Implements a virtual harddisk
 
 Isolate assembly instructions into separate files.
+
 ## Instructions
 
 ### Instructions Mapping
 
 A single instruction's length is 64bit.
 
-| Type(8)    | rd(8)       | rs1(8)           | rs2(8)  | imm(32)             |
-|------------|-------------|------------------|---------|---------------------|
-| Calc       | destination | source1          | source2 | none                |
-| LOAD       | target      | address register | /       | Immediate Value     |
-| STORE      | destination | address register | /       | Immediate Value     |
-| JMP / JZ   | /           | /                | /       | Jump Instruction Id |
-| PUSH / POP | register    | /                | /       | /                   |
-| CMP        | register    | register         | /       | Immediate Value     |
-| MOV        | register    | register         | /       | /                   |
-| MOVI       | register    | /                | /       | Immediate Value     |
-| MEMSET     | Start Addr  | Value            | /       | Length              |
-| MEMCPY     | destination | source           | /       | Length              |
-| IN         | receiver    | address          | /       | /                   |
-| OUT        | value       | address          | /       | /                   |
+| Type(8)    | rd(8)        | rs1(8)           | rs2(8)  | imm(32)             |
+|------------|--------------|------------------|---------|---------------------|
+| Calc       | destination  | source1          | source2 | none                |
+| LOAD       | target       | address register | /       | Immediate Value     |
+| STORE      | destination  | address register | /       | Immediate Value     |
+| JMP / JZ   | /            | /                | /       | Jump Instruction Id |
+| PUSH / POP | register     | /                | /       | /                   |
+| CMP        | register     | register         | /       | Immediate Value     |
+| MOV        | register     | register         | /       | /                   |
+| MOVI       | register     | /                | /       | Immediate Value     |
+| MEMSET     | Start Addr   | Value            | /       | Length              |
+| MEMCPY     | destination  | source           | /       | Length              |
+| IN         | receiver     | address          | /       | /                   |
+| OUT        | value        | address          | /       | /                   |
+| INT        | interrupt_id | /                | /       | /                   |
+
 
 ### Instructions Usage:
 

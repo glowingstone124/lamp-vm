@@ -11,6 +11,7 @@
 #include "io.h"
 #include "panic.h"
 #include "loadbin.h"
+#include "interrupt.h"
 #include "io_devices/disk/disk.h"
 
 void set_zf(VM *vm, int value) {
@@ -94,7 +95,7 @@ void vm_instruction_case(VM *vm) {
                 vm->regs[rd] = vm->memory[address];
                 set_zf(vm, vm->regs[rd]);
             } else {
-                panic(panic_format("LOAD_IND out of bounds: %d\n", address),vm);
+                panic(panic_format("LOAD_IND out of bounds: %d\n", address), vm);
             }
             break;
         }
@@ -103,7 +104,7 @@ void vm_instruction_case(VM *vm) {
             if (address >= 0 && address < MEM_SIZE) {
                 vm->memory[address] = vm->regs[rd];
             } else {
-                panic(panic_format("STORE out of bounds: %d\n", address),vm);
+                panic(panic_format("STORE out of bounds: %d\n", address), vm);
             }
             break;
         }
@@ -112,7 +113,7 @@ void vm_instruction_case(VM *vm) {
             if (address >= 0 && address < MEM_SIZE) {
                 vm->memory[address] = vm->regs[rd];
             } else {
-                panic(panic_format("STORE_IND out of bounds: %d\n", address),vm);
+                panic(panic_format("STORE_IND out of bounds: %d\n", address), vm);
             }
             break;
         }
@@ -140,7 +141,7 @@ void vm_instruction_case(VM *vm) {
                 if (addr >= 0 && addr < MEM_SIZE) {
                     vm->memory[addr] = value;
                 } else {
-                    panic(panic_format("MEMSET out of bounds; %d\n", addr),vm);
+                    panic(panic_format("MEMSET out of bounds; %d\n", addr), vm);
                 }
             }
             break;
@@ -154,7 +155,7 @@ void vm_instruction_case(VM *vm) {
                 if (daddr >= 0 && daddr < MEM_SIZE && saddr >= 0 && saddr < MEM_SIZE) {
                     vm->memory[daddr] = vm->memory[saddr];
                 } else {
-                    panic(panic_format("MEMCPY out of bounds: d=%d, s=%d\n", daddr, saddr),vm);
+                    panic(panic_format("MEMCPY out of bounds: d=%d, s=%d\n", daddr, saddr), vm);
                 }
             }
             break;
@@ -164,7 +165,7 @@ void vm_instruction_case(VM *vm) {
             if (addr >= 0 && addr < IO_SIZE) {
                 vm->regs[rd] = vm->io[addr];
             } else {
-                panic(panic_format("IN invalid IO address %d", addr),vm);
+                panic(panic_format("IN invalid IO address %d", addr), vm);
             }
             break;
         }
@@ -173,13 +174,30 @@ void vm_instruction_case(VM *vm) {
             if (addr >= 0 && addr < IO_SIZE) {
                 accept_io(vm, addr, vm->regs[rd]);
             } else {
-                panic(panic_format("OUT invalid IO address %d\n", addr),vm);
+                panic(panic_format("OUT invalid IO address %d\n", addr), vm);
+            }
+            break;
+        }
+        case OP_INT: {
+            int int_no = rd;
+            if (int_no < 0 || int_no >= IVT_SIZE) break;
+
+            int isr_ip = vm->memory[IVT_BASE + int_no];
+            if (isr_ip >= 0) {
+                CALL_PUSH(vm, vm->ip);
+                vm->ip = isr_ip;
+                vm->in_interrupt = 1;
             }
             break;
         }
 
+        case OP_IRET: {
+            vm->ip = CALL_POP(vm);
+            vm->in_interrupt = 0;
+            break;
+        }
         default: {
-            panic(panic_format("Unknown opcode %d\n", op),vm);
+            panic(panic_format("Unknown opcode %d\n", op), vm);
             return;
         }
     }
@@ -191,6 +209,7 @@ void vm_run(VM *vm) {
             printf("VM panic detected.\n");
             return;
         }
+        vm_handle_interrupts(vm);
         vm_instruction_case(vm);
     }
 }
@@ -226,47 +245,78 @@ void vm_dump(VM *vm, int mem_preview) {
 
 int main() {
     /*
-     * r0 = 0
-     * r1 = 0
-     * :loop_start
-     * cmp r1, 5
-     * if r1 == 5 jmp end
-     * r2 = memory[r1]
-     * r0 += r2
-     * r3 = 1
-     * r1 += 1
-     * jmp loop_start
-     * :end
-     * print r0
-     * halt
+     *Disk
      */
     uint64_t program[] = {
-        INST(OP_MOVI, 0, 0, 0, 0x07),
-        INST(OP_OUT, 0, SCREEN_ATTRIBUTE, 0, 0),
-        INST(OP_MOVI, 0, 0, 0, 'H'),
-        INST(OP_OUT, 0, SCREEN, 0, 0),
-        INST(OP_MOVI, 0, 0, 0, 'e'),
-        INST(OP_OUT, 0, SCREEN, 0, 0),
-        INST(OP_MOVI, 0, 0, 0, 'l'),
-        INST(OP_OUT, 0, SCREEN, 0, 0),
-        INST(OP_MOVI, 0, 0, 0, 'l'),
-        INST(OP_OUT, 0, SCREEN, 0, 0),
-        INST(OP_MOVI, 0, 0, 0, 'o'),
-        INST(OP_OUT, 0, SCREEN, 0, 0),
-        INST(OP_MOVI, 0, 0, 0, ' '),
-        INST(OP_OUT, 0, SCREEN, 0, 0),
-        INST(OP_MOVI, 0, 0, 0, 'W'),
-        INST(OP_OUT, 0, SCREEN, 0, 0),
-        INST(OP_MOVI, 0, 0, 0, 'o'),
-        INST(OP_OUT, 0, SCREEN, 0, 0),
-        INST(OP_MOVI, 0, 0, 0, 'r'),
-        INST(OP_OUT, 0, SCREEN, 0, 0),
-        INST(OP_MOVI, 0, 0, 0, 'l'),
-        INST(OP_OUT, 0, SCREEN, 0, 0),
-        INST(OP_MOVI, 0, 0, 0, 'd'),
-        INST(OP_OUT, 0, SCREEN, 0, 0),
-        INST(OP_MOVI, 0, 0, 0, '\n'),
-        INST(OP_OUT, 0, SCREEN, 0, 0),
+        INST(OP_MOVI, 0, 0, 0, 0),
+        INST(OP_MOVI, 1, 0, 0, 0),
+        INST(OP_MOVI, 3, 0, 0, 28),
+
+        INST(OP_MOVI, 2, 0, 0, 'H'),
+        INST(OP_STORE_IND, 2, 0, 1, 0),
+        INST(OP_MOVI, 2, 0, 0, 'e'),
+        INST(OP_STORE_IND, 2, 0, 1, 1),
+        INST(OP_MOVI, 2, 0, 0, 'l'),
+        INST(OP_STORE_IND, 2, 0, 1, 2),
+        INST(OP_MOVI, 2, 0, 0, 'l'),
+        INST(OP_STORE_IND, 2, 0, 1, 3),
+        INST(OP_MOVI, 2, 0, 0, 'o'),
+        INST(OP_STORE_IND, 2, 0, 1, 4),
+        INST(OP_MOVI, 2, 0, 0, ' '),
+        INST(OP_STORE_IND, 2, 0, 1, 5),
+        INST(OP_MOVI, 2, 0, 0, 'W'),
+        INST(OP_STORE_IND, 2, 0, 1, 6),
+        INST(OP_MOVI, 2, 0, 0, 'o'),
+        INST(OP_STORE_IND, 2, 0, 1, 7),
+        INST(OP_MOVI, 2, 0, 0, 'r'),
+        INST(OP_STORE_IND, 2, 0, 1, 8),
+        INST(OP_MOVI, 2, 0, 0, 'l'),
+        INST(OP_STORE_IND, 2, 0, 1, 9),
+        INST(OP_MOVI, 2, 0, 0, 'd'),
+        INST(OP_STORE_IND, 2, 0, 1, 10),
+        INST(OP_MOVI, 2, 0, 0, '!'),
+        INST(OP_STORE_IND, 2, 0, 1, 11),
+        INST(OP_MOVI, 2, 0, 0, ' '),
+        INST(OP_STORE_IND, 2, 0, 1, 12),
+        INST(OP_MOVI, 2, 0, 0, 'T'),
+        INST(OP_STORE_IND, 2, 0, 1, 13),
+        INST(OP_MOVI, 2, 0, 0, 'h'),
+        INST(OP_STORE_IND, 2, 0, 1, 14),
+        INST(OP_MOVI, 2, 0, 0, 'i'),
+        INST(OP_STORE_IND, 2, 0, 1, 15),
+        INST(OP_MOVI, 2, 0, 0, 's'),
+        INST(OP_STORE_IND, 2, 0, 1, 16),
+        INST(OP_MOVI, 2, 0, 0, ' '),
+        INST(OP_STORE_IND, 2, 0, 1, 17),
+        INST(OP_MOVI, 2, 0, 0, 'i'),
+        INST(OP_STORE_IND, 2, 0, 1, 18),
+        INST(OP_MOVI, 2, 0, 0, 's'),
+        INST(OP_STORE_IND, 2, 0, 1, 19),
+        INST(OP_MOVI, 2, 0, 0, ' '),
+        INST(OP_STORE_IND, 2, 0, 1, 20),
+        INST(OP_MOVI, 2, 0, 0, 'V'),
+        INST(OP_STORE_IND, 2, 0, 1, 21),
+        INST(OP_MOVI, 2, 0, 0, 'M'),
+        INST(OP_STORE_IND, 2, 0, 1, 22),
+        INST(OP_MOVI, 2, 0, 0, ' '),
+        INST(OP_STORE_IND, 2, 0, 1, 23),
+        INST(OP_MOVI, 2, 0, 0, 't'),
+        INST(OP_STORE_IND, 2, 0, 1, 24),
+        INST(OP_MOVI, 2, 0, 0, 'e'),
+        INST(OP_STORE_IND, 2, 0, 1, 25),
+        INST(OP_MOVI, 2, 0, 0, 's'),
+        INST(OP_STORE_IND, 2, 0, 1, 26),
+        INST(OP_MOVI, 2, 0, 0, 't'),
+        INST(OP_STORE_IND, 2, 0, 1, 27),
+        INST(OP_MOVI, 0, 0, 0, 0),
+        INST(OP_OUT, 0, DISK_MEM, 0, 0),
+        INST(OP_MOVI, 0, 0, 0, 0),
+        INST(OP_OUT, 0, DISK_LBA, 0, 0),
+        INST(OP_MOVI, 0, 0, 0, 1),
+        INST(OP_OUT, 0, DISK_COUNT, 0, 0),
+
+        INST(OP_MOVI, 0, 0, 0, DISK_CMD_WRITE),
+        INST(OP_OUT, 0, DISK_CMD, 0, 0),
         INST(OP_HALT, 0, 0, 0, 0)
     };
 
@@ -279,6 +329,7 @@ int main() {
     vm.dsp = DATA_STACK_SIZE;
     vm.csp = CALL_STACK_SIZE;
     vm.execution_times = 0;
+    disk_init(&vm, "./disk.img");
     printf(
         "Loaded VM. \n code length: %d\n Call Stack size: %d\n Data Stack size: %d \n Memory Size: %d\n Memory Head: %p\n",
         vm.code_size,
@@ -288,9 +339,9 @@ int main() {
         vm.memory[i] = i + 1;
     }
     init_screen();
-    disk_init(&vm, "disk.img");
     vm_run(&vm);
-    //vm_dump(&vm, 16);
+    vm_dump(&vm, 16);
     printf("Execution complete in %d cycles.\n", vm.execution_times);
+
     return 0;
 }

@@ -15,6 +15,10 @@
 #define CALL_STACK_SIZE 256
 #define FLAG_ZF 1
 #define IO_SIZE 256
+#define IVT_BASE 0x0
+#define IVT_SIZE 256
+#define IVT_ENTRY_SIZE 1
+
 typedef struct {
     FILE *fp;
     int lba;
@@ -44,6 +48,9 @@ typedef struct {
     int io[IO_SIZE];
 
     Disk disk;
+
+    int interrupt_flags[IVT_SIZE];
+    int in_interrupt;
 } VM;
 enum {
     OP_ADD = 1,
@@ -66,7 +73,9 @@ enum {
     OP_MEMSET,
     OP_MEMCPY,
     OP_IN,
-    OP_OUT
+    OP_OUT,
+    OP_INT,
+    OP_IRET
 };
 void vm_dump(VM *vm, int mem_preview);
 #endif
