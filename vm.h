@@ -10,7 +10,6 @@
 
 #define REG_COUNT 8
 #define DUMP_MEM_SEEK_LEN 16
-#define MEM_SIZE 1024
 #define DATA_STACK_SIZE 256
 #define CALL_STACK_SIZE 256
 #define FLAG_ZF 1
@@ -30,9 +29,9 @@ typedef struct {
 typedef struct {
     int regs[REG_COUNT];
     uint64_t *code;
-    int ip;
-    int execution_times;
-    int code_size;
+    size_t ip;
+    size_t execution_times;
+    size_t code_size;
     int halted;
     int panic;
     unsigned int flags;
@@ -43,7 +42,8 @@ typedef struct {
     int call_stack[CALL_STACK_SIZE];
     int csp;
 
-    int memory[MEM_SIZE];
+    int *memory;
+    size_t memory_size;
 
     int io[IO_SIZE];
 

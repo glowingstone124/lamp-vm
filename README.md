@@ -6,7 +6,14 @@ Use Cmake VERSION > 4.1.
 
 ## Features
 
+### Panic
+
 VM will panic if a bad instruction was executed, and a debug message will be print.
+
+
+### Interrupt Tables(IVT) Mapping
+
+In default, LampVM supports 256 interrupt ids. This vector starts at memory address 0x0, since memory is actually 
 
 ## Roadmap
 
@@ -37,7 +44,7 @@ A single instruction's length is 64bit.
 | IN         | receiver     | address          | /       | /                   |
 | OUT        | value        | address          | /       | /                   |
 | INT        | interrupt_id | /                | /       | /                   |
-
+| IRET       | /            | /                | /       | /                   |
 
 ### Instructions Usage:
 
@@ -70,3 +77,7 @@ MEMCPY: Copy a segment of memory to another destination.
 IN: Use rd register to receive a data from IO address rs1.
 
 OUT: Send rd register's data to IO address rs1.
+
+INT: Submit a software-cause interrupt
+
+IRET: Return from a interrupt.

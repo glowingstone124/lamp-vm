@@ -1,7 +1,6 @@
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
-#include <stdarg.h>
+#include <string.h>
 
 #include "fetch.h"
 #include "vm.h"
@@ -13,6 +12,8 @@
 #include "loadbin.h"
 #include "interrupt.h"
 #include "io_devices/disk/disk.h"
+
+const size_t MEM_SIZE = 1048576; //4MB
 
 void set_zf(VM *vm, int value) {
     if (value == 0) {
@@ -77,7 +78,7 @@ void vm_instruction_case(VM *vm) {
             break;
         }
         case OP_LOAD: {
-            int address = rs1 + imm;
+            const int address = rs1 + imm;
             if (address >= 0 && address < MEM_SIZE) {
                 vm->regs[rd] = vm->memory[address];
                 set_zf(vm, vm->regs[rd]);
@@ -90,7 +91,7 @@ void vm_instruction_case(VM *vm) {
             break;
         }
         case OP_LOAD_IND: {
-            int address = vm->regs[rs1] + imm;
+            const int address = vm->regs[rs1] + imm;
             if (address >= 0 && address < MEM_SIZE) {
                 vm->regs[rd] = vm->memory[address];
                 set_zf(vm, vm->regs[rd]);
@@ -100,7 +101,7 @@ void vm_instruction_case(VM *vm) {
             break;
         }
         case OP_STORE: {
-            int address = rs1 + imm;
+            const int address = rs1 + imm;
             if (address >= 0 && address < MEM_SIZE) {
                 vm->memory[address] = vm->regs[rd];
             } else {
@@ -109,7 +110,7 @@ void vm_instruction_case(VM *vm) {
             break;
         }
         case OP_STORE_IND: {
-            int address = vm->regs[rs1] + imm;
+            const int address = vm->regs[rs1] + imm;
             if (address >= 0 && address < MEM_SIZE) {
                 vm->memory[address] = vm->regs[rd];
             } else {
@@ -118,8 +119,8 @@ void vm_instruction_case(VM *vm) {
             break;
         }
         case OP_CMP: {
-            int val1 = vm->regs[rd];
-            int val2 = (imm != 0) ? imm : vm->regs[rs1];
+            const int val1 = vm->regs[rd];
+            const int val2 = (imm != 0) ? imm : vm->regs[rs1];
             set_zf(vm, val1 - val2);
             break;
         }
@@ -134,10 +135,10 @@ void vm_instruction_case(VM *vm) {
             break;
         }
         case OP_MEMSET: {
-            int base = vm->regs[rd];
-            int value = vm->regs[rs1];
+            const int base = vm->regs[rd];
+            const int value = vm->regs[rs1];
             for (int i = 0; i < imm; i++) {
-                int addr = base + i;
+                const int addr = base + i;
                 if (addr >= 0 && addr < MEM_SIZE) {
                     vm->memory[addr] = value;
                 } else {
@@ -147,11 +148,11 @@ void vm_instruction_case(VM *vm) {
             break;
         }
         case OP_MEMCPY: {
-            int dest = vm->regs[rd];
-            int src = vm->regs[rs1];
+            const int dest = vm->regs[rd];
+            const int src = vm->regs[rs1];
             for (int i = 0; i < imm; i++) {
-                int daddr = dest + i;
-                int saddr = src + i;
+                const int daddr = dest + i;
+                const int saddr = src + i;
                 if (daddr >= 0 && daddr < MEM_SIZE && saddr >= 0 && saddr < MEM_SIZE) {
                     vm->memory[daddr] = vm->memory[saddr];
                 } else {
@@ -161,7 +162,7 @@ void vm_instruction_case(VM *vm) {
             break;
         }
         case OP_IN: {
-            int addr = rs1;
+            const int addr = rs1;
             if (addr >= 0 && addr < IO_SIZE) {
                 vm->regs[rd] = vm->io[addr];
             } else {
@@ -170,7 +171,7 @@ void vm_instruction_case(VM *vm) {
             break;
         }
         case OP_OUT: {
-            int addr = rs1;
+            const int addr = rs1;
             if (addr >= 0 && addr < IO_SIZE) {
                 accept_io(vm, addr, vm->regs[rd]);
             } else {
@@ -179,10 +180,10 @@ void vm_instruction_case(VM *vm) {
             break;
         }
         case OP_INT: {
-            int int_no = rd;
+            const int int_no = rd;
             if (int_no < 0 || int_no >= IVT_SIZE) break;
 
-            int isr_ip = vm->memory[IVT_BASE + int_no];
+            const int isr_ip = vm->memory[IVT_BASE + int_no];
             if (isr_ip >= 0) {
                 CALL_PUSH(vm, vm->ip);
                 vm->ip = isr_ip;
@@ -239,8 +240,41 @@ void vm_dump(VM *vm, int mem_preview) {
     for (int i = 0; i < mem_preview && i < MEM_SIZE; i++) {
         printf("[%d] = %d\n", i, vm->memory[i]);
     }
-    printf("IP = %d\n", vm->ip);
+    printf("IP = %lu\n", vm->ip);
     printf("ZF = %d\n", (vm->flags & FLAG_ZF) != 0);
+}
+
+VM *vm_create(size_t memory_size, uint64_t* program, size_t program_size) {
+    VM *vm = malloc(sizeof(VM));
+    if (!vm) return NULL;
+
+    vm->ip = 0;
+    vm->execution_times = 0;
+    vm->code = program;
+    vm->code_size = program_size;
+    vm->halted = 0;
+    vm->panic = 0;
+    vm->flags = 0;
+    vm->dsp = 0;
+    vm->csp = 0;
+    vm->in_interrupt = 0;
+    vm->memory_size = memory_size;
+
+    vm->memory = malloc(memory_size * sizeof(int));
+    if (!vm->memory) {
+        free(vm);
+        return NULL;
+    }
+    memset(vm->memory, 0, memory_size * sizeof(int));
+
+    return vm;
+}
+
+
+void vm_destroy(VM *vm) {
+    if (!vm) return;
+    if (vm->memory) free(vm->memory);
+    free(vm);
 }
 
 int main() {
@@ -319,29 +353,22 @@ int main() {
         INST(OP_OUT, 0, DISK_CMD, 0, 0),
         INST(OP_HALT, 0, 0, 0, 0)
     };
-
-
-    VM vm = {0};
-    vm.code = program;
-    vm.code_size = sizeof(program) / sizeof(program[0]);
-    vm.ip = 0;
-    vm.flags = 0;
-    vm.dsp = DATA_STACK_SIZE;
-    vm.csp = CALL_STACK_SIZE;
-    vm.execution_times = 0;
-    disk_init(&vm, "./disk.img");
+    size_t program_size = sizeof(program) / sizeof(program[0]);
+    VM *vm = vm_create(MEM_SIZE, program, program_size);
+    disk_init(vm, "./disk.img");
+    init_ivt(vm);
     printf(
-        "Loaded VM. \n code length: %d\n Call Stack size: %d\n Data Stack size: %d \n Memory Size: %d\n Memory Head: %p\n",
-        vm.code_size,
-        CALL_STACK_SIZE,DATA_STACK_SIZE, MEM_SIZE, &vm.memory[0]);
+        "Loaded VM. \n code length: %lu\n Call Stack size: %d\n Data Stack size: %d \n Memory Size: %lu\n Memory Head: %p\n",
+        vm->code_size,
+        CALL_STACK_SIZE,DATA_STACK_SIZE,MEM_SIZE, (void*)vm->memory);
 
     for (int i = 0; i < 5; i++) {
-        vm.memory[i] = i + 1;
+        vm->memory[i] = i + 1;
     }
     init_screen();
-    vm_run(&vm);
-    vm_dump(&vm, 16);
-    printf("Execution complete in %d cycles.\n", vm.execution_times);
-
+    vm_run(vm);
+    //vm_dump(vm, 16);
+    printf("Execution complete in %lu cycles.\n", vm->execution_times);
+    vm_destroy(vm);
     return 0;
 }

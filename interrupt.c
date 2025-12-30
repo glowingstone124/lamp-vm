@@ -34,7 +34,7 @@ void init_ivt(VM *vm) {
 void register_isr(VM *vm, int int_no, int isr_ip) {
     if (int_no < 0 || int_no >= IVT_SIZE) {
         panic(panic_format("Invalid interrupt number %d\n", int_no), vm);
-        return;
+        return;;
     }
     vm->memory[IVT_BASE + int_no] = isr_ip;
 }
