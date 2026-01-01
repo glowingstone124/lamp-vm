@@ -21,6 +21,7 @@ add_executable(vm
         interrupt.c
         interrupt.h
         io_devices/frame/terminalin.c)
+
 target_compile_options(vm PRIVATE
         -Wall
         -Wextra
@@ -28,6 +29,7 @@ target_compile_options(vm PRIVATE
 )
 
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_definitions(vm PRIVATE RELEASE_BUILD)
     target_compile_options(vm PRIVATE
             -O3
             -march=native
@@ -35,5 +37,6 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     )
     target_link_options(vm PRIVATE -flto)
 else()
+    target_compile_definitions(vm PRIVATE DEBUG_BUILD)
     target_compile_options(vm PRIVATE -g -O0)
 endif()
