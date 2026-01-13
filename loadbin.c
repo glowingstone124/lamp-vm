@@ -2,8 +2,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-uint64_t* load_program(const char* filename, size_t *out_size)
-{
+uint64_t *load_program(const char *filename, size_t *out_size) {
     FILE *fp = fopen(filename, "rb");
     if (!fp) {
         perror("fopen");
@@ -21,7 +20,7 @@ uint64_t* load_program(const char* filename, size_t *out_size)
     }
 
     size_t num_insts = file_size / sizeof(uint64_t);
-    uint64_t* program = malloc(file_size);
+    uint64_t *program = malloc(file_size);
     if (!program) {
         perror("malloc");
         fclose(fp);

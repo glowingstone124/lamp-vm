@@ -4,5 +4,5 @@
 
 #ifndef VM_LOADBIN_H
 #define VM_LOADBIN_H
-uint64_t* load_program(const char* filename, size_t *out_size);
-#endif //VM_LOADBIN_H
+uint64_t *load_program(const char *filename, size_t *out_size);
+#endif // VM_LOADBIN_H

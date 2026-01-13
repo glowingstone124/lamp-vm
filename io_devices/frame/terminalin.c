@@ -21,14 +21,13 @@ void enable_raw_mode() {
     fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK);
 }
 
-void disable_raw_mode() {
-    tcsetattr(STDIN_FILENO, TCSANOW, &orig_termios);
-}
+void disable_raw_mode() { tcsetattr(STDIN_FILENO, TCSANOW, &orig_termios); }
 
 int get_key_nonblocking() {
     char c;
     int n = read(STDIN_FILENO, &c, 1);
-    if (n == 1) return c;
+    if (n == 1)
+        return c;
     return -1;
 }
 

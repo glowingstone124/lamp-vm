@@ -10,8 +10,8 @@
 
 #include <unistd.h>
 
-void disk_init(VM *vm, const char* path) {
-    printf("cwd: %s\n", getcwd(NULL,0));
+void disk_init(VM *vm, const char *path) {
+    printf("cwd: %s\n", getcwd(NULL, 0));
 
     vm->disk.fp = fopen(path, "r+b");
     if (!vm->disk.fp) {
@@ -41,24 +41,13 @@ void disk_init(VM *vm, const char* path) {
 }
 
 void disk_read(VM *vm) {
-    fseek(vm->disk.fp,
-               vm->disk.lba * DISK_SECTOR_SIZE,
-               SEEK_SET);
-    fread(&vm->memory[vm->disk.mem_addr],
-          DISK_SECTOR_SIZE,
-          vm->disk.count,
-          vm->disk.fp
-    );
+    fseek(vm->disk.fp, vm->disk.lba * DISK_SECTOR_SIZE, SEEK_SET);
+    fread(&vm->memory[vm->disk.mem_addr], DISK_SECTOR_SIZE, vm->disk.count, vm->disk.fp);
 }
 
 void disk_write(const VM *vm) {
-    fseek(vm->disk.fp,
-              vm->disk.lba * DISK_SECTOR_SIZE,
-              SEEK_SET);
-    fwrite(&vm->memory[vm->disk.mem_addr],
-           DISK_SECTOR_SIZE,
-           vm->disk.count,
-           vm->disk.fp);
+    fseek(vm->disk.fp, vm->disk.lba * DISK_SECTOR_SIZE, SEEK_SET);
+    fwrite(&vm->memory[vm->disk.mem_addr], DISK_SECTOR_SIZE, vm->disk.count, vm->disk.fp);
     fflush(vm->disk.fp);
     const int fd = fileno(vm->disk.fp);
     if (fd >= 0) {
@@ -75,4 +64,3 @@ void disk_cmd(VM *vm, const int value) {
     }
     disk_set_free(vm);
 }
-

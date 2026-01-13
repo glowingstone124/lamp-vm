@@ -23,4 +23,4 @@ int vga_display_init();
 void display_poll_events(VM *vm);
 void display_update(VM *vm);
 void display_shutdown();
-#endif //VM_DISPLAY_H
+#endif // VM_DISPLAY_H

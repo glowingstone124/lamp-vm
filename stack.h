@@ -45,4 +45,4 @@ static inline uint64_t call_pop(VM *vm) {
     return val;
 }
 
-#endif //VM_STACK_H
+#endif // VM_STACK_H

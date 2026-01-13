@@ -41,7 +41,7 @@ uint64_t vm_read64(VM *vm, vm_addr_t addr) {
 }
 
 void vm_write8(VM *vm, vm_addr_t addr, uint8_t value) {
-    //intercept mmio request
+    // intercept mmio request
     size_t fb_base = FB_BASE(vm->memory_size);
     if (addr >= fb_base && addr < fb_base + FB_SIZE) {
         vm->fb[addr - fb_base] = value;
