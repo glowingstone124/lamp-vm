@@ -7,8 +7,7 @@ done if you want to compile it by yourself.
 
 ## Features
 
-I am currently working on a assembler writing in Rust to provide a better environment for developing softwares on this
-platform.
+Assembler could be found at (lampvm-assembler)[https://github.com/glowingstone124/lampvm-toolchain]
 
 ### Panic
 
