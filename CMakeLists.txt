@@ -27,6 +27,7 @@ set(SOURCES
         io_devices/sysinfo/sysinfo_mmio_register.c
         io_devices/time/timer.c
         float.c
+        selftest.c
 )
 
 add_executable(vm ${SOURCES})

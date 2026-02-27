@@ -35,7 +35,113 @@ All instructions use a unified 64-bit format:
 | rs2    | 8 bit  | Source register 2          |
 | imm    | 32 bit | Immediate field (instruction-defined interpretation) |
 
-Unused fields **must be set to 0**.
+### Unused Field Rules (ABI-stable)
+
+- **Encoding rule**: assemblers/encoders **must** write `0` to fields unused by an opcode.
+- **Execution rule**: for all currently-defined opcodes, unused fields are **ignored** and must not change architectural behavior.
+- **Tooling rule**: validators/disassemblers may warn on non-zero unused fields, but execution compatibility follows the execution rule above.
+- **Extension rule**: future ISA revisions must not repurpose currently-unused fields of existing opcodes.
+
+---
+
+### Opcode Assignment Table (ABI-stable)
+
+The opcode-to-mnemonic mapping below is part of the ISA ABI and must remain stable.
+
+| Opcode | Mnemonic |
+|--------|----------|
+| `0x01` | `ADD` |
+| `0x02` | `SUB` |
+| `0x03` | `MUL` |
+| `0x04` | `DIV` |
+| `0x05` | `HALT` |
+| `0x06` | `JMP` |
+| `0x07` | `JZ` |
+| `0x08` | `PUSH` |
+| `0x09` | `POP` |
+| `0x0A` | `CALL` |
+| `0x0B` | `RET` |
+| `0x0C` | `LOAD` |
+| `0x0D` | `LOAD32` |
+| `0x0E` | `LOADX32` |
+| `0x0F` | `STORE` |
+| `0x10` | `STORE32` |
+| `0x11` | `STOREX32` |
+| `0x12` | `CMP` |
+| `0x13` | `CMPI` |
+| `0x14` | `MOV` |
+| `0x15` | `MOVI` |
+| `0x16` | `MEMSET` |
+| `0x17` | `MEMCPY` |
+| `0x18` | `IN` |
+| `0x19` | `OUT` |
+| `0x1A` | `INT` |
+| `0x1B` | `IRET` |
+| `0x1C` | `MOD` |
+| `0x1D` | `AND` |
+| `0x1E` | `OR` |
+| `0x1F` | `XOR` |
+| `0x20` | `NOT` |
+| `0x21` | `SHL` |
+| `0x22` | `SHR` |
+| `0x23` | `SAR` |
+| `0x24` | `JNZ` |
+| `0x25` | `JG` |
+| `0x26` | `JGE` |
+| `0x27` | `JL` |
+| `0x28` | `JLE` |
+| `0x29` | `JC` |
+| `0x2A` | `JNC` |
+| `0x2B` | `FADD` |
+| `0x2C` | `FSUB` |
+| `0x2D` | `FMUL` |
+| `0x2E` | `FDIV` |
+| `0x2F` | `FNEG` |
+| `0x30` | `FABS` |
+| `0x31` | `FSQRT` |
+| `0x32` | `FCMP` |
+| `0x33` | `ITOF` |
+| `0x34` | `FTOI` |
+| `0x35` | `FLOAD32` |
+| `0x36` | `FSTORE32` |
+| `0x37` | `INC` |
+| `0x38` | `ADDI` |
+| `0x39` | `SUBI` |
+| `0x3A` | `ANDI` |
+| `0x3B` | `ORI` |
+| `0x3C` | `XORI` |
+| `0x3D` | `SHLI` |
+| `0x3E` | `SHRI` |
+| `0x3F` | `CAS` |
+| `0x40` | `XADD` |
+| `0x41` | `XCHG` |
+| `0x42` | `LDAR` |
+| `0x43` | `STLR` |
+| `0x44` | `FENCE` |
+| `0x45` | `PAUSE` |
+| `0x46` | `STARTAP` |
+| `0x47` | `IPI` |
+| `0x48` | `CPUID` |
+| `0x49` | `CALLR` |
+| `0x4A` | `RJMP` |
+| `0x4B` | `RCALL` |
+| `0x4C` | `RJZ` |
+| `0x4D` | `RJNZ` |
+| `0x4E` | `ROL` |
+| `0x4F` | `ROR` |
+| `0x50` | `ROLI` |
+| `0x51` | `RORI` |
+| `0x52` | `LOAD16` |
+| `0x53` | `STORE16` |
+| `0x54` | `LOADS8` |
+| `0x55` | `LOADS16` |
+| `0x56` | `RJG` |
+| `0x57` | `RJGE` |
+| `0x58` | `RJL` |
+| `0x59` | `RJLE` |
+| `0x5A` | `RJC` |
+| `0x5B` | `RJNC` |
+| `0x5C` | `INTI` |
 
 ---
 
@@ -125,7 +231,10 @@ This rule is fixed and applies to all current and future instructions.
 - `MOV`
 - `MOVI`
 - `LOAD`
+- `LOAD16`
 - `LOAD32`
+- `LOADS8`
+- `LOADS16`
 - `LOADX32`
 - `POP`
 - `FTOI` (when input is finite and in-range)
@@ -135,6 +244,7 @@ This rule is fixed and applies to all current and future instructions.
 ### Instructions that do **not guarantee FLAGS state**
 
 - `STORE`
+- `STORE16`
 - `STORE32`
 - `STOREX32`
 - `FSTORE32`
@@ -142,6 +252,7 @@ This rule is fixed and applies to all current and future instructions.
 - `RCALL`
 - `RET`
 - `INT`
+- `INTI`
 - `IRET`
 - `HALT`
 - `MEMSET`
@@ -536,12 +647,26 @@ Relative call:
 - pushes return address (next instruction) to call stack
 - jumps to `current_instruction_address + imm`
 
-### RJZ imm / RJNZ imm
+### CALLR rd
+
+Register-indirect call:
+
+- pushes return address (next instruction) to call stack
+- jumps to absolute VM address in `rd`
+- `rs1`, `rs2`, `imm` are unused (ignored by execution)
+
+### Relative Conditional Jumps
 
 Relative conditional jumps:
 
 - `RJZ`: take branch when `ZF == 1`
 - `RJNZ`: take branch when `ZF == 0`
+- `RJC`: take branch when `CF == 1`
+- `RJNC`: take branch when `CF == 0`
+- `RJG`: take branch when `ZF == 0 and SF == OF`
+- `RJGE`: take branch when `SF == OF`
+- `RJL`: take branch when `SF != OF`
+- `RJLE`: take branch when `ZF == 1 or SF != OF`
 
 ---
 
@@ -551,6 +676,29 @@ Relative conditional jumps:
 
 - Reads 8-bit value
 - Zero-extends to 32 bit
+
+---
+
+### LOAD16 rd, [rs1 + imm]
+
+- Reads 16-bit value
+- Zero-extends to 32 bit
+- Address must be 2-byte aligned
+
+---
+
+### LOADS8 rd, [rs1 + imm]
+
+- Reads 8-bit value
+- Sign-extends to 32 bit
+
+---
+
+### LOADS16 rd, [rs1 + imm]
+
+- Reads 16-bit value
+- Sign-extends to 32 bit
+- Address must be 2-byte aligned
 
 ---
 
@@ -567,9 +715,11 @@ Indexed 32-bit load.
 
 ---
 
-### STORE / STORE32 / STOREX32
+### STORE / STORE16 / STORE32 / STOREX32
 
 Write operations do not modify FLAGS.
+
+`STORE16` requires 2-byte aligned address.
 
 ---
 
@@ -596,6 +746,22 @@ All three stacks are implemented in memory-mapped stack regions (`CALL_STACK_BAS
 
 ---
 
+### Reserved Interrupt Numbers (Platform ABI)
+
+The following interrupt numbers are currently reserved by the LampVM platform environment:
+
+| `int_no` | Name | Meaning |
+|----------|------|---------|
+| `0x00` | `INT_KEYBOARD` | Keyboard input interrupt |
+| `0x01` | `INT_DIVIDE_BY_ZERO` | Raised by `DIV`/`MOD` when divisor is zero |
+| `0x02` | `INT_DISK_COMPLETE` | Disk device completion interrupt |
+| `0x03` | `INT_SERIAL` | Serial RX/TX interrupt |
+| `0x04` | `INT_TIMER` | Timer interrupt |
+
+Unassigned vectors are available for software/platform use unless reserved by a future platform ABI revision.
+
+---
+
 ### ISR ABI (Fixed)
 
 On interrupt entry, VM automatically:
@@ -609,7 +775,10 @@ ISR must return using `IRET`.
 
 Nested interrupts are **not supported**.
 
-Software interrupts are raised with `INT rd`, where `rd` provides `int_no`.
+Software interrupts are raised with:
+
+- `INT rd`, where `rd` provides `int_no`
+- `INTI imm`, where `imm` provides `int_no` (other fields are ignored)
 
 ---
 
@@ -683,6 +852,7 @@ The following are undefined and may cause VM panic:
 - Out-of-range memory access
 - Invalid IO port
 - Misaligned LOAD32/STORE32
+- Misaligned LOAD16/STORE16/LOADS16
 - Misaligned atomic address (`CAS/XADD/XCHG/LDAR/STLR`)
 
 ---

@@ -325,6 +325,17 @@ enum {
     OP_ROR = 0x4F,
     OP_ROLI = 0x50,
     OP_RORI = 0x51,
+    OP_LOAD16 = 0x52,
+    OP_STORE16 = 0x53,
+    OP_LOADS8 = 0x54,
+    OP_LOADS16 = 0x55,
+    OP_RJG = 0x56,
+    OP_RJGE = 0x57,
+    OP_RJL = 0x58,
+    OP_RJLE = 0x59,
+    OP_RJC = 0x5A,
+    OP_RJNC = 0x5B,
+    OP_INTI = 0x5C,
 };
 
 void vm_dump(const VM *vm, int mem_preview);
