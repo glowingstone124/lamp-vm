@@ -9,39 +9,6 @@
 #include "panic.h"
 #include "vm.h"
 
-static inline int in_ram(VM *vm, vm_addr_t addr, size_t size) {
-    return addr + size <= vm->memory_size;
-}
-
-static inline _Atomic uint32_t *atomic32_ptr_or_panic(VM *vm, vm_addr_t addr, const char *op_name) {
-    if ((addr % _Alignof(_Atomic uint32_t)) != 0) {
-        panic(panic_format("%s unaligned address: 0x%08x", op_name, addr), vm);
-        return NULL;
-    }
-    if (!in_ram(vm, addr, sizeof(uint32_t))) {
-        panic(panic_format("%s out of bounds: 0x%08x", op_name, addr), vm);
-        return NULL;
-    }
-    if (find_mmio(vm, addr) != NULL) {
-        panic(panic_format("%s does not support MMIO addr: 0x%08x", op_name, addr), vm);
-        return NULL;
-    }
-    return (_Atomic uint32_t *)(void *)(&vm->memory[addr]);
-}
-
-static inline int fb_byte_index(VM *vm, vm_addr_t addr, size_t *out_index) {
-    const size_t fb_base = FB_BASE(vm->memory_size);
-    if (addr >= fb_base && addr < fb_base + FB_SIZE) {
-        *out_index = (size_t)(addr - fb_base);
-        return 1;
-    }
-    if (addr >= FB_LEGACY_BASE && addr < FB_LEGACY_BASE + FB_SIZE) {
-        *out_index = (size_t)(addr - FB_LEGACY_BASE);
-        return 1;
-    }
-    return 0;
-}
-
 #ifdef VM_MEMCHECK
 static inline void memcheck_align(VM *vm, vm_addr_t addr, size_t align, const char *op) {
     if ((addr % align) != 0) {
@@ -87,13 +54,7 @@ uint32_t vm_read32(VM *vm, vm_addr_t addr) {
         panic(panic_format("READ32 out of bounds: 0x%08x", addr), vm);
         return 0;
     }
-
-    uint32_t v = 0;
-    v |= (uint32_t)vm->memory[addr + 0] << 0;
-    v |= (uint32_t)vm->memory[addr + 1] << 8;
-    v |= (uint32_t)vm->memory[addr + 2] << 16;
-    v |= (uint32_t)vm->memory[addr + 3] << 24;
-    return v;
+    return load_le32(&vm->memory[addr]);
 }
 
 uint64_t vm_read64(VM *vm, vm_addr_t addr) {
@@ -199,11 +160,7 @@ void vm_write32(VM *vm, vm_addr_t addr, uint32_t value) {
         panic(panic_format("WRITE32 out of bounds: 0x%08x", addr), vm);
         return;
     }
-
-    vm->memory[addr + 0] = (uint8_t)((value >> 0) & 0xFF);
-    vm->memory[addr + 1] = (uint8_t)((value >> 8) & 0xFF);
-    vm->memory[addr + 2] = (uint8_t)((value >> 16) & 0xFF);
-    vm->memory[addr + 3] = (uint8_t)((value >> 24) & 0xFF);
+    store_le32(&vm->memory[addr], value);
 }
 
 void vm_write64(VM *vm, vm_addr_t addr, uint64_t value) {
