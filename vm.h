@@ -38,6 +38,7 @@ typedef struct VM_Debug VM_Debug;
 
 #define IVT_SIZE 256
 #define IRQ_BITMAP_WORDS (IVT_SIZE / 64)
+#define IRQ_BITMAP_WORDS32 (IVT_SIZE / 32)
 #define IVT_ENTRY_SIZE 8
 #define CALL_STACK_SIZE 256
 #define DATA_STACK_SIZE 256
@@ -71,6 +72,7 @@ typedef struct VM_Debug VM_Debug;
 #define SYSINFO_FEATURE_DISK_IO (1u << 2)
 #define SYSINFO_FEATURE_SMP (1u << 3)
 #define SYSINFO_FEATURE_TIMER_IRQ (1u << 4)
+#define SYSINFO_FEATURE_INTC_MMIO (1u << 5)
 #define SYSINFO_REG_MAGIC 0x00u
 #define SYSINFO_REG_VENDOR0 0x04u
 #define SYSINFO_REG_MEM_BYTES_LO 0x14u
@@ -92,6 +94,13 @@ typedef struct VM_Debug VM_Debug;
 #define SYSINFO_REG_BOOT_REALTIME_NS_LO 0x54u
 #define SYSINFO_REG_BOOT_REALTIME_NS_HI 0x58u
 #define SYSINFO_SIZE 0x5Cu
+
+#define INTC_BASE 0x0074D000u
+#define INTC_REG_PENDING 0x000u
+#define INTC_REG_ENABLE 0x040u
+#define INTC_REG_PRIORITY 0x100u
+#define INTC_REG_EOI 0x500u
+#define INTC_MMIO_SIZE 0x504u
 typedef uint32_t vm_addr_t;
 
 typedef struct {
@@ -163,6 +172,8 @@ struct VM{
 
     Disk disk;
     atomic_uint_fast64_t *interrupt_bitmap;
+    atomic_uint_fast64_t *interrupt_enable_bitmap;
+    atomic_uchar interrupt_priority[IVT_SIZE];
 
     uint64_t start_realtime_ns;
     uint64_t start_monotonic_ns;

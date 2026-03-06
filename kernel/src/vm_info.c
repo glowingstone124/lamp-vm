@@ -96,6 +96,11 @@ static void vm_info_log_features(uint32_t features) {
         kputs("TIMER_IRQ");
         first = 0;
     }
+    if (features & BOOTINFO_FEATURE_INTC_MMIO) {
+        if (!first) kputc((uint32_t)' ');
+        kputs("INTC_MMIO");
+        first = 0;
+    }
     if (first) {
         kputs("none");
     }

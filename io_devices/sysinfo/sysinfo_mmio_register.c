@@ -19,7 +19,8 @@ static uint32_t sysinfo_feature_bits(const VM *vm) {
     uint32_t bits = SYSINFO_FEATURE_TIME_MMIO |
                     SYSINFO_FEATURE_FB_MMIO |
                     SYSINFO_FEATURE_DISK_IO |
-                    SYSINFO_FEATURE_TIMER_IRQ;
+                    SYSINFO_FEATURE_TIMER_IRQ |
+                    SYSINFO_FEATURE_INTC_MMIO;
     if (vm->smp_cores > 1) {
         bits |= SYSINFO_FEATURE_SMP;
     }

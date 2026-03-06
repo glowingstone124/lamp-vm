@@ -19,6 +19,7 @@
 #include "io_devices/disk/disk.h"
 #include "io_devices/frame/frame.h"
 #include "io_devices/sysinfo/sysinfo_mmio_register.h"
+#include "io_devices/intc/intc_mmio_register.h"
 #include "io_devices/time/time_mmio_register.h"
 #include "io_devices/vga_display/display.h"
 #include "io_devices/vga_display/vga_mmio_register.h"
@@ -37,8 +38,7 @@ typedef struct {
 
 _Thread_local VCPU *vm_tls_vcpu = NULL;
 
-void update_zf_sf(VM *vm, int32_t result) {
-    VCPU *cpu = vm_current_cpu(vm);
+void update_zf_sf(VM *vm, int32_t result,VCPU *cpu) {
     if (!cpu)
         return;
     if (result == 0)
@@ -52,8 +52,7 @@ void update_zf_sf(VM *vm, int32_t result) {
         cpu->flags &= ~FLAG_SF;
 }
 
-void update_add_flags(VM *vm, int32_t a, int32_t b, int32_t result) {
-    VCPU *cpu = vm_current_cpu(vm);
+void update_add_flags(VM *vm, int32_t a, int32_t b, int32_t result, VCPU *cpu) {
     if (!cpu)
         return;
     if ((uint32_t) a + (uint32_t) b < (uint32_t) a)
@@ -66,11 +65,10 @@ void update_add_flags(VM *vm, int32_t a, int32_t b, int32_t result) {
     else
         cpu->flags &= ~FLAG_OF;
 
-    update_zf_sf(vm, result);
+    update_zf_sf(vm, result,cpu);
 }
 
-void update_sub_flags(VM *vm, int32_t a, int32_t b, int32_t result) {
-    VCPU *cpu = vm_current_cpu(vm);
+void update_sub_flags(VM *vm, int32_t a, int32_t b, int32_t result,VCPU *cpu) {
     if (!cpu)
         return;
     if ((uint32_t) a < (uint32_t) b)
@@ -83,23 +81,21 @@ void update_sub_flags(VM *vm, int32_t a, int32_t b, int32_t result) {
     else
         cpu->flags &= ~FLAG_OF;
 
-    update_zf_sf(vm, result);
+    update_zf_sf(vm, result, cpu);
 }
 
-static inline void clear_cf_of(VM *vm) {
-    VCPU *cpu = vm_current_cpu(vm);
+static inline void clear_cf_of(VM *vm,VCPU *cpu) {
     if (!cpu)
         return;
     cpu->flags &= ~(FLAG_CF | FLAG_OF);
 }
 
-static inline void update_logic_flags(VM *vm, int32_t result) {
-    clear_cf_of(vm);
-    update_zf_sf(vm, result);
+static inline void update_logic_flags(VM *vm, int32_t result,VCPU *cpu) {
+    clear_cf_of(vm,cpu);
+    update_zf_sf(vm, result,cpu);
 }
 
-static inline void set_cas_flags(VM *vm, int success) {
-    VCPU *cpu = vm_current_cpu(vm);
+static inline void set_cas_flags(VM *vm, int success,VCPU *cpu) {
     if (!cpu)
         return;
     cpu->flags &= ~(FLAG_ZF | FLAG_SF | FLAG_CF | FLAG_OF);
@@ -157,7 +153,7 @@ void vm_instruction_case(VM *vm) {
             const int32_t b = cpu->regs[rs2];
             const int32_t res = a + b;
             cpu->regs[rd] = res;
-            update_add_flags(vm, a, b, res);
+            update_add_flags(vm, a, b, res, cpu);
             break;
         }
 
@@ -166,12 +162,12 @@ void vm_instruction_case(VM *vm) {
             int32_t b = cpu->regs[rs2];
             int32_t res = a - b;
             cpu->regs[rd] = res;
-            update_sub_flags(vm, a, b, res);
+            update_sub_flags(vm, a, b, res, cpu);
             break;
         }
         case OP_MUL: {
             cpu->regs[rd] = cpu->regs[rs1] * cpu->regs[rs2];
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd], cpu);
             break;
         }
         case OP_HALT: {
@@ -192,7 +188,7 @@ void vm_instruction_case(VM *vm) {
         }
         case OP_POP: {
             cpu->regs[rd] = data_pop(vm);
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_CALL: {
@@ -217,7 +213,7 @@ void vm_instruction_case(VM *vm) {
         case OP_LOAD: {
             const vm_addr_t addr = cpu->regs[rs1] + imm;
             cpu->regs[rd] = (uint32_t) vm_read8(vm, addr);
-            update_zf_sf(vm, cpu->regs[rd]);
+            update_zf_sf(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_LOAD16: {
@@ -226,19 +222,19 @@ void vm_instruction_case(VM *vm) {
             const uint16_t v = (uint16_t)((uint16_t)vm_read8(vm, addr) |
                                           ((uint16_t)vm_read8(vm, addr + 1) << 8));
             cpu->regs[rd] = (uint32_t)v;
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_LOAD32: {
             const vm_addr_t addr = cpu->regs[rs1] + imm;
             cpu->regs[rd] = vm_read32(vm, addr);
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_LOADS8: {
             const vm_addr_t addr = cpu->regs[rs1] + imm;
             cpu->regs[rd] = (int32_t)(int8_t)vm_read8(vm, addr);
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_LOADS16: {
@@ -247,13 +243,13 @@ void vm_instruction_case(VM *vm) {
             const uint16_t bits = (uint16_t)((uint16_t)vm_read8(vm, addr) |
                                              ((uint16_t)vm_read8(vm, addr + 1) << 8));
             cpu->regs[rd] = (int32_t)(int16_t)bits;
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_LOADX32: {
             const vm_addr_t addr = cpu->regs[rs1] + cpu->regs[rs2] + imm;
             cpu->regs[rd] = vm_read32(vm, addr);
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_STORE: {
@@ -283,24 +279,24 @@ void vm_instruction_case(VM *vm) {
             const int32_t val1 = cpu->regs[rd];
             const int32_t val2 = cpu->regs[rs1];
             const int32_t res = val1 - val2;
-            update_sub_flags(vm, val1, val2, res);
+            update_sub_flags(vm, val1, val2, res,cpu);
             break;
         }
         case OP_CMPI: {
             const int32_t val1 = cpu->regs[rd];
             const int32_t val2 = imm;
             const int32_t res = val1 - val2;
-            update_sub_flags(vm, val1, val2, res);
+            update_sub_flags(vm, val1, val2, res,cpu);
             break;
         }
         case OP_MOV: {
             cpu->regs[rd] = cpu->regs[rs1];
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_MOVI: {
             cpu->regs[rd] = imm;
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_MEMSET: {
@@ -423,58 +419,58 @@ void vm_instruction_case(VM *vm) {
         }
         case OP_AND: {
             cpu->regs[rd] = cpu->regs[rs1] & cpu->regs[rs2];
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_OR: {
             cpu->regs[rd] = cpu->regs[rs1] | cpu->regs[rs2];
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_XOR: {
             cpu->regs[rd] = cpu->regs[rs1] ^ cpu->regs[rs2];
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_NOT: {
             cpu->regs[rd] = ~cpu->regs[rs1];
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_SHL: {
             uint32_t sh = (uint32_t)cpu->regs[rs2] & 31u;
             cpu->regs[rd] = (int32_t)((uint32_t)cpu->regs[rs1] << sh);
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_SHR: {
             uint32_t sh = (uint32_t)cpu->regs[rs2] & 31u;
-            cpu->regs[rd] = (int32_t)((uint32_t)cpu->regs[rs1] >> sh); // 逻辑右移
-            update_logic_flags(vm, cpu->regs[rd]);
+            cpu->regs[rd] = (int32_t)((uint32_t)cpu->regs[rs1] >> sh);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_SAR: {
             uint32_t sh = (uint32_t)cpu->regs[rs2] & 31u;
             cpu->regs[rd] = cpu->regs[rs1] >> sh;
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_ROL: {
             uint32_t sh = (uint32_t)cpu->regs[rs2] & 31u;
             cpu->regs[rd] = (int32_t)rotl32((uint32_t)cpu->regs[rs1], sh);
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_ROR: {
             uint32_t sh = (uint32_t)cpu->regs[rs2] & 31u;
             cpu->regs[rd] = (int32_t)rotr32((uint32_t)cpu->regs[rs1], sh);
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_DIV: {
             if (cpu->regs[rs2] != 0) {
                 cpu->regs[rd] = cpu->regs[rs1] / cpu->regs[rs2];
-                update_logic_flags(vm, cpu->regs[rd]);
+                update_logic_flags(vm, cpu->regs[rd],cpu);
             } else {
                 trigger_interrupt(vm, INT_DIVIDE_BY_ZERO);
             }
@@ -483,7 +479,7 @@ void vm_instruction_case(VM *vm) {
         case OP_MOD: {
             if (cpu->regs[rs2] != 0) {
                 cpu->regs[rd] = cpu->regs[rs1] % cpu->regs[rs2];
-                update_logic_flags(vm, cpu->regs[rd]);
+                update_logic_flags(vm, cpu->regs[rd],cpu);
             } else {
                 trigger_interrupt(vm, INT_DIVIDE_BY_ZERO);
             }
@@ -494,7 +490,7 @@ void vm_instruction_case(VM *vm) {
             const int32_t b = 1;
             const int32_t res = a + b;
             cpu->regs[rd] = res;
-            update_add_flags(vm, a, b, res);
+            update_add_flags(vm, a, b, res,cpu);
             break;
         }
 
@@ -600,7 +596,7 @@ void vm_instruction_case(VM *vm) {
             float b = reg_as_f32(cpu->regs[rs2]);
             float r = a + b;
             cpu->regs[rd] = f32_as_reg(r);
-            update_logic_flags(vm, (r == 0.0f) ? 0 : (r < 0.0f ? -1 : 1));
+            update_logic_flags(vm, (r == 0.0f) ? 0 : (r < 0.0f ? -1 : 1),cpu);
             break;
         }
         case OP_FSUB: {
@@ -608,7 +604,7 @@ void vm_instruction_case(VM *vm) {
             float b = reg_as_f32(cpu->regs[rs2]);
             float r = a - b;
             cpu->regs[rd] = f32_as_reg(r);
-            update_logic_flags(vm, (r == 0.0f) ? 0 : (r < 0.0f ? -1 : 1));
+            update_logic_flags(vm, (r == 0.0f) ? 0 : (r < 0.0f ? -1 : 1),cpu);
             break;
         }
         case OP_FMUL: {
@@ -616,7 +612,7 @@ void vm_instruction_case(VM *vm) {
             float b = reg_as_f32(cpu->regs[rs2]);
             float r = a * b;
             cpu->regs[rd] = f32_as_reg(r);
-            update_logic_flags(vm, (r == 0.0f) ? 0 : (r < 0.0f ? -1 : 1));
+            update_logic_flags(vm, (r == 0.0f) ? 0 : (r < 0.0f ? -1 : 1),cpu);
             break;
         }
         case OP_FDIV: {
@@ -624,35 +620,35 @@ void vm_instruction_case(VM *vm) {
             float b = reg_as_f32(cpu->regs[rs2]);
             float r = a / b;
             cpu->regs[rd] = f32_as_reg(r);
-            update_logic_flags(vm, (r == 0.0f) ? 0 : (r < 0.0f ? -1 : 1));
+            update_logic_flags(vm, (r == 0.0f) ? 0 : (r < 0.0f ? -1 : 1),cpu);
             break;
         }
         case OP_FNEG: {
             float a = reg_as_f32(cpu->regs[rs1]);
             float r = -a;
             cpu->regs[rd] = f32_as_reg(r);
-            update_logic_flags(vm, (r == 0.0f) ? 0 : (r < 0.0f ? -1 : 1));
+            update_logic_flags(vm, (r == 0.0f) ? 0 : (r < 0.0f ? -1 : 1),cpu);
             break;
         }
         case OP_FABS: {
             float a = reg_as_f32(cpu->regs[rs1]);
             float r = fabsf(a);
             cpu->regs[rd] = f32_as_reg(r);
-            update_logic_flags(vm, (r == 0.0f) ? 0 : 1);
+            update_logic_flags(vm, (r == 0.0f) ? 0 : 1,cpu);
             break;
         }
         case OP_FSQRT: {
             float a = reg_as_f32(cpu->regs[rs1]);
             float r = sqrtf(a);
             cpu->regs[rd] = f32_as_reg(r);
-            update_logic_flags(vm, (r == 0.0f) ? 0 : (r < 0.0f ? -1 : 1));
+            update_logic_flags(vm, (r == 0.0f) ? 0 : (r < 0.0f ? -1 : 1),cpu);
             break;
         }
         case OP_ITOF: {
             int32_t i = cpu->regs[rs1];
             float f = (float) i;
             cpu->regs[rd] = f32_as_reg(f);
-            update_logic_flags(vm, (f == 0.0f) ? 0 : (f < 0.0f ? -1 : 1));
+            update_logic_flags(vm, (f == 0.0f) ? 0 : (f < 0.0f ? -1 : 1),cpu);
             break;
         }
         case OP_FTOI: {
@@ -664,7 +660,7 @@ void vm_instruction_case(VM *vm) {
             } else {
                 int32_t i = (int32_t) f;
                 cpu->regs[rd] = i;
-                update_logic_flags(vm, i);
+                update_logic_flags(vm, i,cpu);
             }
             break;
         }
@@ -674,7 +670,7 @@ void vm_instruction_case(VM *vm) {
             uint32_t bits = (uint32_t) vm_read32(vm, addr);
             cpu->regs[rd] = (int32_t) bits;
             float f = reg_as_f32(cpu->regs[rd]);
-            update_logic_flags(vm, (f == 0.0f) ? 0 : (f < 0.0f ? -1 : 1));
+            update_logic_flags(vm, (f == 0.0f) ? 0 : (f < 0.0f ? -1 : 1),cpu);
             break;
         }
         case OP_FSTORE32: {
@@ -693,7 +689,7 @@ void vm_instruction_case(VM *vm) {
             const int32_t b = imm;
             const int32_t res = a + b;
             cpu->regs[rd] = res;
-            update_add_flags(vm, a, b, res);
+            update_add_flags(vm, a, b, res,cpu);
             break;
         }
         case OP_SUBI: {
@@ -701,46 +697,46 @@ void vm_instruction_case(VM *vm) {
             const int32_t b = imm;
             const int32_t res = a - b;
             cpu->regs[rd] = res;
-            update_sub_flags(vm, a, b, res);
+            update_sub_flags(vm, a, b, res,cpu);
             break;
         }
         case OP_ANDI: {
             cpu->regs[rd] = cpu->regs[rs1] & imm;
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_ORI: {
             cpu->regs[rd] = cpu->regs[rs1] | imm;
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_XORI: {
             cpu->regs[rd] = cpu->regs[rs1] ^ imm;
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_SHLI: {
             uint32_t sh = (uint32_t)imm & 31u;
             cpu->regs[rd] = (int32_t)((uint32_t)cpu->regs[rs1] << sh);
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_SHRI: {
             uint32_t sh = (uint32_t)imm & 31u;
             cpu->regs[rd] = (int32_t)((uint32_t)cpu->regs[rs1] >> sh);
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_ROLI: {
             uint32_t sh = (uint32_t)imm & 31u;
             cpu->regs[rd] = (int32_t)rotl32((uint32_t)cpu->regs[rs1], sh);
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_RORI: {
             uint32_t sh = (uint32_t)imm & 31u;
             cpu->regs[rd] = (int32_t)rotr32((uint32_t)cpu->regs[rs1], sh);
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_CAS: {
@@ -750,7 +746,7 @@ void vm_instruction_case(VM *vm) {
             const uint32_t desired = (uint32_t)cpu->regs[rs2];
             int success = 0;
             const uint32_t old = vm_atomic_compare_exchange32_seqcst(vm, addr, expected, desired, &success);
-            set_cas_flags(vm, success);
+            set_cas_flags(vm, success,cpu);
             cpu->regs[rd] = (int32_t)old;
             break;
         }
@@ -761,7 +757,7 @@ void vm_instruction_case(VM *vm) {
             const uint32_t old = vm_atomic_fetch_add32_seqcst(vm, addr, addend);
             const uint32_t newv = old + addend;
             cpu->regs[rd] = (int32_t)old;
-            update_add_flags(vm, (int32_t)old, (int32_t)addend, (int32_t)newv);
+            update_add_flags(vm, (int32_t)old, (int32_t)addend, (int32_t)newv,cpu);
             break;
         }
         case OP_XCHG: {
@@ -770,7 +766,7 @@ void vm_instruction_case(VM *vm) {
             const uint32_t newv = (uint32_t)cpu->regs[rs2];
             const uint32_t old = vm_atomic_exchange32_seqcst(vm, addr, newv);
             cpu->regs[rd] = (int32_t)old;
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_LDAR: {
@@ -778,7 +774,7 @@ void vm_instruction_case(VM *vm) {
             ensure_atomic_aligned_or_panic(vm, addr, "LDAR");
             const uint32_t v = vm_atomic_load32_acquire(vm, addr);
             cpu->regs[rd] = (int32_t)v;
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         case OP_STLR: {
@@ -824,7 +820,7 @@ void vm_instruction_case(VM *vm) {
         }
         case OP_CPUID: {
             cpu->regs[rd] = (uint32_t)cpu->core_id;
-            update_logic_flags(vm, cpu->regs[rd]);
+            update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
         default: {
@@ -1052,6 +1048,15 @@ VM *vm_create(size_t memory_size,
         free(vm);
         return NULL;
     }
+    vm->interrupt_enable_bitmap = calloc((size_t)vm->smp_cores * (size_t)IRQ_BITMAP_WORDS,
+                                         sizeof(atomic_uint_fast64_t));
+    if (!vm->interrupt_enable_bitmap) {
+        free(vm->interrupt_bitmap);
+        free(vm->core_released);
+        free(vm->cpus);
+        free(vm);
+        return NULL;
+    }
 
     pthread_mutexattr_t shared_attr;
     pthread_mutexattr_init(&shared_attr);
@@ -1062,6 +1067,7 @@ VM *vm_create(size_t memory_size,
     vm->memory_size = memory_size;
     vm->memory = malloc(memory_size);
     if (!vm->memory) {
+        free(vm->interrupt_enable_bitmap);
         free(vm->interrupt_bitmap);
         free(vm->core_released);
         free(vm->cpus);
@@ -1078,6 +1084,7 @@ VM *vm_create(size_t memory_size,
         free(vm->fb_front);
         free(vm->fb);
         free(vm->memory);
+        free(vm->interrupt_enable_bitmap);
         free(vm->interrupt_bitmap);
         free(vm->core_released);
         free(vm->cpus);
@@ -1094,6 +1101,7 @@ VM *vm_create(size_t memory_size,
             free(vm->fb_front);
             free(vm->fb);
             free(vm->memory);
+            free(vm->interrupt_enable_bitmap);
             free(vm->interrupt_bitmap);
             free(vm->core_released);
             free(vm->cpus);
@@ -1111,6 +1119,7 @@ VM *vm_create(size_t memory_size,
     vm->disk_size_bytes = DISK_SIZE;
     register_fb_mmio(vm);
     register_time_mmio(vm);
+    register_intc_mmio(vm);
     register_sysinfo_mmio(vm);
     size_t prog_bytes = program_size * sizeof(uint64_t);
     uint32_t text_base = PROGRAM_BASE;
@@ -1238,6 +1247,8 @@ void vm_destroy(VM *vm) {
     }
     if (vm->interrupt_bitmap)
         free(vm->interrupt_bitmap);
+    if (vm->interrupt_enable_bitmap)
+        free(vm->interrupt_enable_bitmap);
     if (vm->core_released)
         free(vm->core_released);
     if (vm->cpus)
