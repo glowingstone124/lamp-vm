@@ -1,5 +1,6 @@
 #include "../include/kernel/console.h"
 #include "../include/kernel/console_fb.h"
+#include "../include/kernel/fs.h"
 #include "../include/kernel/irq.h"
 #include "../include/kernel/init_task.h"
 #include "../include/kernel/kernel.h"
@@ -39,6 +40,7 @@ void kernel_entry(void) {
     KLOGI("smp", "bsp online");
 
     sched_init();
+    fs_init();
     init_task_spawn();
     smp_start_aps();
     KLOGI("smp", "aps online");

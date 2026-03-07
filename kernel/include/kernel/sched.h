@@ -56,7 +56,8 @@ enum {
     SCHED_FD_TYPE_DEV_NULL = 4u,
     SCHED_FD_TYPE_DEV_ZERO = 5u,
     SCHED_FD_TYPE_DEV_TTY = 6u,
-    SCHED_FD_TYPE_SOCKET = 7u
+    SCHED_FD_TYPE_SOCKET = 7u,
+    SCHED_FD_TYPE_REGULAR = 8u
 };
 
 enum {
@@ -102,7 +103,13 @@ uint32_t sched_fd_is_open(int32_t fd);
 uint32_t sched_fd_is_stdin(int32_t fd);
 uint32_t sched_fd_is_tty(int32_t fd);
 int sched_fd_open_special(uint32_t special_type, uint32_t status_flags);
+int sched_fd_open_regular(uint32_t status_flags, uint32_t fs_backend, uint32_t file_id, uint32_t file_size,
+                          uint32_t is_dir);
 int sched_fd_get_type(int32_t fd, uint32_t *out_type);
+int sched_fd_regular_get(int32_t fd, uint32_t *fs_backend, uint32_t *file_id, uint32_t *file_size,
+                         uint32_t *file_offset, uint32_t *is_dir);
+int sched_fd_regular_advance(int32_t fd, uint32_t delta, uint32_t *new_offset);
+int sched_fd_regular_commit_write(int32_t fd, uint32_t written, uint32_t new_size, uint32_t *new_offset);
 
 void sched_waitq_init(sched_waitq_t *q);
 void sched_waitq_sleep(sched_waitq_t *q, uint32_t timeout_ticks);

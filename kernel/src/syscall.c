@@ -1,4 +1,6 @@
+#include "../include/kernel/blk.h"
 #include "../include/kernel/console.h"
+#include "../include/kernel/fs.h"
 #include "../include/kernel/platform.h"
 #include "../include/kernel/sched.h"
 #include "../include/kernel/syscall.h"
@@ -27,14 +29,18 @@ enum {
     ERRNO_ENOENT = 2u,
     ERRNO_OK = 0u,
     ERRNO_EINTR = 4u,
+    ERRNO_EIO = 5u,
     ERRNO_EBADF = 9u,
     ERRNO_ECHILD = 10u,
     ERRNO_EAGAIN = 11u,
     ERRNO_ENOMEM = 12u,
     ERRNO_EFAULT = 14u,
     ERRNO_EBUSY = 16u,
+    ERRNO_ENOTDIR = 20u,
+    ERRNO_EISDIR = 21u,
     ERRNO_EMFILE = 24u,
     ERRNO_ENOSPC = 28u,
+    ERRNO_EROFS = 30u,
     ERRNO_EINVAL = 22u,
     ERRNO_ENOTSOCK = 88u,
     ERRNO_EOPNOTSUPP = 95u,
@@ -234,39 +240,6 @@ static inline uint32_t fd_waits_console_read(int32_t fd) {
     return (t == SCHED_FD_TYPE_STDIN || t == SCHED_FD_TYPE_DEV_TTY) ? 1u : 0u;
 }
 
-static inline uint32_t str_eq(const char *a, const char *b) {
-    uint32_t i = 0u;
-    if (!a || !b) {
-        return 0u;
-    }
-    while (a[i] != '\0' && b[i] != '\0') {
-        if (a[i] != b[i]) {
-            return 0u;
-        }
-        i++;
-    }
-    return (a[i] == '\0' && b[i] == '\0') ? 1u : 0u;
-}
-
-static inline uint32_t open_path_to_special(const char *path, uint32_t *out_special) {
-    if (!path || !out_special) {
-        return 0u;
-    }
-    if (str_eq(path, "/dev/null")) {
-        *out_special = SCHED_FD_SPECIAL_DEV_NULL;
-        return 1u;
-    }
-    if (str_eq(path, "/dev/zero")) {
-        *out_special = SCHED_FD_SPECIAL_DEV_ZERO;
-        return 1u;
-    }
-    if (str_eq(path, "/dev/tty")) {
-        *out_special = SCHED_FD_SPECIAL_DEV_TTY;
-        return 1u;
-    }
-    return 0u;
-}
-
 static inline uint32_t fd_read_ready(int32_t fd) {
     uint32_t t = fd_type(fd);
     if (!fd_supports_read(fd)) {
@@ -276,6 +249,9 @@ static inline uint32_t fd_read_ready(int32_t fd) {
         return console_can_read();
     }
     if (t == SCHED_FD_TYPE_DEV_NULL || t == SCHED_FD_TYPE_DEV_ZERO) {
+        return 1u;
+    }
+    if (t == SCHED_FD_TYPE_REGULAR) {
         return 1u;
     }
     return 0u;
@@ -303,6 +279,40 @@ static uint32_t errno_from_sched_fd_rc(int rc) {
         return ERRNO_EINVAL;
     }
     return ERRNO_EINVAL;
+}
+
+static uint32_t errno_from_fs_rc(int rc) {
+    if (rc == FS_ERR_BADF) {
+        return ERRNO_EBADF;
+    }
+    if (rc == FS_ERR_NOENT) {
+        return ERRNO_ENOENT;
+    }
+    if (rc == FS_ERR_INVAL) {
+        return ERRNO_EINVAL;
+    }
+    if (rc == FS_ERR_BUSY) {
+        return ERRNO_EBUSY;
+    }
+    if (rc == FS_ERR_NOSPC) {
+        return ERRNO_ENOSPC;
+    }
+    if (rc == FS_ERR_NOSYS) {
+        return ERRNO_ENOSYS;
+    }
+    if (rc == FS_ERR_ROFS) {
+        return ERRNO_EROFS;
+    }
+    if (rc == FS_ERR_NOTDIR) {
+        return ERRNO_ENOTDIR;
+    }
+    if (rc == FS_ERR_ISDIR) {
+        return ERRNO_EISDIR;
+    }
+    if (rc == FS_ERR_IO || rc == BLK_ERR_IO) {
+        return ERRNO_EIO;
+    }
+    return errno_from_sched_fd_rc(rc);
 }
 
 static inline uint64_t mmio_read_time_ns(uint32_t low_addr, uint32_t high_addr) {
@@ -647,6 +657,37 @@ uint32_t syscall_dispatch(const syscall_regs_t *regs) {
                 ret = (uint32_t)-1;
                 break;
             }
+            if (t == SCHED_FD_TYPE_REGULAR) {
+                while (copied < len) {
+                    uint32_t remain = len - copied;
+                    uint32_t want = (remain > (uint32_t)sizeof(byte_buf)) ? (uint32_t)sizeof(byte_buf) : remain;
+                    int n = fs_read(fd, byte_buf, want);
+                    if (n < 0) {
+                        if (copied != 0u) {
+                            ret = copied;
+                        } else {
+                            err = errno_from_fs_rc(n);
+                            ret = (uint32_t)-1;
+                        }
+                        break;
+                    }
+                    if (n == 0) {
+                        ret = copied;
+                        break;
+                    }
+                    if (!abi_user_write_bytes(buf_addr + copied, byte_buf, (uint32_t)n)) {
+                        err = ERRNO_EFAULT;
+                        ret = (uint32_t)-1;
+                        break;
+                    }
+                    copied += (uint32_t)n;
+                    ret = copied;
+                    if ((uint32_t)n < want) {
+                        break;
+                    }
+                }
+                break;
+            }
 
             while (copied < len) {
                 uint32_t remain = len - copied;
@@ -723,6 +764,35 @@ uint32_t syscall_dispatch(const syscall_regs_t *regs) {
             if (t == SCHED_FD_TYPE_SOCKET) {
                 err = ERRNO_ENOTCONN;
                 ret = (uint32_t)-1;
+                break;
+            }
+            if (t == SCHED_FD_TYPE_REGULAR) {
+                while (total < len) {
+                    uint32_t remain = len - total;
+                    uint32_t want = (remain > (uint32_t)sizeof(byte_buf)) ? (uint32_t)sizeof(byte_buf) : remain;
+                    int n;
+
+                    if (!abi_user_read_bytes(buf_addr + total, byte_buf, want)) {
+                        err = ERRNO_EFAULT;
+                        ret = (uint32_t)-1;
+                        break;
+                    }
+                    n = fs_write(fd, byte_buf, want);
+                    if (n < 0) {
+                        if (total != 0u) {
+                            ret = total;
+                        } else {
+                            err = errno_from_fs_rc(n);
+                            ret = (uint32_t)-1;
+                        }
+                        break;
+                    }
+                    total += (uint32_t)n;
+                    ret = total;
+                    if ((uint32_t)n < want) {
+                        break;
+                    }
+                }
                 break;
             }
 
@@ -832,8 +902,6 @@ uint32_t syscall_dispatch(const syscall_regs_t *regs) {
             uint32_t path_addr = regs->arg0;
             uint32_t flags = regs->arg1;
             uint32_t accmode = flags & SYS_O_ACCMODE;
-            uint32_t status_flags;
-            uint32_t special_type = 0u;
             int rc;
             char path[FS_PATH_CAP];
 
@@ -852,16 +920,9 @@ uint32_t syscall_dispatch(const syscall_regs_t *regs) {
                 ret = (uint32_t)-1;
                 break;
             }
-            if (!open_path_to_special(path, &special_type)) {
-                err = ERRNO_ENOENT;
-                ret = (uint32_t)-1;
-                break;
-            }
-
-            status_flags = flags & (SYS_O_ACCMODE | SYS_O_NONBLOCK);
-            rc = sched_fd_open_special(special_type, status_flags);
+            rc = fs_open(path, flags);
             if (rc < 0) {
-                err = errno_from_sched_fd_rc(rc);
+                err = errno_from_fs_rc(rc);
                 ret = (uint32_t)-1;
                 break;
             }

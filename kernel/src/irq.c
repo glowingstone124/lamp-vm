@@ -1,3 +1,4 @@
+#include "../include/kernel/blk.h"
 #include "../include/kernel/console.h"
 #include "../include/kernel/irq.h"
 #include "../include/kernel/panic.h"
@@ -76,6 +77,7 @@ void irq_disk_complete(uint32_t irq_no) {
     if (irq_no < KERNEL_IVT_SIZE) {
         g_irq_counts[irq_no]++;
     }
+    blk_irq_complete();
 }
 
 void irq_serial(uint32_t irq_no) {

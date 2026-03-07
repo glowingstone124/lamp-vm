@@ -12,6 +12,11 @@ typedef struct sched_ofile {
     uint32_t refs;
     uint32_t type;
     uint32_t status_flags;
+    uint32_t fs_backend;
+    uint32_t file_id;
+    uint32_t file_size;
+    uint32_t file_offset;
+    uint32_t file_is_dir;
 } sched_ofile_t;
 
 typedef struct sched_fdent {
@@ -28,7 +33,8 @@ enum {
     SCHED_OFILE_TYPE_DEV_NULL = SCHED_FD_TYPE_DEV_NULL,
     SCHED_OFILE_TYPE_DEV_ZERO = SCHED_FD_TYPE_DEV_ZERO,
     SCHED_OFILE_TYPE_DEV_TTY = SCHED_FD_TYPE_DEV_TTY,
-    SCHED_OFILE_TYPE_SOCKET = SCHED_FD_TYPE_SOCKET
+    SCHED_OFILE_TYPE_SOCKET = SCHED_FD_TYPE_SOCKET,
+    SCHED_OFILE_TYPE_REGULAR = SCHED_FD_TYPE_REGULAR
 };
 
 #define SCHED_FD_OFILE_INVALID ((uint32_t)~0u)
@@ -317,6 +323,11 @@ static void sched_fd_table_clear(sched_task_slot_t *slot) {
         slot->ofiles[i].refs = 0u;
         slot->ofiles[i].type = SCHED_OFILE_TYPE_NONE;
         slot->ofiles[i].status_flags = 0u;
+        slot->ofiles[i].fs_backend = 0u;
+        slot->ofiles[i].file_id = 0u;
+        slot->ofiles[i].file_size = 0u;
+        slot->ofiles[i].file_offset = 0u;
+        slot->ofiles[i].file_is_dir = 0u;
         slot->fdtab[i].used = 0u;
         slot->fdtab[i].ofile_idx = SCHED_FD_OFILE_INVALID;
         slot->fdtab[i].fd_flags = 0u;
@@ -420,6 +431,11 @@ static int sched_slot_close_fd(sched_task_slot_t *slot, int32_t fd) {
         of->used = 0u;
         of->type = SCHED_OFILE_TYPE_NONE;
         of->status_flags = 0u;
+        of->fs_backend = 0u;
+        of->file_id = 0u;
+        of->file_size = 0u;
+        of->file_offset = 0u;
+        of->file_is_dir = 0u;
     }
     return SCHED_FD_OK;
 }
@@ -993,6 +1009,7 @@ uint32_t sched_fd_can_read(int32_t fd) {
                         of->type == SCHED_OFILE_TYPE_DEV_ZERO ||
                         of->type == SCHED_OFILE_TYPE_DEV_NULL ||
                         of->type == SCHED_OFILE_TYPE_DEV_TTY ||
+                        of->type == SCHED_OFILE_TYPE_REGULAR ||
                         of->type == SCHED_OFILE_TYPE_SOCKET) ? 1u : 0u;
         }
     }
@@ -1017,6 +1034,7 @@ uint32_t sched_fd_can_write(int32_t fd) {
                          of->type == SCHED_OFILE_TYPE_DEV_NULL ||
                          of->type == SCHED_OFILE_TYPE_DEV_ZERO ||
                          of->type == SCHED_OFILE_TYPE_DEV_TTY ||
+                         of->type == SCHED_OFILE_TYPE_REGULAR ||
                          of->type == SCHED_OFILE_TYPE_SOCKET) ? 1u : 0u;
         }
     }
@@ -1129,6 +1147,54 @@ int sched_fd_open_special(uint32_t special_type, uint32_t status_flags) {
     slot->ofiles[(uint32_t)of_idx].type = type;
     slot->ofiles[(uint32_t)of_idx].status_flags =
         (status_flags & (SCHED_FD_O_ACCMODE | SCHED_FD_O_NONBLOCK));
+    slot->ofiles[(uint32_t)of_idx].fs_backend = 0u;
+    slot->ofiles[(uint32_t)of_idx].file_id = 0u;
+    slot->ofiles[(uint32_t)of_idx].file_size = 0u;
+    slot->ofiles[(uint32_t)of_idx].file_offset = 0u;
+    slot->ofiles[(uint32_t)of_idx].file_is_dir = 0u;
+
+    slot->fdtab[(uint32_t)fd_idx].used = 1u;
+    slot->fdtab[(uint32_t)fd_idx].ofile_idx = (uint32_t)of_idx;
+    slot->fdtab[(uint32_t)fd_idx].fd_flags = 0u;
+    spinlock_unlock(&slot->fd_lock);
+    return fd_idx;
+}
+
+int sched_fd_open_regular(uint32_t status_flags, uint32_t fs_backend, uint32_t file_id, uint32_t file_size,
+                          uint32_t is_dir) {
+    int fd_idx;
+    int of_idx;
+    uint32_t acc = status_flags & SCHED_FD_O_ACCMODE;
+    sched_task_slot_t *slot = sched_current_slot_fd_locked();
+    if (!slot) {
+        return SCHED_FD_EBADF;
+    }
+    if (!(acc == SCHED_FD_O_RDONLY || acc == SCHED_FD_O_WRONLY || acc == SCHED_FD_O_RDWR)) {
+        spinlock_unlock(&slot->fd_lock);
+        return SCHED_FD_EINVAL;
+    }
+
+    fd_idx = sched_slot_find_free_fd(slot, 0u);
+    if (fd_idx < 0) {
+        spinlock_unlock(&slot->fd_lock);
+        return SCHED_FD_EMFILE;
+    }
+    of_idx = sched_slot_find_free_ofile(slot);
+    if (of_idx < 0) {
+        spinlock_unlock(&slot->fd_lock);
+        return SCHED_FD_EMFILE;
+    }
+
+    slot->ofiles[(uint32_t)of_idx].used = 1u;
+    slot->ofiles[(uint32_t)of_idx].refs = 1u;
+    slot->ofiles[(uint32_t)of_idx].type = SCHED_OFILE_TYPE_REGULAR;
+    slot->ofiles[(uint32_t)of_idx].status_flags =
+        (status_flags & (SCHED_FD_O_ACCMODE | SCHED_FD_O_NONBLOCK));
+    slot->ofiles[(uint32_t)of_idx].fs_backend = fs_backend;
+    slot->ofiles[(uint32_t)of_idx].file_id = file_id;
+    slot->ofiles[(uint32_t)of_idx].file_size = file_size;
+    slot->ofiles[(uint32_t)of_idx].file_offset = 0u;
+    slot->ofiles[(uint32_t)of_idx].file_is_dir = is_dir ? 1u : 0u;
 
     slot->fdtab[(uint32_t)fd_idx].used = 1u;
     slot->fdtab[(uint32_t)fd_idx].ofile_idx = (uint32_t)of_idx;
@@ -1153,6 +1219,98 @@ int sched_fd_get_type(int32_t fd, uint32_t *out_type) {
         return SCHED_FD_EBADF;
     }
     *out_type = of->type;
+    spinlock_unlock(&slot->fd_lock);
+    return SCHED_FD_OK;
+}
+
+int sched_fd_regular_get(int32_t fd, uint32_t *fs_backend, uint32_t *file_id, uint32_t *file_size,
+                         uint32_t *file_offset, uint32_t *is_dir) {
+    sched_ofile_t *of;
+    sched_task_slot_t *slot = sched_current_slot_fd_locked();
+    if (!slot) {
+        return SCHED_FD_EBADF;
+    }
+    of = sched_slot_ofile_by_fd(slot, fd, 0);
+    if (!of || of->type != SCHED_OFILE_TYPE_REGULAR) {
+        spinlock_unlock(&slot->fd_lock);
+        return SCHED_FD_EBADF;
+    }
+    if (fs_backend) {
+        *fs_backend = of->fs_backend;
+    }
+    if (file_id) {
+        *file_id = of->file_id;
+    }
+    if (file_size) {
+        *file_size = of->file_size;
+    }
+    if (file_offset) {
+        *file_offset = of->file_offset;
+    }
+    if (is_dir) {
+        *is_dir = of->file_is_dir;
+    }
+    spinlock_unlock(&slot->fd_lock);
+    return SCHED_FD_OK;
+}
+
+int sched_fd_regular_advance(int32_t fd, uint32_t delta, uint32_t *new_offset) {
+    uint32_t cur;
+    uint32_t next;
+    sched_ofile_t *of;
+    sched_task_slot_t *slot = sched_current_slot_fd_locked();
+    if (!slot) {
+        return SCHED_FD_EBADF;
+    }
+    of = sched_slot_ofile_by_fd(slot, fd, 0);
+    if (!of || of->type != SCHED_OFILE_TYPE_REGULAR) {
+        spinlock_unlock(&slot->fd_lock);
+        return SCHED_FD_EBADF;
+    }
+    cur = of->file_offset;
+    next = cur + delta;
+    if (next < cur) {
+        next = 0xFFFFFFFFu;
+    }
+    if (next > of->file_size) {
+        next = of->file_size;
+    }
+    of->file_offset = next;
+    if (new_offset) {
+        *new_offset = next;
+    }
+    spinlock_unlock(&slot->fd_lock);
+    return SCHED_FD_OK;
+}
+
+int sched_fd_regular_commit_write(int32_t fd, uint32_t written, uint32_t new_size, uint32_t *new_offset) {
+    uint32_t cur;
+    uint32_t next;
+    sched_ofile_t *of;
+    sched_task_slot_t *slot = sched_current_slot_fd_locked();
+    if (!slot) {
+        return SCHED_FD_EBADF;
+    }
+    of = sched_slot_ofile_by_fd(slot, fd, 0);
+    if (!of || of->type != SCHED_OFILE_TYPE_REGULAR) {
+        spinlock_unlock(&slot->fd_lock);
+        return SCHED_FD_EBADF;
+    }
+    if (new_size > of->file_size) {
+        of->file_size = new_size;
+    }
+    cur = of->file_offset;
+    next = cur + written;
+    if (next < cur) {
+        next = of->file_size;
+    }
+    if (next > of->file_size) {
+        next = of->file_size;
+    }
+    of->file_offset = next;
+    if (new_offset) {
+        *new_offset = next;
+    }
     spinlock_unlock(&slot->fd_lock);
     return SCHED_FD_OK;
 }
