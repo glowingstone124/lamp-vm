@@ -8,13 +8,13 @@ POSIX-facing syscall/fd/tty semantics are documented in `docs/posix.md`.
 
 ## Goal
 
-Establish a stable bring-up baseline before implementing policy:
+Current kernel target in this repository:
 
-1. `kernel_entry` early init
-2. trap/IRQ table ownership
-3. timer-driven tick hook
-4. simple scheduler core (runqueue + sleep/wakeup + wait queue)
-5. SMP stubs and spinlock primitives
+1. stable BIOS handoff and trap/syscall ownership
+2. SMP-aware scheduler with blocking wait queues
+3. POSIX-like syscall/fd/tty/time behavior
+4. MMIO interrupt-controller based IRQ control path
+5. block I/O + ext4-backed regular-file read/write baseline
 
 ## Layout
 
@@ -31,37 +31,50 @@ Establish a stable bring-up baseline before implementing policy:
 - `include/kernel/smp.h`: BSP/AP interfaces
 - `include/kernel/vm_info.h`: BootInfo metadata from BIOS handoff
 - `include/kernel/spinlock.h`: lock primitive API
+- `include/kernel/blk.h`: synchronous block I/O API over disk MMIO
+- `include/kernel/fs.h`: VFS-like dispatcher API
+- `include/kernel/fs_ext4.h`: ext4 backend API
 - `src/entry.c`: `kernel_entry` and top-level init sequence
 - `src/console.c`: console core (`rx` ring buffer, wait queue, read/write path, no implicit rx echo)
 - `src/init_task.c`: kernel init task (`init$` command loop and runtime controls)
-- `src/trap.c`: trap dispatch skeleton
-- `src/irq.c`: IRQ handlers skeleton
-- `src/sched.c`: task scheduler core (single-core, full task-context switch)
+- `src/trap.c`: trap dispatch + INTC MMIO irq control
+- `src/irq.c`: IRQ handlers (timer/serial/keyboard/disk/syscall/div0)
+- `src/sched.c`: SMP scheduler core (per-CPU runqueue + wait queue + fd tables)
 - `src/syscall.c`: syscall dispatcher and ABI mailbox publish
-- `src/smp.c`: SMP bootstrap skeleton
+- `src/smp.c`: BSP/AP bootstrap and AP bring-up
 - `src/vm_info.c`: BootInfo decode/log helper
-- `src/spinlock.c`: spinlock skeleton (to be wired to atomic ISA ops)
+- `src/spinlock.c`: CAS/LDAR/STLR spinlock implementation
+- `src/blk.c`: blocking disk read/write wrapper
+- `src/fs.c`: fs dispatch (`/dev/*` + ext4)
+- `src/fs_ext4.c`: ext4 mount/lookup/read/write backend
 
-## Bring-up Order
+## Boot Sequence
 
-1. Implement serial/console output in `irq.c` or dedicated console module.
-2. Implement timer interrupt registration in `trap_init()`.
-3. Implement `schedule_tick()` and task context switch path.
-4. Enable SMP via `smp_init_bsp()` after single-core path is stable.
+`kernel_entry` currently performs:
+
+1. console + logging init
+2. trap/IRQ + syscall init
+3. SMP BSP init
+4. scheduler init
+5. block/fs init and init task spawn
+6. AP startup and scheduler run loop
 
 ## Scheduler Status
 
-Current `sched` supports full per-task context switching for POSIX-style blocking:
+Current `sched` supports full per-task context switching for POSIX-style blocking and SMP:
 
 - fixed task table (`SCHED_MAX_TASKS`)
-- round-robin runnable selection with tick quantum
+- per-CPU runqueue (`run_cpu` ownership)
+- local pick + global balancing via steal path
 - task states: `RUNNABLE/RUNNING/SLEEPING/BLOCKED/ZOMBIE`
 - blocking primitives: `sched_sleep_ticks()` and wait-queue wakeup
+- fd table per task, including regular-file metadata (`backend/inode/size/offset`)
 
 Current notes:
 
 - task switch saves/restores task-local runtime context (`r31` stack pointer + VM call/data stack state)
 - blocking syscalls (`waitpid/poll/select` paths) can park the current task and resume at the original call site
+- scheduler critical paths are protected with spinlocks
 
 ## Syscall ABI (Current)
 
@@ -74,6 +87,13 @@ Note:
 
 - VM currently restores caller registers on `IRET`, so direct register return is not yet available.
 - The dispatcher writes `ret/errno` and the last call snapshot into the syscall mailbox.
+
+## Interrupt Controller (Current)
+
+- interrupt control is unified through INTC MMIO registers (`PENDING/ENABLE/PRIORITY/EOI`)
+- kernel APIs: `irq_enable`, `irq_disable`, `irq_set_priority`, `irq_eoi`
+- `trap_init()` resets and reprograms IRQ routing/priorities after BIOS handoff
+- disk completion IRQ wakes block waiters via `blk_irq_complete()`
 
 ## Logging (Current)
 
@@ -105,10 +125,10 @@ Note:
 
 - `poll` ABI: `arg0=pollfd*`, `arg1=nfds`, `arg2=timeout_ms`
 - `select` ABI: `arg0=nfds`, `arg1=read_mask*`, `arg2=write_mask*`, `arg3=except_mask*`, `arg4=timeout_ms`
-- fd model (current): stdio + special fds from `open("/dev/null" | "/dev/zero" | "/dev/tty")` and `socket()`
+- fd model (current): stdio + `/dev/*` + ext4 regular files + socket stub fds
 - `tty_getmode(fd)` and `tty_setmode(fd, lflag)` expose tty local mode bits
 - `close/dup/dup2` and `fcntl(F_GETFD/F_SETFD/F_GETFL/F_SETFL)` are wired to per-task fd tables
-- `open` currently maps `/dev/null`, `/dev/zero`, `/dev/tty` to scheduler special-fd types
+- `open` maps `/dev/null`, `/dev/zero`, `/dev/tty` and absolute ext4 paths
 - network syscalls are wired to stable stub errno paths (`EAFNOSUPPORT` / `ENOTSOCK` / `EOPNOTSUPP` / `ENOTCONN`) while transport stack is not implemented yet
 - `fdtest` command in init shell runs fd regression checks (`dup`, `fcntl`, `read/poll/select`)
 - `fdtest` uses `waitpid(child_pid, WNOHANG)` for post-reap `ECHILD` assertion to avoid ambient-child interference
@@ -119,6 +139,24 @@ Note:
 - `clock_gettime(clock_id, ts*)` supports `CLOCK_REALTIME(0)`, `CLOCK_MONOTONIC(1)`, and boot time (`2`/`7`)
 - `clock_settime(clock_id, ts*)` currently allows `CLOCK_REALTIME(0)` only; `CLOCK_MONOTONIC(1)` returns `EINVAL`
 - `gettimeofday(tv*, tz*)` returns realtime and writes zeroed legacy timezone data when `tz` is non-null
+
+## Filesystem and Block I/O (Current)
+
+- `blk` layer provides synchronous sector read/write over disk MMIO command interface
+- `fs_open` dispatch:
+  - `/dev/*` -> scheduler special fds
+  - absolute non-`/dev` path -> ext4 backend
+- ext4 backend currently supports:
+  - superblock + group descriptor + inode table reads
+  - directory traversal for absolute paths
+  - regular-file `open/read`
+  - regular-file `write` for:
+    - existing extent overwrite
+    - EOF append with block bitmap allocation + inode size update
+- current ext4 write limitations:
+  - `O_CREAT`/`O_TRUNC` return `EROFS`
+  - sparse/non-EOF hole write is not supported (`ENOSYS`)
+  - deep extent tree growth (`depth > 0`) is not supported (`ENOSYS`)
 
 ## Contract With BIOS
 

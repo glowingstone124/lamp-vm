@@ -1,0 +1,1003 @@
+#include "../include/kernel/blk.h"
+#include "../include/kernel/fs.h"
+#include "../include/kernel/fs_ext4.h"
+#include "../include/kernel/printk.h"
+#include "../include/kernel/sched.h"
+#include "../include/kernel/spinlock.h"
+#include "../include/kernel/syscall.h"
+
+enum {
+    EXT4_FS_LBA_BASE = 2048u,
+    EXT4_SUPER_SIZE = 1024u,
+    EXT4_SUPER_LBA_OFF = 2u, /* +1024 bytes from FS start */
+    EXT4_SUPER_LBA_COUNT = 2u,
+    EXT4_SUPER_MAGIC = 0xEF53u,
+    EXT4_EXTENT_MAGIC = 0xF30Au,
+    EXT4_EXTENTS_FL = 0x00080000u,
+    EXT4_INCOMPAT_64BIT = 0x00000080u,
+    EXT4_S_IFMT = 0xF000u,
+    EXT4_S_IFREG = 0x8000u,
+    EXT4_S_IFDIR = 0x4000u,
+    EXT4_ROOT_INO = 2u,
+    EXT4_MAX_NAME = 255u
+};
+
+typedef struct ext4_state {
+    uint32_t probe_done;
+    uint32_t mounted;
+    uint32_t block_size;
+    uint32_t sectors_per_block;
+    uint32_t blocks_count;
+    uint32_t first_data_block;
+    uint32_t blocks_per_group;
+    uint32_t inodes_per_group;
+    uint32_t inode_size;
+    uint32_t group_count;
+    uint32_t desc_size;
+    uint32_t feature_incompat;
+} ext4_state_t;
+
+static ext4_state_t g_ext4;
+static spinlock_t g_ext4_lock;
+static sched_waitq_t g_ext4_waitq;
+static volatile uint32_t g_ext4_lock_held;
+
+static uint8_t g_super[EXT4_SUPER_SIZE];
+static uint8_t g_io_block[4096];
+static uint8_t g_tree_block[4096];
+static uint8_t g_inode_buf[512];
+static uint8_t g_desc_buf[64];
+
+static inline uint16_t rd_le16(const uint8_t *p) {
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static inline uint32_t rd_le32(const uint8_t *p) {
+    return (uint32_t)p[0] |
+           ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+static inline void wr_le16(uint8_t *p, uint16_t v) {
+    p[0] = (uint8_t)(v & 0xFFu);
+    p[1] = (uint8_t)((v >> 8) & 0xFFu);
+}
+
+static inline void wr_le32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v & 0xFFu);
+    p[1] = (uint8_t)((v >> 8) & 0xFFu);
+    p[2] = (uint8_t)((v >> 16) & 0xFFu);
+    p[3] = (uint8_t)((v >> 24) & 0xFFu);
+}
+
+static inline uint32_t mem_eq_u8(const uint8_t *a, const uint8_t *b, uint32_t n) {
+    for (uint32_t i = 0u; i < n; i++) {
+        if (a[i] != b[i]) {
+            return 0u;
+        }
+    }
+    return 1u;
+}
+
+static void ext4_mutex_lock(void) {
+    for (;;) {
+        spinlock_lock(&g_ext4_lock);
+        if (g_ext4_lock_held == 0u) {
+            g_ext4_lock_held = 1u;
+            spinlock_unlock(&g_ext4_lock);
+            return;
+        }
+        sched_waitq_sleep(&g_ext4_waitq, 0u);
+        spinlock_unlock(&g_ext4_lock);
+        sched_block_until_runnable();
+    }
+}
+
+static void ext4_mutex_unlock(void) {
+    uint32_t wake = 0u;
+    spinlock_lock(&g_ext4_lock);
+    if (g_ext4_lock_held != 0u) {
+        g_ext4_lock_held = 0u;
+        wake = 1u;
+    }
+    spinlock_unlock(&g_ext4_lock);
+    if (wake) {
+        sched_waitq_wake_one(&g_ext4_waitq);
+    }
+}
+
+static int ext4_read_block_locked(uint32_t fs_block, uint8_t *dst) {
+    uint32_t lba = EXT4_FS_LBA_BASE + fs_block * g_ext4.sectors_per_block;
+    if (!dst || g_ext4.block_size == 0u || g_ext4.block_size > sizeof(g_io_block)) {
+        return FS_ERR_IO;
+    }
+    if (blk_read_sectors(lba, g_ext4.sectors_per_block, (uint32_t)(uintptr_t)dst) != BLK_OK) {
+        return FS_ERR_IO;
+    }
+    return 0;
+}
+
+static int ext4_write_block_locked(uint32_t fs_block, const uint8_t *src) {
+    uint32_t lba = EXT4_FS_LBA_BASE + fs_block * g_ext4.sectors_per_block;
+    if (!src || g_ext4.block_size == 0u || g_ext4.block_size > sizeof(g_io_block)) {
+        return FS_ERR_IO;
+    }
+    if (blk_write_sectors(lba, g_ext4.sectors_per_block, (uint32_t)(uintptr_t)src) != BLK_OK) {
+        return FS_ERR_IO;
+    }
+    return 0;
+}
+
+static int ext4_read_group_desc_locked(uint32_t group, uint32_t *out_block_bitmap, uint32_t *out_inode_table) {
+    uint32_t gdt_first_block;
+    uint32_t desc_off;
+    uint32_t block;
+    uint32_t in_block_off;
+    uint32_t first_part;
+    uint32_t block_bitmap_lo;
+    uint32_t inode_table_lo;
+    uint32_t block_bitmap_hi = 0u;
+    uint32_t inode_table_hi = 0u;
+
+    if ((!out_inode_table && !out_block_bitmap) || group >= g_ext4.group_count) {
+        return FS_ERR_INVAL;
+    }
+    if (g_ext4.desc_size < 32u || g_ext4.desc_size > sizeof(g_desc_buf)) {
+        return FS_ERR_NOSYS;
+    }
+
+    gdt_first_block = (g_ext4.block_size == 1024u) ? 2u : 1u;
+    desc_off = group * g_ext4.desc_size;
+    block = gdt_first_block + (desc_off / g_ext4.block_size);
+    in_block_off = desc_off % g_ext4.block_size;
+
+    if (ext4_read_block_locked(block, g_io_block) != 0) {
+        return FS_ERR_IO;
+    }
+    if (in_block_off + g_ext4.desc_size <= g_ext4.block_size) {
+        for (uint32_t i = 0u; i < g_ext4.desc_size; i++) {
+            g_desc_buf[i] = g_io_block[in_block_off + i];
+        }
+    } else {
+        first_part = g_ext4.block_size - in_block_off;
+        for (uint32_t i = 0u; i < first_part; i++) {
+            g_desc_buf[i] = g_io_block[in_block_off + i];
+        }
+        if (ext4_read_block_locked(block + 1u, g_io_block) != 0) {
+            return FS_ERR_IO;
+        }
+        for (uint32_t i = first_part; i < g_ext4.desc_size; i++) {
+            g_desc_buf[i] = g_io_block[i - first_part];
+        }
+    }
+
+    block_bitmap_lo = rd_le32(&g_desc_buf[0x00u]);
+    inode_table_lo = rd_le32(&g_desc_buf[0x08u]);
+    if ((g_ext4.feature_incompat & EXT4_INCOMPAT_64BIT) != 0u && g_ext4.desc_size >= 64u) {
+        block_bitmap_hi = rd_le32(&g_desc_buf[0x20u]);
+        inode_table_hi = rd_le32(&g_desc_buf[0x28u]);
+        if (block_bitmap_hi != 0u) {
+            return FS_ERR_NOSYS;
+        }
+        if (inode_table_hi != 0u) {
+            return FS_ERR_NOSYS;
+        }
+    }
+    if (out_block_bitmap) {
+        *out_block_bitmap = block_bitmap_lo;
+    }
+    if (out_inode_table) {
+        *out_inode_table = inode_table_lo;
+    }
+    return 0;
+}
+
+static int ext4_read_inode_locked(uint32_t inode_no, uint8_t *out_inode) {
+    uint32_t group;
+    uint32_t index;
+    uint32_t inode_table;
+    uint32_t inode_off;
+    uint32_t block;
+    uint32_t off;
+    if (!out_inode || inode_no == 0u || g_ext4.inodes_per_group == 0u) {
+        return FS_ERR_INVAL;
+    }
+
+    group = (inode_no - 1u) / g_ext4.inodes_per_group;
+    index = (inode_no - 1u) % g_ext4.inodes_per_group;
+    if (group >= g_ext4.group_count) {
+        return FS_ERR_NOENT;
+    }
+    if (ext4_read_group_desc_locked(group, 0, &inode_table) != 0) {
+        return FS_ERR_IO;
+    }
+
+    inode_off = index * g_ext4.inode_size;
+    block = inode_table + (inode_off / g_ext4.block_size);
+    off = inode_off % g_ext4.block_size;
+
+    if (ext4_read_block_locked(block, g_io_block) != 0) {
+        return FS_ERR_IO;
+    }
+    if (off + g_ext4.inode_size <= g_ext4.block_size) {
+        for (uint32_t i = 0u; i < g_ext4.inode_size; i++) {
+            out_inode[i] = g_io_block[off + i];
+        }
+    } else {
+        uint32_t first_part = g_ext4.block_size - off;
+        for (uint32_t i = 0u; i < first_part; i++) {
+            out_inode[i] = g_io_block[off + i];
+        }
+        if (ext4_read_block_locked(block + 1u, g_io_block) != 0) {
+            return FS_ERR_IO;
+        }
+        for (uint32_t i = first_part; i < g_ext4.inode_size; i++) {
+            out_inode[i] = g_io_block[i - first_part];
+        }
+    }
+    return 0;
+}
+
+static int ext4_write_inode_locked(uint32_t inode_no, const uint8_t *inode_data) {
+    uint32_t group;
+    uint32_t index;
+    uint32_t inode_table;
+    uint32_t inode_off;
+    uint32_t block;
+    uint32_t off;
+    if (!inode_data || inode_no == 0u || g_ext4.inodes_per_group == 0u) {
+        return FS_ERR_INVAL;
+    }
+
+    group = (inode_no - 1u) / g_ext4.inodes_per_group;
+    index = (inode_no - 1u) % g_ext4.inodes_per_group;
+    if (group >= g_ext4.group_count) {
+        return FS_ERR_NOENT;
+    }
+    if (ext4_read_group_desc_locked(group, 0, &inode_table) != 0) {
+        return FS_ERR_IO;
+    }
+
+    inode_off = index * g_ext4.inode_size;
+    block = inode_table + (inode_off / g_ext4.block_size);
+    off = inode_off % g_ext4.block_size;
+
+    if (ext4_read_block_locked(block, g_io_block) != 0) {
+        return FS_ERR_IO;
+    }
+    if (off + g_ext4.inode_size <= g_ext4.block_size) {
+        for (uint32_t i = 0u; i < g_ext4.inode_size; i++) {
+            g_io_block[off + i] = inode_data[i];
+        }
+        if (ext4_write_block_locked(block, g_io_block) != 0) {
+            return FS_ERR_IO;
+        }
+    } else {
+        uint32_t first_part = g_ext4.block_size - off;
+        for (uint32_t i = 0u; i < first_part; i++) {
+            g_io_block[off + i] = inode_data[i];
+        }
+        if (ext4_write_block_locked(block, g_io_block) != 0) {
+            return FS_ERR_IO;
+        }
+        if (ext4_read_block_locked(block + 1u, g_io_block) != 0) {
+            return FS_ERR_IO;
+        }
+        for (uint32_t i = first_part; i < g_ext4.inode_size; i++) {
+            g_io_block[i - first_part] = inode_data[i];
+        }
+        if (ext4_write_block_locked(block + 1u, g_io_block) != 0) {
+            return FS_ERR_IO;
+        }
+    }
+    return 0;
+}
+
+static inline uint16_t ext4_inode_mode(const uint8_t *inode) {
+    return rd_le16(&inode[0x00u]);
+}
+
+static inline uint32_t ext4_inode_flags(const uint8_t *inode) {
+    return rd_le32(&inode[0x20u]);
+}
+
+static uint64_t ext4_inode_size64(const uint8_t *inode) {
+    uint64_t lo = (uint64_t)rd_le32(&inode[0x04u]);
+    uint64_t hi = (uint64_t)rd_le32(&inode[0x6Cu]);
+    return lo | (hi << 32);
+}
+
+static int ext4_extent_map_locked(const uint8_t *extent_root, uint32_t lblock, uint32_t *out_pblock) {
+    const uint8_t *node = extent_root;
+    uint32_t depth_guard = 0u;
+    if (!extent_root || !out_pblock) {
+        return FS_ERR_INVAL;
+    }
+
+    for (;;) {
+        uint16_t magic = rd_le16(&node[0x00u]);
+        uint16_t entries = rd_le16(&node[0x02u]);
+        uint16_t depth = rd_le16(&node[0x06u]);
+        const uint8_t *ent = &node[0x0Cu];
+        uint32_t chosen = 0xFFFFFFFFu;
+
+        if (magic != EXT4_EXTENT_MAGIC) {
+            return FS_ERR_IO;
+        }
+        if (entries == 0u) {
+            return FS_ERR_NOENT;
+        }
+        if (depth > 5u || depth_guard++ > 6u) {
+            return FS_ERR_NOSYS;
+        }
+
+        if (depth == 0u) {
+            for (uint32_t i = 0u; i < (uint32_t)entries; i++) {
+                uint32_t ee_block = rd_le32(&ent[i * 12u + 0u]);
+                uint16_t ee_len_raw = rd_le16(&ent[i * 12u + 4u]);
+                uint16_t ee_start_hi = rd_le16(&ent[i * 12u + 6u]);
+                uint32_t ee_start_lo = rd_le32(&ent[i * 12u + 8u]);
+                uint32_t ee_len = (uint32_t)(ee_len_raw & 0x7FFFu);
+                uint32_t ee_end = ee_block + ee_len;
+                if (ee_len == 0u) {
+                    continue;
+                }
+                if (lblock >= ee_block && lblock < ee_end) {
+                    if (ee_start_hi != 0u) {
+                        return FS_ERR_NOSYS;
+                    }
+                    *out_pblock = ee_start_lo + (lblock - ee_block);
+                    return 0;
+                }
+            }
+            return FS_ERR_NOENT;
+        }
+
+        for (uint32_t i = 0u; i < (uint32_t)entries; i++) {
+            uint32_t ei_block = rd_le32(&ent[i * 12u + 0u]);
+            if (ei_block > lblock) {
+                break;
+            }
+            chosen = i;
+        }
+        if (chosen == 0xFFFFFFFFu) {
+            return FS_ERR_NOENT;
+        }
+        {
+            uint32_t ei_leaf_lo = rd_le32(&ent[chosen * 12u + 4u]);
+            uint16_t ei_leaf_hi = rd_le16(&ent[chosen * 12u + 8u]);
+            if (ei_leaf_hi != 0u) {
+                return FS_ERR_NOSYS;
+            }
+            if (ext4_read_block_locked(ei_leaf_lo, g_tree_block) != 0) {
+                return FS_ERR_IO;
+            }
+            node = g_tree_block;
+        }
+    }
+}
+
+static int ext4_alloc_block_locked(uint32_t inode_no, uint32_t *out_pblock) {
+    uint32_t inode_group;
+    if (!out_pblock || g_ext4.blocks_count == 0u || g_ext4.blocks_per_group == 0u) {
+        return FS_ERR_INVAL;
+    }
+    inode_group = (inode_no > 0u && g_ext4.inodes_per_group != 0u)
+                      ? ((inode_no - 1u) / g_ext4.inodes_per_group)
+                      : 0u;
+    if (inode_group >= g_ext4.group_count) {
+        inode_group = 0u;
+    }
+
+    for (uint32_t pass = 0u; pass < g_ext4.group_count; pass++) {
+        uint32_t group = (inode_group + pass) % g_ext4.group_count;
+        uint32_t bitmap_block = 0u;
+        uint32_t group_first = g_ext4.first_data_block + group * g_ext4.blocks_per_group;
+        uint32_t group_end = group_first + g_ext4.blocks_per_group;
+        uint32_t group_blocks;
+        if (group_first >= g_ext4.blocks_count) {
+            continue;
+        }
+        if (group_end > g_ext4.blocks_count) {
+            group_end = g_ext4.blocks_count;
+        }
+        group_blocks = group_end - group_first;
+        if (group_blocks == 0u) {
+            continue;
+        }
+        if (ext4_read_group_desc_locked(group, &bitmap_block, 0) != 0) {
+            continue;
+        }
+        if (ext4_read_block_locked(bitmap_block, g_io_block) != 0) {
+            continue;
+        }
+        for (uint32_t bit = 0u; bit < group_blocks; bit++) {
+            uint32_t byte_idx = bit >> 3;
+            uint8_t mask = (uint8_t)(1u << (bit & 7u));
+            if (byte_idx >= g_ext4.block_size) {
+                break;
+            }
+            if ((g_io_block[byte_idx] & mask) == 0u) {
+                g_io_block[byte_idx] = (uint8_t)(g_io_block[byte_idx] | mask);
+                if (ext4_write_block_locked(bitmap_block, g_io_block) != 0) {
+                    return FS_ERR_IO;
+                }
+                *out_pblock = group_first + bit;
+                return 0;
+            }
+        }
+    }
+    return FS_ERR_NOSPC;
+}
+
+static int ext4_extent_append_block_locked(uint8_t *extent_root, uint32_t lblock, uint32_t pblock) {
+    uint16_t magic;
+    uint16_t entries;
+    uint16_t max_entries;
+    uint16_t depth;
+    uint8_t *ent;
+    if (!extent_root || pblock >= g_ext4.blocks_count) {
+        return FS_ERR_INVAL;
+    }
+    magic = rd_le16(&extent_root[0x00u]);
+    entries = rd_le16(&extent_root[0x02u]);
+    max_entries = rd_le16(&extent_root[0x04u]);
+    depth = rd_le16(&extent_root[0x06u]);
+    if (magic != EXT4_EXTENT_MAGIC) {
+        return FS_ERR_IO;
+    }
+    if (depth != 0u) {
+        return FS_ERR_NOSYS;
+    }
+    if (entries > max_entries || max_entries == 0u) {
+        return FS_ERR_IO;
+    }
+    ent = &extent_root[0x0Cu];
+    if (entries == 0u) {
+        wr_le32(&ent[0x00u], lblock);
+        wr_le16(&ent[0x04u], 1u);
+        wr_le16(&ent[0x06u], 0u);
+        wr_le32(&ent[0x08u], pblock);
+        wr_le16(&extent_root[0x02u], 1u);
+        return 0;
+    }
+    {
+        uint32_t last_idx = (uint32_t)entries - 1u;
+        uint8_t *last = &ent[last_idx * 12u];
+        uint32_t ee_block = rd_le32(&last[0x00u]);
+        uint16_t ee_len_raw = rd_le16(&last[0x04u]);
+        uint16_t ee_start_hi = rd_le16(&last[0x06u]);
+        uint32_t ee_start_lo = rd_le32(&last[0x08u]);
+        uint32_t ee_len = (uint32_t)(ee_len_raw & 0x7FFFu);
+        uint32_t ee_end = ee_block + ee_len;
+        if ((ee_len_raw & 0x8000u) != 0u || ee_len == 0u || ee_start_hi != 0u) {
+            return FS_ERR_NOSYS;
+        }
+        if (lblock != ee_end) {
+            return FS_ERR_NOSYS;
+        }
+        if (pblock == ee_start_lo + ee_len && ee_len < 0x7FFFu) {
+            wr_le16(&last[0x04u], (uint16_t)(ee_len + 1u));
+            return 0;
+        }
+    }
+    if (entries >= max_entries) {
+        return FS_ERR_NOSPC;
+    }
+    {
+        uint8_t *dst = &ent[(uint32_t)entries * 12u];
+        wr_le32(&dst[0x00u], lblock);
+        wr_le16(&dst[0x04u], 1u);
+        wr_le16(&dst[0x06u], 0u);
+        wr_le32(&dst[0x08u], pblock);
+        wr_le16(&extent_root[0x02u], (uint16_t)(entries + 1u));
+    }
+    return 0;
+}
+
+static int ext4_read_inode_data_locked(uint32_t inode_no, uint32_t offset, uint8_t *dst, uint32_t len) {
+    uint64_t size64;
+    uint32_t size;
+    uint32_t done = 0u;
+    uint32_t flags;
+    const uint8_t *extent_root;
+    if (!dst || len == 0u) {
+        return 0;
+    }
+    if (ext4_read_inode_locked(inode_no, g_inode_buf) != 0) {
+        return FS_ERR_IO;
+    }
+    flags = ext4_inode_flags(g_inode_buf);
+    if ((flags & EXT4_EXTENTS_FL) == 0u) {
+        return FS_ERR_NOSYS;
+    }
+
+    size64 = ext4_inode_size64(g_inode_buf);
+    if (size64 > 0xFFFFFFFFu) {
+        return FS_ERR_NOSYS;
+    }
+    size = (uint32_t)size64;
+    if (offset >= size) {
+        return 0;
+    }
+    if (len > (size - offset)) {
+        len = size - offset;
+    }
+    extent_root = &g_inode_buf[0x28u];
+
+    while (done < len) {
+        uint32_t logical = (offset + done) / g_ext4.block_size;
+        uint32_t in_block = (offset + done) % g_ext4.block_size;
+        uint32_t want = len - done;
+        uint32_t pblock = 0u;
+        int rc;
+        if (want > (g_ext4.block_size - in_block)) {
+            want = g_ext4.block_size - in_block;
+        }
+
+        rc = ext4_extent_map_locked(extent_root, logical, &pblock);
+        if (rc == FS_ERR_NOENT) {
+            for (uint32_t i = 0u; i < want; i++) {
+                dst[done + i] = 0u;
+            }
+            done += want;
+            continue;
+        }
+        if (rc != 0) {
+            return (done != 0u) ? (int)done : rc;
+        }
+        if (ext4_read_block_locked(pblock, g_io_block) != 0) {
+            return (done != 0u) ? (int)done : FS_ERR_IO;
+        }
+        for (uint32_t i = 0u; i < want; i++) {
+            dst[done + i] = g_io_block[in_block + i];
+        }
+        done += want;
+    }
+    return (int)done;
+}
+
+static int ext4_write_inode_data_locked(uint32_t inode_no, uint32_t offset, const uint8_t *src, uint32_t len,
+                                        uint32_t *out_new_size) {
+    uint64_t size64;
+    uint32_t size;
+    uint32_t cur_size;
+    uint32_t done = 0u;
+    uint32_t flags;
+    uint8_t *extent_root;
+    uint32_t inode_dirty = 0u;
+
+    if (!src || len == 0u) {
+        if (out_new_size) {
+            *out_new_size = 0u;
+        }
+        return 0;
+    }
+    if (ext4_read_inode_locked(inode_no, g_inode_buf) != 0) {
+        return FS_ERR_IO;
+    }
+    flags = ext4_inode_flags(g_inode_buf);
+    if ((flags & EXT4_EXTENTS_FL) == 0u) {
+        return FS_ERR_NOSYS;
+    }
+
+    size64 = ext4_inode_size64(g_inode_buf);
+    if (size64 > 0xFFFFFFFFu) {
+        return FS_ERR_NOSYS;
+    }
+    size = (uint32_t)size64;
+    cur_size = size;
+    extent_root = &g_inode_buf[0x28u];
+
+    while (done < len) {
+        uint32_t logical = (offset + done) / g_ext4.block_size;
+        uint32_t in_block = (offset + done) % g_ext4.block_size;
+        uint32_t want = len - done;
+        uint32_t pblock = 0u;
+        int rc;
+
+        if (want > (g_ext4.block_size - in_block)) {
+            want = g_ext4.block_size - in_block;
+        }
+        rc = ext4_extent_map_locked(extent_root, logical, &pblock);
+        if (rc == FS_ERR_NOENT) {
+            uint32_t pos = offset + done;
+            uint32_t eof_lblock = (cur_size + g_ext4.block_size - 1u) / g_ext4.block_size;
+            if (pos < cur_size || logical != eof_lblock) {
+                return (done != 0u) ? (int)done : FS_ERR_NOSYS;
+            }
+            rc = ext4_alloc_block_locked(inode_no, &pblock);
+            if (rc != 0) {
+                return (done != 0u) ? (int)done : rc;
+            }
+            rc = ext4_extent_append_block_locked(extent_root, logical, pblock);
+            if (rc != 0) {
+                return (done != 0u) ? (int)done : rc;
+            }
+            inode_dirty = 1u;
+            for (uint32_t i = 0u; i < g_ext4.block_size; i++) {
+                g_io_block[i] = 0u;
+            }
+            for (uint32_t i = 0u; i < want; i++) {
+                g_io_block[in_block + i] = src[done + i];
+            }
+            if (ext4_write_block_locked(pblock, g_io_block) != 0) {
+                return (done != 0u) ? (int)done : FS_ERR_IO;
+            }
+            done += want;
+            if (offset + done > cur_size) {
+                cur_size = offset + done;
+            }
+            continue;
+        }
+        if (rc != 0) {
+            return (done != 0u) ? (int)done : rc;
+        }
+
+        if (ext4_read_block_locked(pblock, g_io_block) != 0) {
+            return (done != 0u) ? (int)done : FS_ERR_IO;
+        }
+        for (uint32_t i = 0u; i < want; i++) {
+            g_io_block[in_block + i] = src[done + i];
+        }
+        if (ext4_write_block_locked(pblock, g_io_block) != 0) {
+            return (done != 0u) ? (int)done : FS_ERR_IO;
+        }
+        done += want;
+        if (offset + done > cur_size) {
+            cur_size = offset + done;
+        }
+    }
+
+    if (done == 0u && len != 0u) {
+        return FS_ERR_NOSPC;
+    }
+
+    if (cur_size > size) {
+        wr_le32(&g_inode_buf[0x04u], cur_size);
+        wr_le32(&g_inode_buf[0x6Cu], 0u);
+        inode_dirty = 1u;
+    }
+    if (inode_dirty != 0u) {
+        if (ext4_write_inode_locked(inode_no, g_inode_buf) != 0) {
+            return (done != 0u) ? (int)done : FS_ERR_IO;
+        }
+    }
+    if (out_new_size) {
+        *out_new_size = cur_size;
+    }
+
+    return (int)done;
+}
+
+static int ext4_lookup_in_dir_locked(uint32_t dir_ino, const uint8_t *name, uint32_t name_len, uint32_t *out_ino) {
+    uint64_t dir_size64;
+    uint32_t dir_size;
+    uint32_t block_count;
+    const uint8_t *extent_root;
+    if (!name || name_len == 0u || name_len > EXT4_MAX_NAME || !out_ino) {
+        return FS_ERR_INVAL;
+    }
+    if (ext4_read_inode_locked(dir_ino, g_inode_buf) != 0) {
+        return FS_ERR_IO;
+    }
+    if ((ext4_inode_mode(g_inode_buf) & EXT4_S_IFMT) != EXT4_S_IFDIR) {
+        return FS_ERR_NOTDIR;
+    }
+    if ((ext4_inode_flags(g_inode_buf) & EXT4_EXTENTS_FL) == 0u) {
+        return FS_ERR_NOSYS;
+    }
+    dir_size64 = ext4_inode_size64(g_inode_buf);
+    if (dir_size64 > 0xFFFFFFFFu) {
+        return FS_ERR_NOSYS;
+    }
+    dir_size = (uint32_t)dir_size64;
+    block_count = (dir_size + g_ext4.block_size - 1u) / g_ext4.block_size;
+    extent_root = &g_inode_buf[0x28u];
+
+    for (uint32_t lblock = 0u; lblock < block_count; lblock++) {
+        uint32_t pblock = 0u;
+        uint32_t pos = 0u;
+        int rc = ext4_extent_map_locked(extent_root, lblock, &pblock);
+        if (rc == FS_ERR_NOENT) {
+            continue;
+        }
+        if (rc != 0 || ext4_read_block_locked(pblock, g_io_block) != 0) {
+            return FS_ERR_IO;
+        }
+        while (pos + 8u <= g_ext4.block_size) {
+            uint32_t ino = rd_le32(&g_io_block[pos + 0u]);
+            uint16_t rec_len = rd_le16(&g_io_block[pos + 4u]);
+            uint8_t nlen = g_io_block[pos + 6u];
+            if (rec_len < 8u || pos + rec_len > g_ext4.block_size) {
+                break;
+            }
+            if (ino != 0u && nlen == name_len && nlen <= (uint8_t)(rec_len - 8u) &&
+                mem_eq_u8(&g_io_block[pos + 8u], name, name_len)) {
+                *out_ino = ino;
+                return 0;
+            }
+            pos += rec_len;
+        }
+    }
+    return FS_ERR_NOENT;
+}
+
+static int ext4_lookup_path_locked(const char *path, uint32_t *out_ino, uint16_t *out_mode, uint32_t *out_size) {
+    uint32_t cur_ino = EXT4_ROOT_INO;
+    uint32_t i = 0u;
+    if (!path || path[0] != '/' || !out_ino || !out_mode || !out_size) {
+        return FS_ERR_INVAL;
+    }
+
+    while (path[i] == '/') {
+        i++;
+    }
+    if (path[i] == '\0') {
+        if (ext4_read_inode_locked(cur_ino, g_inode_buf) != 0) {
+            return FS_ERR_IO;
+        }
+        *out_ino = cur_ino;
+        *out_mode = ext4_inode_mode(g_inode_buf);
+        *out_size = (uint32_t)ext4_inode_size64(g_inode_buf);
+        return 0;
+    }
+
+    while (path[i] != '\0') {
+        uint8_t comp[EXT4_MAX_NAME];
+        uint32_t n = 0u;
+        uint32_t next_ino = 0u;
+
+        while (path[i] == '/') {
+            i++;
+        }
+        while (path[i] != '\0' && path[i] != '/') {
+            if (n >= EXT4_MAX_NAME) {
+                return FS_ERR_INVAL;
+            }
+            comp[n++] = (uint8_t)path[i++];
+        }
+        if (n == 0u) {
+            break;
+        }
+        if (ext4_lookup_in_dir_locked(cur_ino, comp, n, &next_ino) != 0) {
+            return FS_ERR_NOENT;
+        }
+        cur_ino = next_ino;
+        while (path[i] == '/') {
+            i++;
+        }
+    }
+
+    if (ext4_read_inode_locked(cur_ino, g_inode_buf) != 0) {
+        return FS_ERR_IO;
+    }
+    *out_ino = cur_ino;
+    *out_mode = ext4_inode_mode(g_inode_buf);
+    *out_size = (uint32_t)ext4_inode_size64(g_inode_buf);
+    return 0;
+}
+
+static int ext4_try_probe_locked(void) {
+    uint16_t magic;
+    uint32_t log_block_size;
+    uint32_t blocks_count_lo;
+    uint32_t blocks_count_hi;
+    uint64_t blocks_count;
+    uint64_t groups;
+
+    if (g_ext4.probe_done != 0u) {
+        return g_ext4.mounted ? 0 : FS_ERR_NOENT;
+    }
+
+    if (blk_read_sectors(EXT4_FS_LBA_BASE + EXT4_SUPER_LBA_OFF,
+                         EXT4_SUPER_LBA_COUNT,
+                         (uint32_t)(uintptr_t)&g_super[0]) != BLK_OK) {
+        g_ext4.probe_done = 1u;
+        g_ext4.mounted = 0u;
+        return FS_ERR_NOENT;
+    }
+
+    magic = rd_le16(&g_super[0x38u]);
+    if (magic != EXT4_SUPER_MAGIC) {
+        g_ext4.probe_done = 1u;
+        g_ext4.mounted = 0u;
+        return FS_ERR_NOENT;
+    }
+
+    log_block_size = rd_le32(&g_super[0x18u]);
+    if (log_block_size > 2u) {
+        g_ext4.probe_done = 1u;
+        g_ext4.mounted = 0u;
+        return FS_ERR_NOSYS;
+    }
+
+    g_ext4.block_size = 1024u << log_block_size;
+    g_ext4.sectors_per_block = g_ext4.block_size / 512u;
+    g_ext4.first_data_block = rd_le32(&g_super[0x14u]);
+    g_ext4.blocks_per_group = rd_le32(&g_super[0x20u]);
+    g_ext4.inodes_per_group = rd_le32(&g_super[0x28u]);
+    g_ext4.inode_size = rd_le16(&g_super[0x58u]);
+    g_ext4.feature_incompat = rd_le32(&g_super[0x60u]);
+    g_ext4.desc_size = rd_le16(&g_super[0xFEu]);
+    if (g_ext4.desc_size < 32u) {
+        g_ext4.desc_size = 32u;
+    }
+    if (g_ext4.desc_size > 64u) {
+        g_ext4.probe_done = 1u;
+        g_ext4.mounted = 0u;
+        return FS_ERR_NOSYS;
+    }
+
+    if (g_ext4.inode_size < 128u || g_ext4.inode_size > sizeof(g_inode_buf) ||
+        g_ext4.blocks_per_group == 0u || g_ext4.inodes_per_group == 0u ||
+        g_ext4.sectors_per_block == 0u) {
+        g_ext4.probe_done = 1u;
+        g_ext4.mounted = 0u;
+        return FS_ERR_NOSYS;
+    }
+
+    blocks_count_lo = rd_le32(&g_super[0x04u]);
+    blocks_count_hi = rd_le32(&g_super[0x150u]);
+    if (blocks_count_hi != 0u) {
+        g_ext4.probe_done = 1u;
+        g_ext4.mounted = 0u;
+        return FS_ERR_NOSYS;
+    }
+    blocks_count = (uint64_t)blocks_count_lo | ((uint64_t)blocks_count_hi << 32);
+    if (blocks_count <= g_ext4.first_data_block) {
+        g_ext4.probe_done = 1u;
+        g_ext4.mounted = 0u;
+        return FS_ERR_NOSYS;
+    }
+    groups = (blocks_count - g_ext4.first_data_block + g_ext4.blocks_per_group - 1u) /
+             g_ext4.blocks_per_group;
+    if (groups == 0u || groups > 0xFFFFFFFFu) {
+        g_ext4.probe_done = 1u;
+        g_ext4.mounted = 0u;
+        return FS_ERR_NOSYS;
+    }
+    g_ext4.blocks_count = (uint32_t)blocks_count;
+    g_ext4.group_count = (uint32_t)groups;
+
+    g_ext4.probe_done = 1u;
+    g_ext4.mounted = 1u;
+
+    klog_begin(KLOG_LEVEL_INFO, "ext4");
+    klog_puts("mounted block=");
+    klog_hex32(g_ext4.block_size);
+    klog_puts(" groups=");
+    klog_hex32(g_ext4.group_count);
+    klog_end();
+    return 0;
+}
+
+void fs_ext4_init(void) {
+    g_ext4.probe_done = 0u;
+    g_ext4.mounted = 0u;
+    g_ext4.block_size = 0u;
+    g_ext4.sectors_per_block = 0u;
+    g_ext4.blocks_count = 0u;
+    g_ext4.first_data_block = 0u;
+    g_ext4.blocks_per_group = 0u;
+    g_ext4.inodes_per_group = 0u;
+    g_ext4.inode_size = 0u;
+    g_ext4.group_count = 0u;
+    g_ext4.desc_size = 0u;
+    g_ext4.feature_incompat = 0u;
+    spinlock_init(&g_ext4_lock);
+    sched_waitq_init(&g_ext4_waitq);
+    g_ext4_lock_held = 0u;
+}
+
+int fs_ext4_open(const char *path, uint32_t flags) {
+    uint32_t ino = 0u;
+    uint32_t size = 0u;
+    uint16_t mode = 0u;
+    uint32_t accmode = flags & SYS_O_ACCMODE;
+    uint32_t status_flags = flags & (SYS_O_ACCMODE | SYS_O_NONBLOCK);
+    int rc = 0;
+
+    if (!path || path[0] != '/') {
+        return FS_ERR_INVAL;
+    }
+    if ((flags & (SYS_O_CREAT | SYS_O_TRUNC)) != 0u) {
+        return FS_ERR_ROFS;
+    }
+
+    ext4_mutex_lock();
+    rc = ext4_try_probe_locked();
+    if (rc != 0) {
+        ext4_mutex_unlock();
+        return rc;
+    }
+    rc = ext4_lookup_path_locked(path, &ino, &mode, &size);
+    ext4_mutex_unlock();
+    if (rc != 0) {
+        return rc;
+    }
+    if ((mode & EXT4_S_IFMT) == EXT4_S_IFDIR) {
+        return FS_ERR_ISDIR;
+    }
+    if ((mode & EXT4_S_IFMT) != EXT4_S_IFREG) {
+        return FS_ERR_INVAL;
+    }
+    return sched_fd_open_regular(status_flags, FS_BACKEND_EXT4, ino, size, 0u);
+}
+
+int fs_ext4_read_fd(int32_t fd, uint8_t *dst, uint32_t len) {
+    uint32_t backend = 0u;
+    uint32_t ino = 0u;
+    uint32_t size = 0u;
+    uint32_t off = 0u;
+    uint32_t is_dir = 0u;
+    int rc;
+
+    if (!dst || len == 0u) {
+        return 0;
+    }
+    if (sched_fd_regular_get(fd, &backend, &ino, &size, &off, &is_dir) != SCHED_FD_OK) {
+        return FS_ERR_BADF;
+    }
+    if (backend != FS_BACKEND_EXT4) {
+        return FS_ERR_BADF;
+    }
+    if (is_dir != 0u) {
+        return FS_ERR_ISDIR;
+    }
+    if (off >= size) {
+        return 0;
+    }
+    if (len > (size - off)) {
+        len = size - off;
+    }
+
+    ext4_mutex_lock();
+    rc = ext4_try_probe_locked();
+    if (rc == 0) {
+        rc = ext4_read_inode_data_locked(ino, off, dst, len);
+    }
+    ext4_mutex_unlock();
+    if (rc < 0) {
+        return rc;
+    }
+    if (rc > 0) {
+        (void)sched_fd_regular_advance(fd, (uint32_t)rc, 0);
+    }
+    return rc;
+}
+
+int fs_ext4_write_fd(int32_t fd, const uint8_t *src, uint32_t len) {
+    uint32_t backend = 0u;
+    uint32_t ino = 0u;
+    uint32_t size = 0u;
+    uint32_t off = 0u;
+    uint32_t is_dir = 0u;
+    uint32_t new_size = 0u;
+    int rc;
+    if (sched_fd_regular_get(fd, &backend, &ino, &size, &off, &is_dir) != SCHED_FD_OK) {
+        return FS_ERR_BADF;
+    }
+    if (backend != FS_BACKEND_EXT4) {
+        return FS_ERR_BADF;
+    }
+    if (is_dir != 0u) {
+        return FS_ERR_ISDIR;
+    }
+    if (!src || len == 0u) {
+        return 0;
+    }
+
+    ext4_mutex_lock();
+    rc = ext4_try_probe_locked();
+    if (rc == 0) {
+        rc = ext4_write_inode_data_locked(ino, off, src, len, &new_size);
+    }
+    ext4_mutex_unlock();
+    if (rc <= 0) {
+        return rc;
+    }
+    (void)sched_fd_regular_commit_write(fd, (uint32_t)rc, new_size, 0);
+    return rc;
+}

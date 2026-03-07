@@ -15,11 +15,13 @@ Implemented now:
 - tty mode syscalls: `tty_getmode`, `tty_setmode`
 - filesystem/network surface:
   - `open` for `/dev/null`, `/dev/zero`, `/dev/tty`
+  - `open/read/write` for ext4 regular files (absolute path)
   - `socket/connect/bind/listen/accept/send/recv` with stable stub errno behavior
 
 Not implemented yet:
 
-- regular filesystem (inode/path lookup beyond `/dev/*`)
+- ext4 create/truncate/unlink/rename and directory mutation
+- sparse write and deep extent-tree growth (`depth > 0`) in write path
 - real socket transport/protocol stack
 - process groups/sessions/signals beyond tty line discipline behavior
 
@@ -40,6 +42,7 @@ Current fd types:
 
 - stdio: `stdin(0)`, `stdout(1)`, `stderr(2)`
 - special dev fds from `open`: `/dev/null`, `/dev/zero`, `/dev/tty`
+- regular file fds from ext4 `open(path, ...)`
 - socket fds from `socket()`
 
 `fcntl` support:
@@ -66,12 +69,14 @@ By fd type:
 
 - `/dev/null` read: returns `0`
 - `/dev/zero` read: fills user buffer with zero bytes
+- regular file read: offset-based ext4 inode read, EOF returns `0`
 - socket read (stub): `-1/ENOTCONN`
 
 `write` by fd type:
 
 - stdio and `/dev/tty`: console output path
 - `/dev/null` and `/dev/zero`: accepted, returns requested length
+- regular file write: supports in-extent overwrite and EOF append with inode size update
 - socket write (stub): `-1/ENOTCONN`
 
 ## TTY Line Discipline
@@ -108,10 +113,14 @@ Canonical read visibility:
 - `/dev/null`
 - `/dev/zero`
 - `/dev/tty`
+- absolute ext4 path (`/foo/bar`)
 
-Other paths:
+ext4 open notes:
 
-- `-1/ENOENT`
+- missing path: `-1/ENOENT`
+- opening directory as file: `-1/EISDIR`
+- `O_CREAT`/`O_TRUNC`: `-1/EROFS` (not implemented yet)
+- unsupported ext4 write shape: `-1/ENOSYS`
 
 Socket syscall status:
 
@@ -132,6 +141,7 @@ Coverage currently includes:
 - `dup/close/fcntl/read/poll/select` baseline
 - `/dev/null`, `/dev/zero`, `/dev/tty` open and I/O behavior
 - socket stub errno behavior
+- SMP waitq/poll/select stress behavior (`fdtest`)
 
 Typical boot test flow:
 
@@ -147,4 +157,3 @@ fdtest
 poll
 tty
 ```
-
