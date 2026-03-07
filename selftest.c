@@ -317,6 +317,9 @@ static int run_selftest_div0_interrupt_conformance(void) {
         INST(OP_LOAD32, 22, 21, 0, 0),
         INST(OP_INC, 22, 0, 0, 0),
         INST(OP_STORE32, 22, 21, 0, 0),
+        INST(OP_MOVI, 23, 0, 0, INTC_BASE + INTC_REG_EOI), /* ISR: EOI(INT_DIVIDE_BY_ZERO) */
+        INST(OP_MOVI, 24, 0, 0, INT_DIVIDE_BY_ZERO),
+        INST(OP_STORE32, 24, 23, 0, 0),
         INST(OP_IRET, 0, 0, 0, 0),
     };
 

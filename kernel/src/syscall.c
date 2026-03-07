@@ -657,13 +657,17 @@ uint32_t syscall_dispatch(const syscall_regs_t *regs) {
                  */
                 int n = console_read(byte_buf, want, (copied != 0u) ? 1u : nonblock);
                 if (n == CONSOLE_IO_BLOCKED) {
-                    if (copied == 0u) {
+                    if (copied != 0u) {
+                        ret = copied;
+                        break;
+                    }
+                    if (nonblock) {
                         err = ERRNO_EAGAIN;
                         ret = (uint32_t)-1;
-                    } else {
-                        ret = copied;
+                        break;
                     }
-                    break;
+                    sched_block_until_runnable();
+                    continue;
                 }
                 if (n == 0) {
                     if (copied != 0u) {

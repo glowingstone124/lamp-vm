@@ -22,6 +22,11 @@ void irq_common_entry(uint32_t irq_no);
 void irq_common_entry_from_stub(void);
 void irq_stub_entry(void);
 
+void irq_enable(uint32_t irq_no);
+void irq_disable(uint32_t irq_no);
+void irq_set_priority(uint32_t irq_no, uint32_t priority);
+void irq_eoi(uint32_t irq_no);
+
 void irq_input_init(void);
 uint32_t irq_input_dropped(void);
 const trap_frame_t *irq_last_trap_frame(void);

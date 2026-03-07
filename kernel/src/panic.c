@@ -19,27 +19,27 @@ static void kpanic_emit_prefix(void) {
 void kpanic(const char *msg) {
     const trap_frame_t *tf = irq_last_trap_frame();
     kpanic_emit_prefix();
-    klog_prefix(KLOG_LEVEL_ERROR, "panic");
-    kputs("reason=");
+    klog_begin(KLOG_LEVEL_ERROR, "panic");
+    klog_puts("reason=");
     if (msg) {
-        kputs(msg);
+        klog_puts(msg);
     } else {
-        kputs("<null>");
+        klog_puts("<null>");
     }
-    kputs("\n");
+    klog_end();
     if (tf) {
-        klog_prefix(KLOG_LEVEL_ERROR, "panic");
-        kputs("last_irq=");
-        kprint_u32(tf->irq_no);
-        kputs(" dispatch_count=");
-        kprint_u32(tf->dispatch_count);
-        kputs(" ticks=");
-        kprint_u32(tf->tick_snapshot);
-        kputs("\n");
+        klog_begin(KLOG_LEVEL_ERROR, "panic");
+        klog_puts("last_irq=");
+        klog_hex32(tf->irq_no);
+        klog_puts(" dispatch_count=");
+        klog_hex32(tf->dispatch_count);
+        klog_puts(" ticks=");
+        klog_hex32(tf->tick_snapshot);
+        klog_end();
     }
-    klog_prefix(KLOG_LEVEL_ERROR, "panic");
-    kputs("rx_dropped=");
-    kprint_u32(irq_input_dropped());
-    kputs("\n");
+    klog_begin(KLOG_LEVEL_ERROR, "panic");
+    klog_puts("rx_dropped=");
+    klog_hex32(irq_input_dropped());
+    klog_end();
     panic_halt();
 }

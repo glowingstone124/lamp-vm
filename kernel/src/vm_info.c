@@ -53,12 +53,12 @@ static void vm_info_print_vendor(const uint32_t vendor_words[4]) {
             if (c == 0u) {
                 return;
             }
-            kputc(c);
+            klog_putc(c);
             printed = 1;
         }
     }
     if (!printed) {
-        kputs("unknown");
+        klog_puts("unknown");
     }
 }
 
@@ -67,44 +67,45 @@ static void vm_info_log_features(uint32_t features) {
         return;
     }
     int first = 1;
-    klog_prefix(KLOG_LEVEL_INFO, VM_INFO_TAG);
-    kputs("features=");
-    kprint_hex32(features);
-    kputs(" [");
+    klog_begin(KLOG_LEVEL_INFO, VM_INFO_TAG);
+    klog_puts("features=");
+    klog_hex32(features);
+    klog_puts(" [");
     if (features & BOOTINFO_FEATURE_TIME_MMIO) {
-        if (!first) kputc((uint32_t)' ');
-        kputs("TIME");
+        if (!first) klog_putc((uint32_t)' ');
+        klog_puts("TIME");
         first = 0;
     }
     if (features & BOOTINFO_FEATURE_FB_MMIO) {
-        if (!first) kputc((uint32_t)' ');
-        kputs("FB");
+        if (!first) klog_putc((uint32_t)' ');
+        klog_puts("FB");
         first = 0;
     }
     if (features & BOOTINFO_FEATURE_DISK_IO) {
-        if (!first) kputc((uint32_t)' ');
-        kputs("DISK");
+        if (!first) klog_putc((uint32_t)' ');
+        klog_puts("DISK");
         first = 0;
     }
     if (features & BOOTINFO_FEATURE_SMP) {
-        if (!first) kputc((uint32_t)' ');
-        kputs("SMP");
+        if (!first) klog_putc((uint32_t)' ');
+        klog_puts("SMP");
         first = 0;
     }
     if (features & BOOTINFO_FEATURE_TIMER_IRQ) {
-        if (!first) kputc((uint32_t)' ');
-        kputs("TIMER_IRQ");
+        if (!first) klog_putc((uint32_t)' ');
+        klog_puts("TIMER_IRQ");
         first = 0;
     }
     if (features & BOOTINFO_FEATURE_INTC_MMIO) {
-        if (!first) kputc((uint32_t)' ');
-        kputs("INTC_MMIO");
+        if (!first) klog_putc((uint32_t)' ');
+        klog_puts("INTC_MMIO");
         first = 0;
     }
     if (first) {
-        kputs("none");
+        klog_puts("none");
     }
-    kputs("]\n");
+    klog_puts("]");
+    klog_end();
 }
 
 void vm_info_log_boot(void) {
@@ -115,53 +116,53 @@ void vm_info_log_boot(void) {
     }
 
     if (klog_should_emit(KLOG_LEVEL_INFO)) {
-        klog_prefix(KLOG_LEVEL_INFO, VM_INFO_TAG);
-        kputs("vendor=");
+        klog_begin(KLOG_LEVEL_INFO, VM_INFO_TAG);
+        klog_puts("vendor=");
         vm_info_print_vendor(info.vendor_words);
-        kputs("\n");
+        klog_end();
 
-        klog_prefix(KLOG_LEVEL_INFO, VM_INFO_TAG);
-        kputs("mem_lo=");
-        kprint_hex32(info.mem_bytes_lo);
-        kputs(" mem_hi=");
-        kprint_hex32(info.mem_bytes_hi);
-        kputs(" disk_lo=");
-        kprint_hex32(info.disk_bytes_lo);
-        kputs(" disk_hi=");
-        kprint_hex32(info.disk_bytes_hi);
-        kputs(" smp=");
-        kprint_hex32(info.smp_cores);
-        kputs("\n");
+        klog_begin(KLOG_LEVEL_INFO, VM_INFO_TAG);
+        klog_puts("mem_lo=");
+        klog_hex32(info.mem_bytes_lo);
+        klog_puts(" mem_hi=");
+        klog_hex32(info.mem_bytes_hi);
+        klog_puts(" disk_lo=");
+        klog_hex32(info.disk_bytes_lo);
+        klog_puts(" disk_hi=");
+        klog_hex32(info.disk_bytes_hi);
+        klog_puts(" smp=");
+        klog_hex32(info.smp_cores);
+        klog_end();
 
-        klog_prefix(KLOG_LEVEL_INFO, VM_INFO_TAG);
-        kputs("layout=");
-        kprint_hex32(info.layout_version);
-        kputs(" arch=");
-        kprint_hex32(info.arch_id);
-        kputs(" endian=");
-        kprint_hex32(info.endian);
-        kputs(" paddr_bits=");
-        kprint_hex32(info.phys_addr_bits);
-        kputs(" page=");
-        kprint_hex32(info.page_size);
-        kputs(" timer_hz=");
-        kprint_hex32(info.timer_freq_hz);
-        kputs("\n");
+        klog_begin(KLOG_LEVEL_INFO, VM_INFO_TAG);
+        klog_puts("layout=");
+        klog_hex32(info.layout_version);
+        klog_puts(" arch=");
+        klog_hex32(info.arch_id);
+        klog_puts(" endian=");
+        klog_hex32(info.endian);
+        klog_puts(" paddr_bits=");
+        klog_hex32(info.phys_addr_bits);
+        klog_puts(" page=");
+        klog_hex32(info.page_size);
+        klog_puts(" timer_hz=");
+        klog_hex32(info.timer_freq_hz);
+        klog_end();
 
-        klog_prefix(KLOG_LEVEL_INFO, VM_INFO_TAG);
-        kputs("fb_w=");
-        kprint_hex32(info.fb_width);
-        kputs(" fb_h=");
-        kprint_hex32(info.fb_height);
-        kputs(" fb_bpp=");
-        kprint_hex32(info.fb_bpp);
-        kputs(" fb_stride=");
-        kprint_hex32(info.fb_stride_bytes);
-        kputs(" boot_rt_lo=");
-        kprint_hex32(info.boot_realtime_ns_lo);
-        kputs(" boot_rt_hi=");
-        kprint_hex32(info.boot_realtime_ns_hi);
-        kputs("\n");
+        klog_begin(KLOG_LEVEL_INFO, VM_INFO_TAG);
+        klog_puts("fb_w=");
+        klog_hex32(info.fb_width);
+        klog_puts(" fb_h=");
+        klog_hex32(info.fb_height);
+        klog_puts(" fb_bpp=");
+        klog_hex32(info.fb_bpp);
+        klog_puts(" fb_stride=");
+        klog_hex32(info.fb_stride_bytes);
+        klog_puts(" boot_rt_lo=");
+        klog_hex32(info.boot_realtime_ns_lo);
+        klog_puts(" boot_rt_hi=");
+        klog_hex32(info.boot_realtime_ns_hi);
+        klog_end();
 
         vm_info_log_features(info.features);
     }
@@ -173,13 +174,13 @@ void vm_info_log_boot(void) {
         KLOGW(VM_INFO_TAG, "arch/endian mismatch");
     }
     if (info.mem_bytes_hi != 0u || info.mem_bytes_lo != KERNEL_MEM_SIZE) {
-        klog_prefix(KLOG_LEVEL_WARN, VM_INFO_TAG);
-        kputs("mem_size contract mismatch expect=");
-        kprint_hex32(KERNEL_MEM_SIZE);
-        kputs(" got_lo=");
-        kprint_hex32(info.mem_bytes_lo);
-        kputs(" got_hi=");
-        kprint_hex32(info.mem_bytes_hi);
-        kputs("\n");
+        klog_begin(KLOG_LEVEL_WARN, VM_INFO_TAG);
+        klog_puts("mem_size contract mismatch expect=");
+        klog_hex32(KERNEL_MEM_SIZE);
+        klog_puts(" got_lo=");
+        klog_hex32(info.mem_bytes_lo);
+        klog_puts(" got_hi=");
+        klog_hex32(info.mem_bytes_hi);
+        klog_end();
     }
 }

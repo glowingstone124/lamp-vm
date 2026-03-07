@@ -7,23 +7,12 @@
 #include "vm.h"
 
 static inline MMIO_Device *find_mmio(VM *vm, uint32_t addr) {
-    //most MMIO traffic repeatedly touches a small range.
-    MMIO_Device *cached = vm->mmio_cache_dev;
-    if (cached && addr >= vm->mmio_cache_start && addr <= vm->mmio_cache_end) {
-        return cached;
-    }
-
     for (int i = 0; i < vm->mmio_count; i++) {
         MMIO_Device *dev = vm->mmio_devices[i];
         if (addr >= dev->start && addr <= dev->end) {
-            vm->mmio_cache_dev = dev;
-            vm->mmio_cache_start = dev->start;
-            vm->mmio_cache_end = dev->end;
             return dev;
         }
     }
-
-    vm->mmio_cache_dev = NULL;
     return NULL;
 }
 

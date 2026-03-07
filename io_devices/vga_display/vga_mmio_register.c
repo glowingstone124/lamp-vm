@@ -18,19 +18,13 @@ static inline size_t fb_pixel_index(VM *vm, uint32_t addr) {
 
 uint32_t fb_read32(VM *vm, uint32_t addr) {
     size_t pixel_index = fb_pixel_index(vm, addr);
-    const size_t row = vm_fb_row_from_pixel_index(pixel_index);
-    vm_fb_row_lock(vm, row);
     uint32_t value = vm->fb[pixel_index];
-    vm_fb_row_unlock(vm, row);
     return value;
 }
 
 void fb_write32(VM *vm, uint32_t addr, uint32_t value) {
     size_t pixel_index = fb_pixel_index(vm, addr);
-    const size_t row = vm_fb_row_from_pixel_index(pixel_index);
-    vm_fb_row_lock(vm, row);
     vm->fb[pixel_index] = value;
-    vm_fb_row_unlock(vm, row);
 }
 
 void register_fb_mmio(VM *vm) {

@@ -20,10 +20,9 @@ static inline void memcheck_align(VM *vm, vm_addr_t addr, size_t align, const ch
 uint8_t vm_read8(VM *vm, vm_addr_t addr) {
     size_t fb_index = 0;
     if (fb_byte_index(vm, addr, &fb_index)) {
-        const size_t row = vm_fb_row_from_byte_index(fb_index);
-        vm_fb_row_lock(vm, row);
+        vm_shared_lock(vm);
         uint8_t v = ((uint8_t *) vm->fb)[fb_index];
-        vm_fb_row_unlock(vm, row);
+        vm_shared_unlock(vm);
         return v;
     }
     if (!in_ram(vm, addr, 1)) {
@@ -39,11 +38,6 @@ uint32_t vm_read32(VM *vm, vm_addr_t addr) {
 #endif
     MMIO_Device *dev = find_mmio(vm, addr);
     if (dev) {
-        size_t fb_index = 0;
-        if (fb_byte_index(vm, addr, &fb_index)) {
-            return vm_mmio_read32(vm, addr);
-        }
-        // MMIO reads must be synchronized with device state.
         vm_shared_lock(vm);
         uint32_t v = vm_mmio_read32(vm, addr);
         vm_shared_unlock(vm);
@@ -125,10 +119,9 @@ uint32_t vm_atomic_compare_exchange32_seqcst(VM *vm,
 void vm_write8(VM *vm, vm_addr_t addr, uint8_t value) {
     size_t fb_index = 0;
     if (fb_byte_index(vm, addr, &fb_index)) {
-        const size_t row = vm_fb_row_from_byte_index(fb_index);
-        vm_fb_row_lock(vm, row);
+        vm_shared_lock(vm);
         ((uint8_t *) vm->fb)[fb_index] = value;
-        vm_fb_row_unlock(vm, row);
+        vm_shared_unlock(vm);
         return;
     }
 
@@ -146,11 +139,6 @@ void vm_write32(VM *vm, vm_addr_t addr, uint32_t value) {
 #endif
     MMIO_Device *dev = find_mmio(vm, addr);
     if (dev && dev->write32) {
-        size_t fb_index = 0;
-        if (fb_byte_index(vm, addr, &fb_index)) {
-            dev->write32(vm, addr, value);
-            return;
-        }
         vm_shared_lock(vm);
         dev->write32(vm, addr, value);
         vm_shared_unlock(vm);

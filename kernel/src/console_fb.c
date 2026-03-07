@@ -101,19 +101,6 @@ static void newline(void) {
     }
 }
 
-void console_fb_init(void) {
-    g_fg = FG_DEFAULT;
-    g_bg = BG_DEFAULT;
-    g_cursor_x = 0;
-    g_cursor_y = 0;
-    console_fb_clear();
-}
-
-void console_fb_set_colors(uint32_t fg, uint32_t bg) {
-    g_fg = fg;
-    g_bg = bg;
-}
-
 void console_fb_clear(void) {
     for (int y = 0; y < (int)FB_HEIGHT; y++) {
         for (int x = 0; x < (int)FB_WIDTH; x++) {
@@ -172,6 +159,19 @@ void console_fb_putc(uint32_t c) {
     if (g_cursor_x >= COLS) {
         newline();
     }
+}
+
+void console_fb_init(void) {
+    g_fg = FG_DEFAULT;
+    g_bg = BG_DEFAULT;
+    g_cursor_x = 0;
+    g_cursor_y = 0;
+    console_fb_clear();
+}
+
+void console_fb_set_colors(uint32_t fg, uint32_t bg) {
+    g_fg = fg;
+    g_bg = bg;
 }
 
 void console_fb_puts(const char *s) {

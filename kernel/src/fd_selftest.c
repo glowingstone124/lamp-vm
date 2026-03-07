@@ -3,6 +3,7 @@
 #include "../include/kernel/platform.h"
 #include "../include/kernel/printk.h"
 #include "../include/kernel/sched.h"
+#include "../include/kernel/spinlock.h"
 #include "../include/kernel/syscall.h"
 #include "../include/kernel/types.h"
 
@@ -29,6 +30,18 @@ typedef struct fdtest_pollfd32 {
     int16_t revents;
 } fdtest_pollfd32_t;
 
+enum {
+    FDTEST_STRESS_LINES = 32u,
+    FDTEST_STRESS_TIMEOUT_MS = 200,
+    FDTEST_WAITQ_WORKERS = 4u,
+    FDTEST_WAITQ_ROUNDS = 12u,
+    FDTEST_WAITQ_SPIN_TICKS = 128u
+};
+
+typedef struct fdtest_waitq_worker_state {
+    uint32_t waiting;
+} fdtest_waitq_worker_state_t;
+
 static uint8_t g_fdtest_buf[64];
 static fdtest_pollfd32_t g_fdtest_pfd;
 static uint32_t g_fdtest_sel_read;
@@ -36,6 +49,20 @@ static const char g_fdtest_path_dev_null[] = "/dev/null";
 static const char g_fdtest_path_dev_zero[] = "/dev/zero";
 static const char g_fdtest_path_dev_tty[] = "/dev/tty";
 static const char g_fdtest_path_missing[] = "/dev/missing";
+static volatile uint32_t g_fdstress_total_lines;
+static volatile uint32_t g_fdstress_sent_lines;
+static volatile uint32_t g_fdstress_done;
+static spinlock_t g_fdtest_run_lock;
+static volatile uint32_t g_fdtest_running;
+static sched_waitq_t g_fdtest_waitq;
+static spinlock_t g_fdtest_waitq_lock;
+static fdtest_waitq_worker_state_t g_fdtest_waitq_workers[FDTEST_WAITQ_WORKERS];
+static volatile uint32_t g_fdtest_waitq_goal;
+static volatile uint32_t g_fdtest_waitq_ack;
+static volatile uint32_t g_fdtest_waitq_waiting;
+static volatile uint32_t g_fdtest_waitq_done;
+
+static void fdtest_fail(const char *msg, uint32_t got, uint32_t want, uint32_t *fails);
 
 static inline uint32_t abi_read32(uint32_t off) {
     return *(volatile uint32_t *)(uintptr_t)(SYSCALL_ABI_ADDR + off);
@@ -59,9 +86,323 @@ static inline uint32_t ptr32(const void *p) {
         (ret_lval_) = abi_read32(ABI_OFF_RET);                                          \
         (err_lval_) = (((int32_t)(ret_lval_)) == -1) ? abi_read32(ABI_OFF_ERRNO) : 0u; \
     } while (0)
+
 static void fdtest_drain_stdin(void) {
     uint8_t buf[32];
     while (console_read(buf, (uint32_t)sizeof(buf), 1u) > 0) {
+    }
+}
+
+static void fdtest_wait_child_reap(int32_t tid, uint32_t *fails) {
+    uint32_t status = 0u;
+    for (;;) {
+        int rc = sched_waitpid(tid, 0u, &status);
+        if (rc == SCHED_WAITPID_BLOCKED) {
+            sched_block_until_runnable();
+            continue;
+        }
+        if (rc <= 0) {
+            fdtest_fail("waitpid child", (uint32_t)rc, 1u, fails);
+        }
+        break;
+    }
+}
+
+static uint32_t fdtest_wait_child_reap_status(int32_t tid, uint32_t *fails) {
+    uint32_t status = 0u;
+    for (;;) {
+        int rc = sched_waitpid(tid, 0u, &status);
+        if (rc == SCHED_WAITPID_BLOCKED) {
+            sched_block_until_runnable();
+            continue;
+        }
+        if (rc <= 0) {
+            fdtest_fail("waitpid child", (uint32_t)rc, 1u, fails);
+        }
+        break;
+    }
+    return status;
+}
+
+static void fdtest_feeder_task(sched_task_t *task, void *arg) {
+    uint32_t n;
+    (void)task;
+    (void)arg;
+
+    n = g_fdstress_sent_lines;
+    if (n >= g_fdstress_total_lines) {
+        g_fdstress_done = 1u;
+        sched_exit_code(0u);
+        return;
+    }
+
+    /* Feed one full line without textual payload to avoid shell pollution. */
+    console_rx_feed((uint8_t)'\n');
+    g_fdstress_sent_lines = n + 1u;
+    sched_sleep_ticks(1u);
+}
+
+static uint32_t fdtest_count_newlines(const uint8_t *buf, uint32_t n) {
+    uint32_t lines = 0u;
+    for (uint32_t i = 0u; i < n; i++) {
+        if (buf[i] == (uint8_t)'\n') {
+            lines++;
+        }
+    }
+    return lines;
+}
+
+static uint32_t fdtest_waitq_state_get_ack(void) {
+    uint32_t ack;
+    spinlock_lock(&g_fdtest_waitq_lock);
+    ack = g_fdtest_waitq_ack;
+    spinlock_unlock(&g_fdtest_waitq_lock);
+    return ack;
+}
+
+static uint32_t fdtest_waitq_state_get_waiting(void) {
+    uint32_t waiting;
+    spinlock_lock(&g_fdtest_waitq_lock);
+    waiting = g_fdtest_waitq_waiting;
+    spinlock_unlock(&g_fdtest_waitq_lock);
+    return waiting;
+}
+
+static uint32_t fdtest_waitq_wait_for_waiters(uint32_t min_waiters, uint32_t spin_ticks) {
+    for (uint32_t spin = 0u; spin < spin_ticks; spin++) {
+        if (fdtest_waitq_state_get_waiting() >= min_waiters) {
+            return 1u;
+        }
+        sched_sleep_ticks(1u);
+        sched_block_until_runnable();
+    }
+    return 0u;
+}
+
+static void fdtest_waitq_state_stop_all(void) {
+    spinlock_lock(&g_fdtest_waitq_lock);
+    g_fdtest_waitq_done = 1u;
+    spinlock_unlock(&g_fdtest_waitq_lock);
+    sched_waitq_wake_all(&g_fdtest_waitq);
+}
+
+static void fdtest_waitq_worker_task(sched_task_t *task, void *arg) {
+    fdtest_waitq_worker_state_t *st = (fdtest_waitq_worker_state_t *)arg;
+    uint32_t wake_all = 0u;
+    (void)task;
+
+    if (!st) {
+        sched_exit_code(1u);
+        return;
+    }
+
+    spinlock_lock(&g_fdtest_waitq_lock);
+    if (g_fdtest_waitq_done) {
+        spinlock_unlock(&g_fdtest_waitq_lock);
+        sched_exit_code(0u);
+        return;
+    }
+    if (st->waiting == 0u) {
+        st->waiting = 1u;
+        g_fdtest_waitq_waiting++;
+        spinlock_unlock(&g_fdtest_waitq_lock);
+        sched_waitq_sleep(&g_fdtest_waitq, 0u);
+        return;
+    }
+
+    st->waiting = 0u;
+    if (g_fdtest_waitq_waiting != 0u) {
+        g_fdtest_waitq_waiting--;
+    }
+    if (g_fdtest_waitq_ack < g_fdtest_waitq_goal) {
+        g_fdtest_waitq_ack++;
+    }
+    if (g_fdtest_waitq_ack >= g_fdtest_waitq_goal) {
+        g_fdtest_waitq_done = 1u;
+        wake_all = 1u;
+    }
+    spinlock_unlock(&g_fdtest_waitq_lock);
+
+    if (wake_all) {
+        sched_waitq_wake_all(&g_fdtest_waitq);
+    }
+    sched_yield();
+}
+
+static void fdtest_waitq_stress(uint32_t *fails) {
+    int32_t tids[FDTEST_WAITQ_WORKERS];
+    uint32_t i;
+    uint32_t max_loops;
+
+    sched_waitq_init(&g_fdtest_waitq);
+    spinlock_init(&g_fdtest_waitq_lock);
+    spinlock_lock(&g_fdtest_waitq_lock);
+    g_fdtest_waitq_goal = FDTEST_WAITQ_WORKERS * FDTEST_WAITQ_ROUNDS;
+    g_fdtest_waitq_ack = 0u;
+    g_fdtest_waitq_waiting = 0u;
+    g_fdtest_waitq_done = 0u;
+    for (i = 0u; i < FDTEST_WAITQ_WORKERS; i++) {
+        g_fdtest_waitq_workers[i].waiting = 0u;
+    }
+    spinlock_unlock(&g_fdtest_waitq_lock);
+
+    for (i = 0u; i < FDTEST_WAITQ_WORKERS; i++) {
+        tids[i] = sched_spawn("fdwaitq", fdtest_waitq_worker_task, &g_fdtest_waitq_workers[i]);
+        if (tids[i] < 0) {
+            fdtest_fail("spawn waitq worker", (uint32_t)tids[i], 1u, fails);
+            fdtest_waitq_state_stop_all();
+            for (uint32_t j = 0u; j < i; j++) {
+                if (tids[j] > 0) {
+                    fdtest_wait_child_reap(tids[j], fails);
+                }
+            }
+            return;
+        }
+    }
+
+    max_loops = FDTEST_WAITQ_WORKERS * FDTEST_WAITQ_SPIN_TICKS;
+    if (!fdtest_waitq_wait_for_waiters(FDTEST_WAITQ_WORKERS, max_loops)) {
+        fdtest_fail("waitq workers blocked", fdtest_waitq_state_get_waiting(), FDTEST_WAITQ_WORKERS, fails);
+        fdtest_waitq_state_stop_all();
+        for (i = 0u; i < FDTEST_WAITQ_WORKERS; i++) {
+            fdtest_wait_child_reap(tids[i], fails);
+        }
+        return;
+    }
+
+    max_loops = g_fdtest_waitq_goal * FDTEST_WAITQ_SPIN_TICKS * 4u;
+    for (i = 0u; i < max_loops; i++) {
+        uint32_t prev_ack = fdtest_waitq_state_get_ack();
+        uint32_t progressed = 0u;
+        if (prev_ack >= g_fdtest_waitq_goal) {
+            break;
+        }
+        if (!fdtest_waitq_wait_for_waiters(1u, FDTEST_WAITQ_SPIN_TICKS * 2u)) {
+            continue;
+        }
+        sched_waitq_wake_one(&g_fdtest_waitq);
+        for (uint32_t spin = 0u; spin < FDTEST_WAITQ_SPIN_TICKS; spin++) {
+            if (fdtest_waitq_state_get_ack() > prev_ack) {
+                progressed = 1u;
+                break;
+            }
+            sched_sleep_ticks(1u);
+            sched_block_until_runnable();
+        }
+        if (!progressed) {
+            /* Recovery for transient no-op wake windows. */
+            sched_waitq_wake_all(&g_fdtest_waitq);
+        }
+    }
+
+    if (fdtest_waitq_state_get_ack() != g_fdtest_waitq_goal) {
+        fdtest_fail("waitq wake count", fdtest_waitq_state_get_ack(), g_fdtest_waitq_goal, fails);
+    }
+
+    fdtest_waitq_state_stop_all();
+    for (i = 0u; i < FDTEST_WAITQ_WORKERS; i++) {
+        uint32_t status = fdtest_wait_child_reap_status(tids[i], fails);
+        if (status != 0u) {
+            fdtest_fail("waitq worker exit", status, 0u, fails);
+        }
+    }
+}
+
+static void fdtest_poll_stress(uint32_t *fails) {
+    uint32_t ret = 0u;
+    uint32_t err = 0u;
+    uint32_t lines = 0u;
+    uint32_t loops = 0u;
+    int feeder_tid;
+    fdtest_pollfd32_t pfd;
+
+    fdtest_drain_stdin();
+    g_fdstress_total_lines = FDTEST_STRESS_LINES;
+    g_fdstress_sent_lines = 0u;
+    g_fdstress_done = 0u;
+
+    feeder_tid = sched_spawn("fdfeed_poll", fdtest_feeder_task, 0);
+    if (feeder_tid < 0) {
+        fdtest_fail("spawn poll feeder", (uint32_t)feeder_tid, 1u, fails);
+        return;
+    }
+
+    while (lines < FDTEST_STRESS_LINES && loops < FDTEST_STRESS_LINES * 8u) {
+        pfd.fd = 0;
+        pfd.events = (int16_t)SYS_POLLIN;
+        pfd.revents = 0;
+        FDTEST_SYSCALL(SYS_POLL, ptr32(&pfd), 1u, (uint32_t)FDTEST_STRESS_TIMEOUT_MS, 0u, 0u, 0u, ret, err);
+        if (err != 0u) {
+            fdtest_fail("poll stress errno", err, 0u, fails);
+            break;
+        }
+        if (ret == 0u) {
+            loops++;
+            continue;
+        }
+        FDTEST_SYSCALL(SYS_READ, 0u, ptr32(g_fdtest_buf), (uint32_t)sizeof(g_fdtest_buf), 0u, 0u, 0u, ret, err);
+        if (err != 0u || (int32_t)ret < 0) {
+            fdtest_fail("poll stress read", err, 0u, fails);
+            break;
+        }
+        lines += fdtest_count_newlines(g_fdtest_buf, ret);
+        loops++;
+    }
+
+    if (lines < FDTEST_STRESS_LINES) {
+        fdtest_fail("poll stress lines", lines, FDTEST_STRESS_LINES, fails);
+    }
+    fdtest_wait_child_reap(feeder_tid, fails);
+    if (g_fdstress_done == 0u) {
+        fdtest_fail("poll feeder done", g_fdstress_done, 1u, fails);
+    }
+}
+
+static void fdtest_select_stress(uint32_t *fails) {
+    uint32_t ret = 0u;
+    uint32_t err = 0u;
+    uint32_t lines = 0u;
+    uint32_t loops = 0u;
+    int feeder_tid;
+
+    fdtest_drain_stdin();
+    g_fdstress_total_lines = FDTEST_STRESS_LINES;
+    g_fdstress_sent_lines = 0u;
+    g_fdstress_done = 0u;
+
+    feeder_tid = sched_spawn("fdfeed_sel", fdtest_feeder_task, 0);
+    if (feeder_tid < 0) {
+        fdtest_fail("spawn select feeder", (uint32_t)feeder_tid, 1u, fails);
+        return;
+    }
+
+    while (lines < FDTEST_STRESS_LINES && loops < FDTEST_STRESS_LINES * 8u) {
+        g_fdtest_sel_read = 1u << 0;
+        FDTEST_SYSCALL(SYS_SELECT, 1u, ptr32((const void *)&g_fdtest_sel_read), 0u, 0u,
+                       (uint32_t)FDTEST_STRESS_TIMEOUT_MS, 0u, ret, err);
+        if (err != 0u) {
+            fdtest_fail("select stress errno", err, 0u, fails);
+            break;
+        }
+        if (ret == 0u) {
+            loops++;
+            continue;
+        }
+        FDTEST_SYSCALL(SYS_READ, 0u, ptr32(g_fdtest_buf), (uint32_t)sizeof(g_fdtest_buf), 0u, 0u, 0u, ret, err);
+        if (err != 0u || (int32_t)ret < 0) {
+            fdtest_fail("select stress read", err, 0u, fails);
+            break;
+        }
+        lines += fdtest_count_newlines(g_fdtest_buf, ret);
+        loops++;
+    }
+
+    if (lines < FDTEST_STRESS_LINES) {
+        fdtest_fail("select stress lines", lines, FDTEST_STRESS_LINES, fails);
+    }
+    fdtest_wait_child_reap(feeder_tid, fails);
+    if (g_fdstress_done == 0u) {
+        fdtest_fail("select feeder done", g_fdstress_done, 1u, fails);
     }
 }
 
@@ -69,13 +410,13 @@ static void fdtest_fail(const char *msg, uint32_t got, uint32_t want, uint32_t *
     if (fails) {
         (*fails)++;
     }
-    klog_prefix(KLOG_LEVEL_ERROR, "fdtest");
-    kputs(msg);
-    kputs(" got=");
-    kprint_hex32(got);
-    kputs(" want=");
-    kprint_hex32(want);
-    kputc((uint32_t)'\n');
+    klog_begin(KLOG_LEVEL_ERROR, "fdtest");
+    klog_puts(msg);
+    klog_puts(" got=");
+    klog_hex32(got);
+    klog_puts(" want=");
+    klog_hex32(want);
+    klog_end();
 }
 
 void fd_selftest_run(void) {
@@ -86,40 +427,52 @@ void fd_selftest_run(void) {
     uint32_t fd;
     uint32_t i;
     uint32_t old_fl0 = 0u;
+    uint32_t saved_tty_lflag = 0u;
     fdtest_pollfd32_t *pfd = &g_fdtest_pfd;
     volatile uint32_t *sel_read = &g_fdtest_sel_read;
 
-    KLOGI("fdtest", "start v8");
+    spinlock_lock(&g_fdtest_run_lock);
+    if (g_fdtest_running != 0u) {
+        spinlock_unlock(&g_fdtest_run_lock);
+        KLOGW("fdtest", "already running");
+        return;
+    }
+    g_fdtest_running = 1u;
+    spinlock_unlock(&g_fdtest_run_lock);
+
+    KLOGI("fdtest", "start v9");
+    saved_tty_lflag = console_tty_get_lflag();
+    (void)console_tty_set_lflag(saved_tty_lflag & ~TTY_LFLAG_ECHO);
     fdtest_drain_stdin();
 
     FDTEST_SYSCALL(SYS_FCNTL, 0u, SYS_FCNTL_F_GETFL, 0u, 0u, 0u, 0u, old_fl0, err);
     if (err != 0u) {
         fdtest_fail("fcntl(F_GETFL,0)", err, 0u, &fails);
-        return;
+        goto out_restore_tty;
     }
 
     FDTEST_SYSCALL(SYS_DUP, 0u, 0u, 0u, 0u, 0u, 0u, ret, err);
     if (err != 0u || (int32_t)ret < 0) {
         fdtest_fail("dup(stdin) errno", err, 0u, &fails);
         fdtest_fail("dup(stdin) ret", ret, 0u, &fails);
-        klog_prefix(KLOG_LEVEL_ERROR, "fdtest");
-        kputs("dup(stdin) abi last_nr=");
-        kprint_hex32(abi_read32(ABI_OFF_LAST_NR));
-        kputs(" abi errno=");
-        kprint_hex32(abi_read32(ABI_OFF_ERRNO));
-        kputs(" abi ret=");
-        kprint_hex32(abi_read32(ABI_OFF_RET));
-        kputs(" abi tick=");
-        kprint_hex32(abi_read32(ABI_OFF_TICK));
-        kputc((uint32_t)'\n');
+        klog_begin(KLOG_LEVEL_ERROR, "fdtest");
+        klog_puts("dup(stdin) abi last_nr=");
+        klog_hex32(abi_read32(ABI_OFF_LAST_NR));
+        klog_puts(" abi errno=");
+        klog_hex32(abi_read32(ABI_OFF_ERRNO));
+        klog_puts(" abi ret=");
+        klog_hex32(abi_read32(ABI_OFF_RET));
+        klog_puts(" abi tick=");
+        klog_hex32(abi_read32(ABI_OFF_TICK));
+        klog_end();
         if ((int32_t)ret >= 0) {
             (void)sched_fd_close((int32_t)ret);
         }
-        klog_prefix(KLOG_LEVEL_ERROR, "fdtest");
-        kputs("dup(stdin) fd0_open=");
-        kprint_hex32(sched_fd_is_open(0));
-        kputc((uint32_t)'\n');
-        return;
+        klog_begin(KLOG_LEVEL_ERROR, "fdtest");
+        klog_puts("dup(stdin) fd0_open=");
+        klog_hex32(sched_fd_is_open(0));
+        klog_end();
+        goto out_restore_tty;
     }
     dupfd = ret;
     if (dupfd < 3u) {
@@ -329,12 +682,28 @@ void fd_selftest_run(void) {
         fdtest_fail("bind(non-socket)", err, TEST_ERRNO_ENOTSOCK, &fails);
     }
 
+    fdtest_waitq_stress(&fails);
+    fdtest_poll_stress(&fails);
+    fdtest_select_stress(&fails);
+
     if (fails == 0u) {
         KLOGI("fdtest", "pass");
     } else {
-        klog_prefix(KLOG_LEVEL_ERROR, "fdtest");
-        kputs("fail count=");
-        kprint_hex32(fails);
-        kputc((uint32_t)'\n');
+        klog_begin(KLOG_LEVEL_ERROR, "fdtest");
+        klog_puts("fail count=");
+        klog_hex32(fails);
+        klog_end();
     }
+
+out_restore_tty:
+    /*
+     * Keep init shell clean even if stress feeder left residual input:
+     * drain in raw(non-canonical) mode so stale line counters cannot block flushing.
+     */
+    (void)console_tty_set_lflag((saved_tty_lflag & ~(TTY_LFLAG_ECHO | TTY_LFLAG_ICANON)));
+    fdtest_drain_stdin();
+    (void)console_tty_set_lflag(saved_tty_lflag);
+    spinlock_lock(&g_fdtest_run_lock);
+    g_fdtest_running = 0u;
+    spinlock_unlock(&g_fdtest_run_lock);
 }

@@ -4,6 +4,7 @@
 #include "../include/kernel/init_task.h"
 #include "../include/kernel/printk.h"
 #include "../include/kernel/sched.h"
+#include "../include/kernel/spinlock.h"
 #include "../include/kernel/types.h"
 
 enum {
@@ -17,6 +18,11 @@ typedef struct init_state {
 } init_state_t;
 
 static init_state_t g_init_state;
+static spinlock_t g_init_owner_lock;
+static spinlock_t g_init_cmd_lock;
+static volatile uint32_t g_init_owner_tid;
+static volatile uint32_t g_init_busy;
+static volatile uint32_t g_init_fdtest_running;
 
 static void init_puts(const char *s) {
     uint32_t len = 0u;
@@ -152,7 +158,19 @@ static void init_handle_cmd(char *line) {
         return;
     }
     if (init_streq(line, "fdtest")) {
-        fd_selftest_run();
+        uint32_t do_run = 0u;
+        spinlock_lock(&g_init_cmd_lock);
+        if (g_init_fdtest_running == 0u) {
+            g_init_fdtest_running = 1u;
+            do_run = 1u;
+        }
+        spinlock_unlock(&g_init_cmd_lock);
+        if (do_run) {
+            fd_selftest_run();
+            spinlock_lock(&g_init_cmd_lock);
+            g_init_fdtest_running = 0u;
+            spinlock_unlock(&g_init_cmd_lock);
+        }
         return;
     }
     if (init_starts_with(line, "log ")) {
@@ -191,12 +209,33 @@ static void init_handle_cmd(char *line) {
 
 static void init_task_entry(sched_task_t *task, void *arg) {
     init_state_t *st = (init_state_t *)arg;
+    uint8_t cmd[INIT_LINE_CAP];
+    int self_tid;
     uint8_t c = 0u;
     int n;
     (void)task;
     if (!st) {
         return;
     }
+
+    self_tid = sched_current_tid();
+    if (self_tid < 0) {
+        return;
+    }
+    spinlock_lock(&g_init_owner_lock);
+    if (g_init_owner_tid == 0u) {
+        g_init_owner_tid = (uint32_t)self_tid;
+    } else if (g_init_owner_tid != (uint32_t)self_tid) {
+        spinlock_unlock(&g_init_owner_lock);
+        sched_exit();
+        return;
+    }
+    if (g_init_busy != 0u) {
+        spinlock_unlock(&g_init_owner_lock);
+        return;
+    }
+    g_init_busy = 1u;
+    spinlock_unlock(&g_init_owner_lock);
 
     if (!st->started) {
         st->started = 1u;
@@ -206,15 +245,23 @@ static void init_task_entry(sched_task_t *task, void *arg) {
 
     n = console_read(&c, 1u, 1u);
     if (n <= 0) {
-        return;
+        goto out_release;
     }
 
     if (c == (uint8_t)'\n') {
-        st->line[st->len] = '\0';
-        init_handle_cmd((char *)st->line);
+        uint32_t i;
+        uint32_t cmd_len = st->len;
+        if (cmd_len >= (INIT_LINE_CAP - 1u)) {
+            cmd_len = INIT_LINE_CAP - 1u;
+        }
+        for (i = 0u; i < cmd_len; i++) {
+            cmd[i] = st->line[i];
+        }
+        cmd[cmd_len] = '\0';
         st->len = 0u;
+        init_handle_cmd((char *)cmd);
         init_prompt();
-        return;
+        goto out_release;
     }
 
     if (c == (uint8_t)'\t' || c == (uint8_t)'\v' || c == (uint8_t)'\f') {
@@ -226,11 +273,21 @@ static void init_task_entry(sched_task_t *task, void *arg) {
             st->line[st->len++] = c;
         }
     }
+
+out_release:
+    spinlock_lock(&g_init_owner_lock);
+    g_init_busy = 0u;
+    spinlock_unlock(&g_init_owner_lock);
 }
 
 void init_task_spawn(void) {
     g_init_state.len = 0u;
     g_init_state.started = 0u;
+    spinlock_init(&g_init_owner_lock);
+    spinlock_init(&g_init_cmd_lock);
+    g_init_owner_tid = 0u;
+    g_init_busy = 0u;
+    g_init_fdtest_running = 0u;
     if (sched_spawn("init", init_task_entry, &g_init_state) < 0) {
         KLOGW("init", "spawn failed");
     } else {

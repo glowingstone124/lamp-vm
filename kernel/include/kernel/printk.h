@@ -19,6 +19,13 @@ void kprint_hex32(uint32_t v);
 uint32_t klog_should_emit(uint32_t level);
 void klog_set_level(uint32_t level);
 uint32_t klog_get_level(void);
+void kio_lock(void);
+void kio_unlock(void);
+void klog_begin(uint32_t level, const char *tag);
+void klog_end(void);
+void klog_putc(uint32_t c);
+void klog_puts(const char *s);
+void klog_hex32(uint32_t v);
 void klog_prefix(uint32_t level, const char *tag);
 void klog_line(uint32_t level, const char *tag, const char *msg);
 

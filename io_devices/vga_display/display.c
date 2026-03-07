@@ -42,14 +42,11 @@ void display_update(VM *vm) {
     //}
     //printf("\n");
 
-    const size_t row_bytes = (size_t)FB_WIDTH * (size_t)FB_BPP;
     uint8_t *front = (uint8_t *)vm->fb_front;
     const uint8_t *back = (const uint8_t *)vm->fb;
-    for (size_t row = 0; row < FB_HEIGHT; row++) {
-        vm_fb_row_lock(vm, row);
-        memcpy(front + row * row_bytes, back + row * row_bytes, row_bytes);
-        vm_fb_row_unlock(vm, row);
-    }
+    vm_shared_lock(vm);
+    memcpy(front, back, FB_SIZE);
+    vm_shared_unlock(vm);
 
     SDL_UpdateTexture(texture, NULL, vm->fb_front, FB_WIDTH * FB_BPP);
     SDL_RenderClear(renderer);

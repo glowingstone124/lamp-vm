@@ -5,6 +5,7 @@
 
 typedef struct {
     volatile uint32_t v;
+    uint32_t irq_mask_prev;
 } spinlock_t;
 
 void spinlock_init(spinlock_t *lock);

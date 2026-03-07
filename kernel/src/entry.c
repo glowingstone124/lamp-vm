@@ -40,6 +40,8 @@ void kernel_entry(void) {
 
     sched_init();
     init_task_spawn();
+    smp_start_aps();
+    KLOGI("smp", "aps online");
     kernel_late_init();
     KLOGI("sched", "start");
     sched_run();

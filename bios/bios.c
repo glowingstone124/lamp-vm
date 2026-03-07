@@ -5,9 +5,15 @@
 #define IVT_BASE 0x0000u
 #define IVT_ENTRY_SIZE 8u
 #define SYSINFO_MMIO_BASE 0x0074C000u
+#define SYSINFO_REG_FEATURES 0x40u
+#define SYSINFO_FEATURE_INTC_MMIO (1u << 5)
 #define SYSINFO_MAGIC 0x31494D56u /* "VMI1" */
 #define SYSINFO_COPY_START 0x04u
 #define SYSINFO_COPY_END 0x58u
+#define INTC_MMIO_BASE 0x0074D000u
+#define INTC_REG_ENABLE 0x040u
+#define INTC_REG_PRIORITY 0x100u
+#define INTC_REG_EOI 0x500u
 #define BOOTINFO_ADDR 0x002FF000u
 #define BOOTINFO_MAGIC 0x3049424Cu /* "LBI0" */
 #define BOOTINFO_VERSION 2u
@@ -23,6 +29,7 @@
 #define DISK_CMD_READ 1
 
 #define INT_DISK_COMPLETE 0x02
+#define INTC_WORD_COUNT 8u
 
 // ELF settings
 #define ELF_MAGIC0 0x7F
@@ -109,6 +116,33 @@ typedef struct {
 } Elf32_Phdr;
 
 static volatile uint32_t disk_done = 0;
+static volatile uint32_t g_intc_available = 0u;
+
+static inline void intc_write32(uint32_t reg, uint32_t value) {
+    write_u32(INTC_MMIO_BASE + reg, value);
+}
+
+static void bios_intc_init(void) {
+    const uint32_t sysinfo_magic = read_u32(SYSINFO_MMIO_BASE + 0x00u);
+    if (sysinfo_magic != SYSINFO_MAGIC) {
+        g_intc_available = 0u;
+        return;
+    }
+
+    const uint32_t features = read_u32(SYSINFO_MMIO_BASE + SYSINFO_REG_FEATURES);
+    if ((features & SYSINFO_FEATURE_INTC_MMIO) == 0u) {
+        g_intc_available = 0u;
+        return;
+    }
+
+    g_intc_available = 1u;
+    for (uint32_t i = 0; i < INTC_WORD_COUNT; i++) {
+        intc_write32(INTC_REG_ENABLE + i * 4u, 0u);
+    }
+    intc_write32(INTC_REG_PRIORITY + INT_DISK_COMPLETE * 4u, 0xE0u);
+    intc_write32(INTC_REG_ENABLE + (INT_DISK_COMPLETE / 32u) * 4u,
+                 (1u << (INT_DISK_COMPLETE % 32u)));
+}
 
 static void bios_publish_boot_info(void) {
     uint32_t magic = read_u32(SYSINFO_MMIO_BASE + 0x00u);
@@ -134,6 +168,13 @@ __attribute__((naked)) void isr_disk_complete(void) {
         "movi r0, disk_done\n"
         "movi r1, 1\n"
         "store32 r1, r0, 0\n"
+        "movi r0, g_intc_available\n"
+        "load32 r1, r0, 0\n"
+        "jz r1, bios_isr_disk_done_eoi_skip\n"
+        "movi r0, 0x0074D500\n"
+        "movi r1, 2\n"
+        "store32 r1, r0, 0\n"
+        "bios_isr_disk_done_eoi_skip:\n"
         "iret\n"
     );
 }
@@ -218,6 +259,7 @@ static void elf_load_and_jump(void) {
 }
 
 void bios_main(void) {
+    bios_intc_init();
     register_isr(INT_DISK_COMPLETE, isr_disk_complete);
     bios_publish_boot_info();
     elf_load_and_jump();

@@ -218,25 +218,16 @@ void vm_handle_interrupts(VM *vm) {
         return;
     }
 
-    const size_t idx = irq_word_index(core_id, best_int_no);
-    const uint64_t mask = irq_bit_mask(best_int_no);
-    while (1) {
-        uint_fast64_t expected = atomic_load(&vm->interrupt_bitmap[idx]);
-        if ((expected & (uint_fast64_t)mask) == 0u) {
-            return;
-        }
-        if (vm->interrupt_enable_bitmap) {
-            const uint_fast64_t enabled = atomic_load(&vm->interrupt_enable_bitmap[idx]);
-            if ((enabled & (uint_fast64_t)mask) == 0u) {
-                return;
-            }
-        }
-        const uint_fast64_t desired = expected & (uint_fast64_t)(~mask);
-        if (atomic_compare_exchange_weak(&vm->interrupt_bitmap[idx], &expected, desired)) {
-            vm_enter_interrupt(vm, best_int_no);
+    if (vm->interrupt_enable_bitmap) {
+        const size_t idx = irq_word_index(core_id, best_int_no);
+        const uint64_t mask = irq_bit_mask(best_int_no);
+        const uint_fast64_t enabled = atomic_load(&vm->interrupt_enable_bitmap[idx]);
+        if ((enabled & (uint_fast64_t)mask) == 0u) {
             return;
         }
     }
+
+    vm_enter_interrupt(vm, best_int_no);
 }
 
 void init_ivt(VM *vm) {
