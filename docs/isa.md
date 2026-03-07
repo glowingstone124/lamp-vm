@@ -1,9 +1,17 @@
-# LampVM ISA Specification
+# LampVM ISA (Polaris) Specification
+
+Polaris V1.0
+
+Released at 2026/03/07
 
 ## 1. General
 
 LampVM is a **register-based virtual machine** with **64-bit fixed-width instructions**
 and **32-bit general-purpose registers**, designed for system-level and educational use.
+
+Polaris is the name for LampVM's ISA.
+
+This document contains information of Polaris.
 
 - Instruction width: 64 bits
 - Register count: 32 (`r0` – `r31`)
@@ -11,7 +19,6 @@ and **32-bit general-purpose registers**, designed for system-level and educatio
 - Address space: 32 bits, byte-addressed
 - Byte order: Little Endian
 - Execution model: SMP-capable (BSP/AP) with interrupt support
-
 ---
 
 ## 2. Instruction Format
@@ -142,6 +149,10 @@ The opcode-to-mnemonic mapping below is part of the ISA ABI and must remain stab
 | `0x5A` | `RJC` |
 | `0x5B` | `RJNC` |
 | `0x5C` | `INTI` |
+| `0x5D` | `LOADX` |
+| `0x5E` | `LOADX16` |
+| `0x5F` | `STOREX` |
+| `0x60` | `STOREX16` |
 
 ---
 
@@ -235,6 +246,8 @@ This rule is fixed and applies to all current and future instructions.
 - `LOAD32`
 - `LOADS8`
 - `LOADS16`
+- `LOADX`
+- `LOADX16`
 - `LOADX32`
 - `POP`
 - `FTOI` (when input is finite and in-range)
@@ -245,6 +258,8 @@ This rule is fixed and applies to all current and future instructions.
 
 - `STORE`
 - `STORE16`
+- `STOREX`
+- `STOREX16`
 - `STORE32`
 - `STOREX32`
 - `FSTORE32`
@@ -709,17 +724,32 @@ Relative conditional jumps:
 
 ---
 
+### LOADX rd, [rs1 + rs2 + imm]
+
+Indexed 8-bit load (zero-extended to 32 bit).
+
+---
+
+### LOADX16 rd, [rs1 + rs2 + imm]
+
+Indexed 16-bit load (zero-extended to 32 bit).
+
+- Address must be 2-byte aligned
+
+---
+
 ### LOADX32 rd, [rs1 + rs2 + imm]
 
 Indexed 32-bit load.
 
 ---
 
-### STORE / STORE16 / STORE32 / STOREX32
+### STORE / STORE16 / STORE32 / STOREX / STOREX16 / STOREX32
 
 Write operations do not modify FLAGS.
 
 `STORE16` requires 2-byte aligned address.
+`STOREX16` requires 2-byte aligned address.
 
 ---
 
@@ -852,7 +882,7 @@ The following are undefined and may cause VM panic:
 - Out-of-range memory access
 - Invalid IO port
 - Misaligned LOAD32/STORE32
-- Misaligned LOAD16/STORE16/LOADS16
+- Misaligned LOAD16/STORE16/LOADS16/LOADX16/STOREX16
 - Misaligned atomic address (`CAS/XADD/XCHG/LDAR/STLR`)
 
 ---
@@ -861,5 +891,7 @@ The following are undefined and may cause VM panic:
 
 Once defined in this document, instruction semantics are considered ABI-stable.
 Existing instructions must not change behavior.
+
+The current frozen opcode map is defined through `0x60` (`STOREX16`).
 
 Extensions must use new opcodes or mechanisms.

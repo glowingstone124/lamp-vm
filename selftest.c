@@ -386,6 +386,59 @@ static int run_selftest_load16_signext_conformance(void) {
     return ok;
 }
 
+static int run_selftest_indexed_rw_width_conformance(void) {
+    const vm_addr_t flag_addr = 0x3090;
+    const vm_addr_t data_addr = 0x3098;
+    const vm_addr_t fail_addr = PROGRAM_BASE + 29 * 8;
+    uint64_t program[] = {
+        INST(OP_MOVI, 10, 0, 0, flag_addr),
+        INST(OP_MOVI, 11, 0, 0, 0),
+        INST(OP_STORE32, 11, 10, 0, 0),
+        INST(OP_MOVI, 12, 0, 0, data_addr),
+        INST(OP_MOVI, 13, 0, 0, 4),
+        INST(OP_MOVI, 1, 0, 0, 0xA5),
+        INST(OP_STOREX, 1, 12, 13, 1),               /* data[5] = 0xA5 */
+        INST(OP_LOADX, 2, 12, 13, 1),                /* r2 = data[5] */
+        INST(OP_CMPI, 2, 0, 0, 0xA5),
+        INST(OP_JNZ, 0, 0, 0, fail_addr),
+        INST(OP_MOVI, 3, 0, 0, 0xBEEF),
+        INST(OP_STOREX16, 3, 12, 13, 2),             /* *(u16*)(data+6) = 0xBEEF */
+        INST(OP_LOADX16, 4, 12, 13, 2),
+        INST(OP_CMPI, 4, 0, 0, 0xBEEF),
+        INST(OP_JNZ, 0, 0, 0, fail_addr),
+        INST(OP_LOAD, 5, 12, 0, 6),                  /* low byte of 0xBEEF */
+        INST(OP_CMPI, 5, 0, 0, 0xEF),
+        INST(OP_JNZ, 0, 0, 0, fail_addr),
+        INST(OP_LOAD, 6, 12, 0, 7),                  /* high byte of 0xBEEF */
+        INST(OP_CMPI, 6, 0, 0, 0xBE),
+        INST(OP_JNZ, 0, 0, 0, fail_addr),
+        INST(OP_MOVI, 7, 0, 0, 0x12345678),
+        INST(OP_STOREX32, 7, 12, 13, 8),             /* *(u32*)(data+12) */
+        INST(OP_LOADX32, 8, 12, 13, 8),
+        INST(OP_CMPI, 8, 0, 0, 0x12345678),
+        INST(OP_JNZ, 0, 0, 0, fail_addr),
+        INST(OP_MOVI, 11, 0, 0, 1),
+        INST(OP_STORE32, 11, 10, 0, 0),
+        INST(OP_HALT, 0, 0, 0, 0),
+        INST(OP_MOVI, 11, 0, 0, 2),
+        INST(OP_STORE32, 11, 10, 0, 0),
+        INST(OP_HALT, 0, 0, 0, 0),
+    };
+
+    VM *vm = vm_create(MEM_SIZE, program, sizeof(program) / sizeof(program[0]), NULL, 0, NULL, 1);
+    if (!vm)
+        return 0;
+    disk_init(vm, "./disk.img");
+    init_ivt(vm);
+    int ok = vm_run_headless(vm, 1000);
+    uint32_t flag = vm_read32(vm, flag_addr);
+    uint8_t byte5 = vm_read8(vm, data_addr + 5);
+    uint32_t word = vm_read32(vm, data_addr + 12);
+    ok = ok && (flag == 1u) && (byte5 == 0xA5u) && (word == 0x12345678u);
+    vm_destroy(vm);
+    return ok;
+}
+
 static int run_selftest_relcond_extended_conformance(void) {
     const vm_addr_t flag_addr = 0x3070;
     const vm_addr_t fail_addr = PROGRAM_BASE + 26 * 8;
@@ -500,8 +553,9 @@ int run_selftests(void) {
     int ok6 = run_selftest_atomic_conformance();
     int ok7 = run_selftest_div0_interrupt_conformance();
     int ok8 = run_selftest_load16_signext_conformance();
-    int ok9 = run_selftest_relcond_extended_conformance();
-    int ok10 = run_selftest_inti_imm_conformance();
+    int ok9 = run_selftest_indexed_rw_width_conformance();
+    int ok10 = run_selftest_relcond_extended_conformance();
+    int ok11 = run_selftest_inti_imm_conformance();
 
     printf("[selftest] startap_cpuid: %s\n", ok1 ? "PASS" : "FAIL");
     printf("[selftest] ipi: %s\n", ok2 ? "PASS" : "FAIL");
@@ -511,7 +565,8 @@ int run_selftests(void) {
     printf("[selftest] atomic_conformance: %s\n", ok6 ? "PASS" : "FAIL");
     printf("[selftest] div0_interrupt_conformance: %s\n", ok7 ? "PASS" : "FAIL");
     printf("[selftest] load16_signext_conformance: %s\n", ok8 ? "PASS" : "FAIL");
-    printf("[selftest] relcond_extended_conformance: %s\n", ok9 ? "PASS" : "FAIL");
-    printf("[selftest] inti_imm_conformance: %s\n", ok10 ? "PASS" : "FAIL");
-    return (ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10) ? 0 : 1;
+    printf("[selftest] indexed_rw_width_conformance: %s\n", ok9 ? "PASS" : "FAIL");
+    printf("[selftest] relcond_extended_conformance: %s\n", ok10 ? "PASS" : "FAIL");
+    printf("[selftest] inti_imm_conformance: %s\n", ok11 ? "PASS" : "FAIL");
+    return (ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11) ? 0 : 1;
 }

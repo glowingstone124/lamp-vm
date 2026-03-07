@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "../../memory.h"
+#include "../../io.h"
 
 #include "../../interrupt.h"
 
@@ -93,6 +94,7 @@ void* disk_worker(void *arg) {
         pthread_mutex_lock(&vm->disk.mutex);
         vm->disk.current_cmd = DISK_CMD_NONE;
         vm->disk.op_complete = true;
+        vm->io[DISK_STATUS] = DISK_STATUS_FREE;
         pthread_mutex_unlock(&vm->disk.mutex);
     }
     return NULL;
@@ -124,6 +126,7 @@ void disk_init(VM *vm, const char *path) {
     vm->disk.current_cmd = DISK_CMD_NONE;
     vm->disk.op_complete = false;
     vm->disk.thread_running = true;
+    vm->io[DISK_STATUS] = DISK_STATUS_FREE;
 
     pthread_mutex_init(&vm->disk.mutex, NULL);
     pthread_cond_init(&vm->disk.cond_var, NULL);
@@ -195,6 +198,7 @@ void disk_cmd(VM *vm, const int value) {
     vm->disk.current_cmd = value;
     vm->disk.status = DISK_STATUS_BUSY;
     vm->disk.op_complete = false;
+    vm->io[DISK_STATUS] = DISK_STATUS_BUSY;
 
     pthread_cond_signal(&vm->disk.cond_var);
     pthread_mutex_unlock(&vm->disk.mutex);
@@ -207,6 +211,7 @@ void disk_tick(VM *vm) {
     if (vm->disk.op_complete) {
         vm->disk.status = DISK_STATUS_FREE;
         vm->disk.op_complete = false;
+        vm->io[DISK_STATUS] = DISK_STATUS_FREE;
 
         trigger_interrupt(vm, INT_DISK_COMPLETE);
     }

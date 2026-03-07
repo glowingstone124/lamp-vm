@@ -97,6 +97,10 @@ static const char *op_name(uint8_t op) {
         [OP_RCALL] = "RCALL",
         [OP_RJZ] = "RJZ",
         [OP_RJNZ] = "RJNZ",
+        [OP_LOADX] = "LOADX",
+        [OP_LOADX16] = "LOADX16",
+        [OP_STOREX] = "STOREX",
+        [OP_STOREX16] = "STOREX16",
     };
     return names[op] ? names[op] : "UNKNOWN";
 }

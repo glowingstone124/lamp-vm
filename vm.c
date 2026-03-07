@@ -246,6 +246,21 @@ void vm_instruction_case(VM *vm) {
             update_logic_flags(vm, cpu->regs[rd],cpu);
             break;
         }
+        case OP_LOADX: {
+            const vm_addr_t addr = cpu->regs[rs1] + cpu->regs[rs2] + imm;
+            cpu->regs[rd] = (uint32_t)vm_read8(vm, addr);
+            update_zf_sf(vm, cpu->regs[rd], cpu);
+            break;
+        }
+        case OP_LOADX16: {
+            const vm_addr_t addr = cpu->regs[rs1] + cpu->regs[rs2] + imm;
+            ensure_halfword_aligned_or_panic(vm, addr, "LOADX16");
+            const uint16_t v = (uint16_t)((uint16_t)vm_read8(vm, addr) |
+                                          ((uint16_t)vm_read8(vm, addr + 1) << 8));
+            cpu->regs[rd] = (uint32_t)v;
+            update_logic_flags(vm, cpu->regs[rd], cpu);
+            break;
+        }
         case OP_LOADX32: {
             const vm_addr_t addr = cpu->regs[rs1] + cpu->regs[rs2] + imm;
             cpu->regs[rd] = vm_read32(vm, addr);
@@ -260,6 +275,19 @@ void vm_instruction_case(VM *vm) {
         case OP_STORE16: {
             const vm_addr_t addr = cpu->regs[rs1] + imm;
             ensure_halfword_aligned_or_panic(vm, addr, "STORE16");
+            const uint16_t v = (uint16_t)cpu->regs[rd];
+            vm_write8(vm, addr, (uint8_t)(v & 0xFFu));
+            vm_write8(vm, addr + 1, (uint8_t)(v >> 8));
+            break;
+        }
+        case OP_STOREX: {
+            const vm_addr_t addr = cpu->regs[rs1] + cpu->regs[rs2] + imm;
+            vm_write8(vm, addr, (uint8_t)cpu->regs[rd]);
+            break;
+        }
+        case OP_STOREX16: {
+            const vm_addr_t addr = cpu->regs[rs1] + cpu->regs[rs2] + imm;
+            ensure_halfword_aligned_or_panic(vm, addr, "STOREX16");
             const uint16_t v = (uint16_t)cpu->regs[rd];
             vm_write8(vm, addr, (uint8_t)(v & 0xFFu));
             vm_write8(vm, addr + 1, (uint8_t)(v >> 8));

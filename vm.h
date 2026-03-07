@@ -347,6 +347,10 @@ enum {
     OP_RJC = 0x5A,
     OP_RJNC = 0x5B,
     OP_INTI = 0x5C,
+    OP_LOADX = 0x5D,
+    OP_LOADX16 = 0x5E,
+    OP_STOREX = 0x5F,
+    OP_STOREX16 = 0x60,
 };
 
 void vm_dump(const VM *vm, int mem_preview);
