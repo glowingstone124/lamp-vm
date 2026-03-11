@@ -101,6 +101,16 @@ static void vm_info_log_features(uint32_t features) {
         klog_puts("INTC_MMIO");
         first = 0;
     }
+    if (features & BOOTINFO_FEATURE_IOMMU_MMIO) {
+        if (!first) klog_putc((uint32_t)' ');
+        klog_puts("IOMMU_MMIO");
+        first = 0;
+    }
+    if (features & BOOTINFO_FEATURE_MMU_PAGING) {
+        if (!first) klog_putc((uint32_t)' ');
+        klog_puts("MMU_PAGING");
+        first = 0;
+    }
     if (first) {
         klog_puts("none");
     }

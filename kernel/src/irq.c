@@ -41,6 +41,11 @@ void irq_common_entry(uint32_t irq_no) {
     g_last_trap_frame.irq_no = irq_no;
     g_last_trap_frame.dispatch_count++;
     g_last_trap_frame.tick_snapshot = sched_ticks();
+    if (irq_no == IRQ_SYSCALL) {
+        irq_syscall(irq_no);
+        irq_eoi(irq_no);
+        return;
+    }
     trap_dispatch(irq_no);
     irq_eoi(irq_no);
 }

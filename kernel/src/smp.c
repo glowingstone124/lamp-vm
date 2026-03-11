@@ -1,4 +1,5 @@
 #include "../include/kernel/platform.h"
+#include "../include/kernel/mmu.h"
 #include "../include/kernel/printk.h"
 #include "../include/kernel/sched.h"
 #include "../include/kernel/smp.h"
@@ -94,6 +95,7 @@ void smp_init_ap(void) {
     if (cpu_id == 0u || cpu_id >= g_target_cpus) {
         return;
     }
+    mmu_init_ap();
     smp_mark_online(cpu_id);
 }
 

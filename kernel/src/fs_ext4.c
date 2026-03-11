@@ -48,6 +48,20 @@ static uint8_t g_tree_block[4096];
 static uint8_t g_inode_buf[512];
 static uint8_t g_desc_buf[64];
 
+static int ext4_probe_fail_nosys(const char *reason, uint32_t v0, uint32_t v1) {
+    klog_begin(KLOG_LEVEL_ERROR, "ext4");
+    klog_puts("probe nosys ");
+    klog_puts(reason ? reason : "?");
+    klog_puts(" v0=");
+    klog_hex32(v0);
+    klog_puts(" v1=");
+    klog_hex32(v1);
+    klog_end();
+    g_ext4.probe_done = 1u;
+    g_ext4.mounted = 0u;
+    return FS_ERR_NOSYS;
+}
+
 static inline uint16_t rd_le16(const uint8_t *p) {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
@@ -302,10 +316,33 @@ static inline uint32_t ext4_inode_flags(const uint8_t *inode) {
     return rd_le32(&inode[0x20u]);
 }
 
-static uint64_t ext4_inode_size64(const uint8_t *inode) {
-    uint64_t lo = (uint64_t)rd_le32(&inode[0x04u]);
-    uint64_t hi = (uint64_t)rd_le32(&inode[0x6Cu]);
-    return lo | (hi << 32);
+static int ext4_inode_size32(const uint8_t *inode, uint32_t *out_size) {
+    uint32_t lo;
+    uint32_t hi;
+    uint16_t type;
+    if (!inode || !out_size) {
+        return FS_ERR_INVAL;
+    }
+    lo = rd_le32(&inode[0x04u]);
+    hi = rd_le32(&inode[0x6Cu]);
+    type = ext4_inode_mode(inode) & EXT4_S_IFMT;
+    if (type == EXT4_S_IFREG && hi != 0u) {
+        return FS_ERR_NOSYS;
+    }
+    *out_size = lo;
+    return 0;
+}
+
+static int ext4_set_inode_size_locked(uint32_t inode_no, uint32_t new_size) {
+    if (ext4_read_inode_locked(inode_no, g_inode_buf) != 0) {
+        return FS_ERR_IO;
+    }
+    wr_le32(&g_inode_buf[0x04u], new_size);
+    wr_le32(&g_inode_buf[0x6Cu], 0u);
+    if (ext4_write_inode_locked(inode_no, g_inode_buf) != 0) {
+        return FS_ERR_IO;
+    }
+    return 0;
 }
 
 static int ext4_extent_map_locked(const uint8_t *extent_root, uint32_t lblock, uint32_t *out_pblock) {
@@ -376,6 +413,86 @@ static int ext4_extent_map_locked(const uint8_t *extent_root, uint32_t lblock, u
             node = g_tree_block;
         }
     }
+}
+
+static int ext4_legacy_map_locked(const uint8_t *inode, uint32_t lblock, uint32_t *out_pblock) {
+    const uint8_t *i_block;
+    uint32_t ptrs_per_block;
+    uint32_t pblock;
+
+    if (!inode || !out_pblock) {
+        return FS_ERR_INVAL;
+    }
+    ptrs_per_block = g_ext4.block_size / 4u;
+    if (ptrs_per_block == 0u) {
+        return FS_ERR_NOSYS;
+    }
+    i_block = &inode[0x28u];
+
+    if (lblock < 12u) {
+        pblock = rd_le32(&i_block[lblock * 4u]);
+        if (pblock == 0u) {
+            return FS_ERR_NOENT;
+        }
+        *out_pblock = pblock;
+        return 0;
+    }
+    lblock -= 12u;
+
+    if (lblock < ptrs_per_block) {
+        uint32_t ind = rd_le32(&i_block[12u * 4u]);
+        if (ind == 0u) {
+            return FS_ERR_NOENT;
+        }
+        if (ext4_read_block_locked(ind, g_tree_block) != 0) {
+            return FS_ERR_IO;
+        }
+        pblock = rd_le32(&g_tree_block[lblock * 4u]);
+        if (pblock == 0u) {
+            return FS_ERR_NOENT;
+        }
+        *out_pblock = pblock;
+        return 0;
+    }
+    lblock -= ptrs_per_block;
+
+    if (lblock < ptrs_per_block * ptrs_per_block) {
+        uint32_t dind = rd_le32(&i_block[13u * 4u]);
+        uint32_t l1 = lblock / ptrs_per_block;
+        uint32_t l2 = lblock % ptrs_per_block;
+        uint32_t ind;
+        if (dind == 0u) {
+            return FS_ERR_NOENT;
+        }
+        if (ext4_read_block_locked(dind, g_tree_block) != 0) {
+            return FS_ERR_IO;
+        }
+        ind = rd_le32(&g_tree_block[l1 * 4u]);
+        if (ind == 0u) {
+            return FS_ERR_NOENT;
+        }
+        if (ext4_read_block_locked(ind, g_tree_block) != 0) {
+            return FS_ERR_IO;
+        }
+        pblock = rd_le32(&g_tree_block[l2 * 4u]);
+        if (pblock == 0u) {
+            return FS_ERR_NOENT;
+        }
+        *out_pblock = pblock;
+        return 0;
+    }
+
+    return FS_ERR_NOSYS;
+}
+
+static int ext4_inode_map_block_locked(const uint8_t *inode, uint32_t lblock, uint32_t *out_pblock) {
+    if (!inode || !out_pblock) {
+        return FS_ERR_INVAL;
+    }
+    if ((ext4_inode_flags(inode) & EXT4_EXTENTS_FL) != 0u) {
+        return ext4_extent_map_locked(&inode[0x28u], lblock, out_pblock);
+    }
+    return ext4_legacy_map_locked(inode, lblock, out_pblock);
 }
 
 static int ext4_alloc_block_locked(uint32_t inode_no, uint32_t *out_pblock) {
@@ -497,34 +614,26 @@ static int ext4_extent_append_block_locked(uint8_t *extent_root, uint32_t lblock
 }
 
 static int ext4_read_inode_data_locked(uint32_t inode_no, uint32_t offset, uint8_t *dst, uint32_t len) {
-    uint64_t size64;
     uint32_t size;
     uint32_t done = 0u;
-    uint32_t flags;
-    const uint8_t *extent_root;
+    int src;
     if (!dst || len == 0u) {
         return 0;
     }
     if (ext4_read_inode_locked(inode_no, g_inode_buf) != 0) {
         return FS_ERR_IO;
     }
-    flags = ext4_inode_flags(g_inode_buf);
-    if ((flags & EXT4_EXTENTS_FL) == 0u) {
-        return FS_ERR_NOSYS;
-    }
 
-    size64 = ext4_inode_size64(g_inode_buf);
-    if (size64 > 0xFFFFFFFFu) {
-        return FS_ERR_NOSYS;
+    src = ext4_inode_size32(g_inode_buf, &size);
+    if (src != 0) {
+        return src;
     }
-    size = (uint32_t)size64;
     if (offset >= size) {
         return 0;
     }
     if (len > (size - offset)) {
         len = size - offset;
     }
-    extent_root = &g_inode_buf[0x28u];
 
     while (done < len) {
         uint32_t logical = (offset + done) / g_ext4.block_size;
@@ -536,7 +645,7 @@ static int ext4_read_inode_data_locked(uint32_t inode_no, uint32_t offset, uint8
             want = g_ext4.block_size - in_block;
         }
 
-        rc = ext4_extent_map_locked(extent_root, logical, &pblock);
+        rc = ext4_inode_map_block_locked(g_inode_buf, logical, &pblock);
         if (rc == FS_ERR_NOENT) {
             for (uint32_t i = 0u; i < want; i++) {
                 dst[done + i] = 0u;
@@ -560,13 +669,13 @@ static int ext4_read_inode_data_locked(uint32_t inode_no, uint32_t offset, uint8
 
 static int ext4_write_inode_data_locked(uint32_t inode_no, uint32_t offset, const uint8_t *src, uint32_t len,
                                         uint32_t *out_new_size) {
-    uint64_t size64;
     uint32_t size;
     uint32_t cur_size;
     uint32_t done = 0u;
     uint32_t flags;
     uint8_t *extent_root;
     uint32_t inode_dirty = 0u;
+    int src_size;
 
     if (!src || len == 0u) {
         if (out_new_size) {
@@ -582,30 +691,78 @@ static int ext4_write_inode_data_locked(uint32_t inode_no, uint32_t offset, cons
         return FS_ERR_NOSYS;
     }
 
-    size64 = ext4_inode_size64(g_inode_buf);
-    if (size64 > 0xFFFFFFFFu) {
-        return FS_ERR_NOSYS;
+    src_size = ext4_inode_size32(g_inode_buf, &size);
+    if (src_size != 0) {
+        return src_size;
     }
-    size = (uint32_t)size64;
     cur_size = size;
     extent_root = &g_inode_buf[0x28u];
 
+    /*
+     * If write starts beyond EOF and crosses into later blocks, the visible gap
+     * includes the tail of current EOF block; force that tail to zero first.
+     */
+    if (offset > cur_size &&
+        (cur_size % g_ext4.block_size) != 0u &&
+        (offset / g_ext4.block_size) > (cur_size / g_ext4.block_size)) {
+        uint32_t tail_lblock = cur_size / g_ext4.block_size;
+        uint32_t tail_off = cur_size % g_ext4.block_size;
+        uint32_t tail_pblock = 0u;
+        int rc = ext4_extent_map_locked(extent_root, tail_lblock, &tail_pblock);
+        if (rc == FS_ERR_NOENT) {
+            return FS_ERR_NOSYS;
+        }
+        if (rc != 0) {
+            return rc;
+        }
+        if (ext4_read_block_locked(tail_pblock, g_io_block) != 0) {
+            return FS_ERR_IO;
+        }
+        for (uint32_t i = tail_off; i < g_ext4.block_size; i++) {
+            g_io_block[i] = 0u;
+        }
+        if (ext4_write_block_locked(tail_pblock, g_io_block) != 0) {
+            return FS_ERR_IO;
+        }
+    }
+
     while (done < len) {
-        uint32_t logical = (offset + done) / g_ext4.block_size;
-        uint32_t in_block = (offset + done) % g_ext4.block_size;
+        uint32_t pos = offset + done;
+        uint32_t logical = pos / g_ext4.block_size;
+        uint32_t in_block = pos % g_ext4.block_size;
         uint32_t want = len - done;
         uint32_t pblock = 0u;
         int rc;
+        uint32_t mapped_new = 0u;
 
         if (want > (g_ext4.block_size - in_block)) {
             want = g_ext4.block_size - in_block;
         }
         rc = ext4_extent_map_locked(extent_root, logical, &pblock);
         if (rc == FS_ERR_NOENT) {
-            uint32_t pos = offset + done;
             uint32_t eof_lblock = (cur_size + g_ext4.block_size - 1u) / g_ext4.block_size;
             if (pos < cur_size || logical != eof_lblock) {
-                return (done != 0u) ? (int)done : FS_ERR_NOSYS;
+                if (pos < cur_size || logical < eof_lblock) {
+                    return (done != 0u) ? (int)done : FS_ERR_NOSYS;
+                }
+                /* Fill full zero blocks between old EOF and target write block. */
+                rc = ext4_alloc_block_locked(inode_no, &pblock);
+                if (rc != 0) {
+                    return (done != 0u) ? (int)done : rc;
+                }
+                rc = ext4_extent_append_block_locked(extent_root, eof_lblock, pblock);
+                if (rc != 0) {
+                    return (done != 0u) ? (int)done : rc;
+                }
+                inode_dirty = 1u;
+                for (uint32_t i = 0u; i < g_ext4.block_size; i++) {
+                    g_io_block[i] = 0u;
+                }
+                if (ext4_write_block_locked(pblock, g_io_block) != 0) {
+                    return (done != 0u) ? (int)done : FS_ERR_IO;
+                }
+                cur_size = (eof_lblock + 1u) * g_ext4.block_size;
+                continue;
             }
             rc = ext4_alloc_block_locked(inode_no, &pblock);
             if (rc != 0) {
@@ -619,25 +776,27 @@ static int ext4_write_inode_data_locked(uint32_t inode_no, uint32_t offset, cons
             for (uint32_t i = 0u; i < g_ext4.block_size; i++) {
                 g_io_block[i] = 0u;
             }
-            for (uint32_t i = 0u; i < want; i++) {
-                g_io_block[in_block + i] = src[done + i];
-            }
-            if (ext4_write_block_locked(pblock, g_io_block) != 0) {
-                return (done != 0u) ? (int)done : FS_ERR_IO;
-            }
-            done += want;
-            if (offset + done > cur_size) {
-                cur_size = offset + done;
-            }
-            continue;
+            mapped_new = 1u;
         }
         if (rc != 0) {
             return (done != 0u) ? (int)done : rc;
         }
 
-        if (ext4_read_block_locked(pblock, g_io_block) != 0) {
+        if (!mapped_new && ext4_read_block_locked(pblock, g_io_block) != 0) {
             return (done != 0u) ? (int)done : FS_ERR_IO;
         }
+
+        if (pos > cur_size) {
+            uint32_t blk_base = logical * g_ext4.block_size;
+            uint32_t z_start = (cur_size > blk_base) ? (cur_size - blk_base) : 0u;
+            uint32_t z_end = in_block;
+            if (z_end > z_start && z_end <= g_ext4.block_size) {
+                for (uint32_t i = z_start; i < z_end; i++) {
+                    g_io_block[i] = 0u;
+                }
+            }
+        }
+
         for (uint32_t i = 0u; i < want; i++) {
             g_io_block[in_block + i] = src[done + i];
         }
@@ -672,10 +831,9 @@ static int ext4_write_inode_data_locked(uint32_t inode_no, uint32_t offset, cons
 }
 
 static int ext4_lookup_in_dir_locked(uint32_t dir_ino, const uint8_t *name, uint32_t name_len, uint32_t *out_ino) {
-    uint64_t dir_size64;
     uint32_t dir_size;
     uint32_t block_count;
-    const uint8_t *extent_root;
+    int src;
     if (!name || name_len == 0u || name_len > EXT4_MAX_NAME || !out_ino) {
         return FS_ERR_INVAL;
     }
@@ -685,21 +843,16 @@ static int ext4_lookup_in_dir_locked(uint32_t dir_ino, const uint8_t *name, uint
     if ((ext4_inode_mode(g_inode_buf) & EXT4_S_IFMT) != EXT4_S_IFDIR) {
         return FS_ERR_NOTDIR;
     }
-    if ((ext4_inode_flags(g_inode_buf) & EXT4_EXTENTS_FL) == 0u) {
-        return FS_ERR_NOSYS;
+    src = ext4_inode_size32(g_inode_buf, &dir_size);
+    if (src != 0) {
+        return src;
     }
-    dir_size64 = ext4_inode_size64(g_inode_buf);
-    if (dir_size64 > 0xFFFFFFFFu) {
-        return FS_ERR_NOSYS;
-    }
-    dir_size = (uint32_t)dir_size64;
     block_count = (dir_size + g_ext4.block_size - 1u) / g_ext4.block_size;
-    extent_root = &g_inode_buf[0x28u];
 
     for (uint32_t lblock = 0u; lblock < block_count; lblock++) {
         uint32_t pblock = 0u;
         uint32_t pos = 0u;
-        int rc = ext4_extent_map_locked(extent_root, lblock, &pblock);
+        int rc = ext4_inode_map_block_locked(g_inode_buf, lblock, &pblock);
         if (rc == FS_ERR_NOENT) {
             continue;
         }
@@ -735,12 +888,16 @@ static int ext4_lookup_path_locked(const char *path, uint32_t *out_ino, uint16_t
         i++;
     }
     if (path[i] == '\0') {
+        int src;
         if (ext4_read_inode_locked(cur_ino, g_inode_buf) != 0) {
             return FS_ERR_IO;
         }
+        src = ext4_inode_size32(g_inode_buf, out_size);
+        if (src != 0) {
+            return src;
+        }
         *out_ino = cur_ino;
         *out_mode = ext4_inode_mode(g_inode_buf);
-        *out_size = (uint32_t)ext4_inode_size64(g_inode_buf);
         return 0;
     }
 
@@ -761,8 +918,11 @@ static int ext4_lookup_path_locked(const char *path, uint32_t *out_ino, uint16_t
         if (n == 0u) {
             break;
         }
-        if (ext4_lookup_in_dir_locked(cur_ino, comp, n, &next_ino) != 0) {
-            return FS_ERR_NOENT;
+        {
+            int lrc = ext4_lookup_in_dir_locked(cur_ino, comp, n, &next_ino);
+            if (lrc != 0) {
+                return lrc;
+            }
         }
         cur_ino = next_ino;
         while (path[i] == '/') {
@@ -770,12 +930,18 @@ static int ext4_lookup_path_locked(const char *path, uint32_t *out_ino, uint16_t
         }
     }
 
-    if (ext4_read_inode_locked(cur_ino, g_inode_buf) != 0) {
-        return FS_ERR_IO;
+    {
+        int src;
+        if (ext4_read_inode_locked(cur_ino, g_inode_buf) != 0) {
+            return FS_ERR_IO;
+        }
+        src = ext4_inode_size32(g_inode_buf, out_size);
+        if (src != 0) {
+            return src;
+        }
     }
     *out_ino = cur_ino;
     *out_mode = ext4_inode_mode(g_inode_buf);
-    *out_size = (uint32_t)ext4_inode_size64(g_inode_buf);
     return 0;
 }
 
@@ -784,8 +950,8 @@ static int ext4_try_probe_locked(void) {
     uint32_t log_block_size;
     uint32_t blocks_count_lo;
     uint32_t blocks_count_hi;
-    uint64_t blocks_count;
-    uint64_t groups;
+    uint32_t blocks_count32;
+    uint32_t groups32;
 
     if (g_ext4.probe_done != 0u) {
         return g_ext4.mounted ? 0 : FS_ERR_NOENT;
@@ -808,9 +974,7 @@ static int ext4_try_probe_locked(void) {
 
     log_block_size = rd_le32(&g_super[0x18u]);
     if (log_block_size > 2u) {
-        g_ext4.probe_done = 1u;
-        g_ext4.mounted = 0u;
-        return FS_ERR_NOSYS;
+        return ext4_probe_fail_nosys("log_block_size", log_block_size, 2u);
     }
 
     g_ext4.block_size = 1024u << log_block_size;
@@ -825,41 +989,31 @@ static int ext4_try_probe_locked(void) {
         g_ext4.desc_size = 32u;
     }
     if (g_ext4.desc_size > 64u) {
-        g_ext4.probe_done = 1u;
-        g_ext4.mounted = 0u;
-        return FS_ERR_NOSYS;
+        return ext4_probe_fail_nosys("desc_size", g_ext4.desc_size, 64u);
     }
 
     if (g_ext4.inode_size < 128u || g_ext4.inode_size > sizeof(g_inode_buf) ||
         g_ext4.blocks_per_group == 0u || g_ext4.inodes_per_group == 0u ||
         g_ext4.sectors_per_block == 0u) {
-        g_ext4.probe_done = 1u;
-        g_ext4.mounted = 0u;
-        return FS_ERR_NOSYS;
+        return ext4_probe_fail_nosys("inode/group", g_ext4.inode_size, g_ext4.sectors_per_block);
     }
 
     blocks_count_lo = rd_le32(&g_super[0x04u]);
     blocks_count_hi = rd_le32(&g_super[0x150u]);
     if (blocks_count_hi != 0u) {
-        g_ext4.probe_done = 1u;
-        g_ext4.mounted = 0u;
-        return FS_ERR_NOSYS;
+        return ext4_probe_fail_nosys("blocks_hi", blocks_count_hi, blocks_count_lo);
     }
-    blocks_count = (uint64_t)blocks_count_lo | ((uint64_t)blocks_count_hi << 32);
-    if (blocks_count <= g_ext4.first_data_block) {
-        g_ext4.probe_done = 1u;
-        g_ext4.mounted = 0u;
-        return FS_ERR_NOSYS;
+    blocks_count32 = blocks_count_lo;
+    if (blocks_count32 <= g_ext4.first_data_block) {
+        return ext4_probe_fail_nosys("blocks_count", blocks_count32, g_ext4.first_data_block);
     }
-    groups = (blocks_count - g_ext4.first_data_block + g_ext4.blocks_per_group - 1u) /
-             g_ext4.blocks_per_group;
-    if (groups == 0u || groups > 0xFFFFFFFFu) {
-        g_ext4.probe_done = 1u;
-        g_ext4.mounted = 0u;
-        return FS_ERR_NOSYS;
+    groups32 = (blocks_count32 - g_ext4.first_data_block + g_ext4.blocks_per_group - 1u) /
+               g_ext4.blocks_per_group;
+    if (groups32 == 0u) {
+        return ext4_probe_fail_nosys("groups", groups32, g_ext4.blocks_per_group);
     }
-    g_ext4.blocks_count = (uint32_t)blocks_count;
-    g_ext4.group_count = (uint32_t)groups;
+    g_ext4.blocks_count = blocks_count32;
+    g_ext4.group_count = groups32;
 
     g_ext4.probe_done = 1u;
     g_ext4.mounted = 1u;
@@ -902,8 +1056,11 @@ int fs_ext4_open(const char *path, uint32_t flags) {
     if (!path || path[0] != '/') {
         return FS_ERR_INVAL;
     }
-    if ((flags & (SYS_O_CREAT | SYS_O_TRUNC)) != 0u) {
+    if ((flags & SYS_O_CREAT) != 0u) {
         return FS_ERR_ROFS;
+    }
+    if ((flags & SYS_O_TRUNC) != 0u && accmode == SYS_O_RDONLY) {
+        return FS_ERR_INVAL;
     }
 
     ext4_mutex_lock();
@@ -913,6 +1070,13 @@ int fs_ext4_open(const char *path, uint32_t flags) {
         return rc;
     }
     rc = ext4_lookup_path_locked(path, &ino, &mode, &size);
+    if (rc == 0 && (mode & EXT4_S_IFMT) == EXT4_S_IFREG &&
+        (flags & SYS_O_TRUNC) != 0u && size != 0u) {
+        rc = ext4_set_inode_size_locked(ino, 0u);
+        if (rc == 0) {
+            size = 0u;
+        }
+    }
     ext4_mutex_unlock();
     if (rc != 0) {
         return rc;

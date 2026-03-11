@@ -6,6 +6,7 @@
 #include "../include/kernel/sched.h"
 #include "../include/kernel/spinlock.h"
 #include "../include/kernel/types.h"
+#include "../include/kernel/user_exec.h"
 
 enum {
     INIT_LINE_CAP = 128u
@@ -124,6 +125,25 @@ static void init_set_log_level(const char *lvl) {
     init_puts("\n");
 }
 
+static void init_wait_child_and_report(int32_t tid) {
+    uint32_t status = 0u;
+    for (;;) {
+        int rc = sched_waitpid(tid, 0u, &status);
+        if (rc == SCHED_WAITPID_BLOCKED) {
+            sched_block_until_runnable();
+            continue;
+        }
+        if (rc <= 0) {
+            init_puts("uhello waitpid failed\n");
+            return;
+        }
+        init_puts("uhello exit status=");
+        kprint_hex32((status >> 8u) & 0xFFu);
+        init_puts("\n");
+        return;
+    }
+}
+
 static void init_handle_cmd(char *line) {
     while (*line == ' ') {
         line++;
@@ -143,6 +163,7 @@ static void init_handle_cmd(char *line) {
         init_puts("  poll\n");
         init_puts("  clear\n");
         init_puts("  fdtest\n");
+        init_puts("  uhello\n");
         return;
     }
     if (init_streq(line, "tty")) {
@@ -171,6 +192,19 @@ static void init_handle_cmd(char *line) {
             g_init_fdtest_running = 0u;
             spinlock_unlock(&g_init_cmd_lock);
         }
+        return;
+    }
+    if (init_streq(line, "uhello")) {
+        static const char *const argv[] = {"/bin/hello", 0};
+        int32_t tid = user_exec_spawn_path("/bin/hello", argv, 0);
+        if (tid < 0) {
+            init_puts("uhello spawn failed\n");
+            return;
+        }
+        init_puts("uhello tid=");
+        kprint_hex32((uint32_t)tid);
+        init_puts("\n");
+        init_wait_child_and_report(tid);
         return;
     }
     if (init_starts_with(line, "log ")) {

@@ -4,6 +4,7 @@
 #include "../include/kernel/irq.h"
 #include "../include/kernel/init_task.h"
 #include "../include/kernel/kernel.h"
+#include "../include/kernel/mmu.h"
 #include "../include/kernel/printk.h"
 #include "../include/kernel/sched.h"
 #include "../include/kernel/smp.h"
@@ -28,6 +29,7 @@ void kernel_entry(void) {
     console_init();
     KLOGI("kernel", "LAMP KERNEL V0.06 boot");
     vm_info_log_boot();
+    mmu_init();
     /* Kernel owns IVT policy after BIOS handoff. */
     trap_init();
     irq_input_init();

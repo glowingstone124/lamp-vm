@@ -3,7 +3,7 @@
 #include "../include/kernel/smp.h"
 #include "../include/kernel/spinlock.h"
 
-#define SCHED_TICK_PERIOD_US 50000u
+#define SCHED_TICK_PERIOD_US 5000u
 #define SCHED_QUANTUM_TICKS 4u
 #define SCHED_MAX_CPUS 32u
 
