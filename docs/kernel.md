@@ -5,6 +5,8 @@
 This document describes the current kernel scaffold and bring-up flow, aligned with `bios.md`.
 
 POSIX-facing syscall/fd/tty semantics are documented in `docs/posix.md`.
+BusyBox shell porting roadmap is documented in `docs/porting.md`.
+Current userspace ABI contract is documented in `docs/user-abi.md`.
 
 ## Goal
 
@@ -15,6 +17,8 @@ Current kernel target in this repository:
 3. POSIX-like syscall/fd/tty/time behavior
 4. MMIO interrupt-controller based IRQ control path
 5. block I/O + ext4-backed regular-file read/write baseline
+6. IOMMU MMIO capability discovery for DMA remap/isolation bring-up
+7. MMU paging baseline for Unix-like process/runtime evolution
 
 ## Layout
 
@@ -32,6 +36,9 @@ Current kernel target in this repository:
 - `include/kernel/vm_info.h`: BootInfo metadata from BIOS handoff
 - `include/kernel/spinlock.h`: lock primitive API
 - `include/kernel/blk.h`: synchronous block I/O API over disk MMIO
+- `include/kernel/iommu.h`: IOMMU init and DMA address translation API
+- `include/kernel/mmu.h`: kernel paging setup API
+- `include/kernel/user_exec.h`: temporary user ELF load/spawn API
 - `include/kernel/fs.h`: VFS-like dispatcher API
 - `include/kernel/fs_ext4.h`: ext4 backend API
 - `src/entry.c`: `kernel_entry` and top-level init sequence
@@ -45,6 +52,9 @@ Current kernel target in this repository:
 - `src/vm_info.c`: BootInfo decode/log helper
 - `src/spinlock.c`: CAS/LDAR/STLR spinlock implementation
 - `src/blk.c`: blocking disk read/write wrapper
+- `src/iommu.c`: IOMMU capability probe and disk DMA IOVA setup
+- `src/mmu.c`: early paging init and identity map bring-up
+- `src/user_exec.c`: user ELF loader (`ext4`) + initial user stack builder + temporary launcher task entry
 - `src/fs.c`: fs dispatch (`/dev/*` + ext4)
 - `src/fs_ext4.c`: ext4 mount/lookup/read/write backend
 
@@ -94,6 +104,28 @@ Note:
 - kernel APIs: `irq_enable`, `irq_disable`, `irq_set_priority`, `irq_eoi`
 - `trap_init()` resets and reprograms IRQ routing/priorities after BIOS handoff
 - disk completion IRQ wakes block waiters via `blk_irq_complete()`
+
+## IOMMU (Current VM v1)
+
+- VM exposes IOMMU MMIO at `0x0074E000` and advertises `IOMMU_MMIO` in BootInfo/SYSINFO features.
+- Disk DMA path now goes through VM-side IOMMU translation API.
+- Default compatibility behavior:
+  - global IOMMU disabled => DMA address is identity-mapped (legacy behavior)
+  - enabled but device entry disabled => identity-mapped
+  - enabled + device entry enabled => `iova_base/iova_size/pa_base` window translation is enforced
+- fault registers record last rejected translation (`dev/iova/len/reason`).
+
+## MMU Paging (Current v2)
+
+- VM exposes MMU MMIO at `0x0074F000` and advertises `MMU_PAGING` in BootInfo/SYSINFO features.
+- MMU control/root/fault registers are now modeled per-CPU (SMP-safe address-space control surface).
+- Kernel programs a 2-level 4KB paging structure and enables MMU on BSP and AP cores.
+- Current mapping policy is identity map for kernel physical window (`0..KERNEL_MEM_SIZE + FB_SIZE`).
+- Initial page permissions are hardened to Unix-like baseline:
+  - `.text`: `RX`
+  - `.rodata`: `R`
+  - everything else (data/bss/stacks/heap/mmio aperture): `RW`
+- Page-walk faults are latched into MMU fault registers for diagnostics.
 
 ## Logging (Current)
 
@@ -154,7 +186,8 @@ Note:
     - existing extent overwrite
     - EOF append with block bitmap allocation + inode size update
 - current ext4 write limitations:
-  - `O_CREAT`/`O_TRUNC` return `EROFS`
+  - `O_CREAT` returns `EROFS`
+  - `O_TRUNC` is supported by inode-size update (blocks are currently kept allocated)
   - sparse/non-EOF hole write is not supported (`ENOSYS`)
   - deep extent tree growth (`depth > 0`) is not supported (`ENOSYS`)
 

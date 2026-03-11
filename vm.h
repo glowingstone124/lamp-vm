@@ -73,6 +73,8 @@ typedef struct VM_Debug VM_Debug;
 #define SYSINFO_FEATURE_SMP (1u << 3)
 #define SYSINFO_FEATURE_TIMER_IRQ (1u << 4)
 #define SYSINFO_FEATURE_INTC_MMIO (1u << 5)
+#define SYSINFO_FEATURE_IOMMU_MMIO (1u << 6)
+#define SYSINFO_FEATURE_MMU_PAGING (1u << 7)
 #define SYSINFO_REG_MAGIC 0x00u
 #define SYSINFO_REG_VENDOR0 0x04u
 #define SYSINFO_REG_MEM_BYTES_LO 0x14u
@@ -101,6 +103,68 @@ typedef struct VM_Debug VM_Debug;
 #define INTC_REG_PRIORITY 0x100u
 #define INTC_REG_EOI 0x500u
 #define INTC_MMIO_SIZE 0x504u
+
+#define IOMMU_BASE 0x0074E000u
+#define IOMMU_REG_CAP 0x000u
+#define IOMMU_REG_CTRL 0x004u
+#define IOMMU_REG_DEVSEL 0x008u
+#define IOMMU_REG_DEV_CTRL 0x00Cu
+#define IOMMU_REG_IOVA_BASE_LO 0x010u
+#define IOMMU_REG_IOVA_BASE_HI 0x014u
+#define IOMMU_REG_IOVA_SIZE 0x018u
+#define IOMMU_REG_PA_BASE_LO 0x01Cu
+#define IOMMU_REG_PA_BASE_HI 0x020u
+#define IOMMU_REG_FAULT_STATUS 0x024u
+#define IOMMU_REG_FAULT_DEV 0x028u
+#define IOMMU_REG_FAULT_IOVA_LO 0x02Cu
+#define IOMMU_REG_FAULT_IOVA_HI 0x030u
+#define IOMMU_REG_FAULT_LEN 0x034u
+#define IOMMU_MMIO_SIZE 0x100u
+
+#define IOMMU_CTRL_ENABLE 0x01u
+#define IOMMU_DEV_CTRL_ENABLE 0x01u
+
+#define IOMMU_FAULT_VALID 0x01u
+#define IOMMU_FAULT_REASON_SHIFT 4u
+#define IOMMU_FAULT_REASON_DEV_INVALID 1u
+#define IOMMU_FAULT_REASON_UNMAPPED 2u
+#define IOMMU_FAULT_REASON_BOUNDS 3u
+#define IOMMU_FAULT_REASON_PA_RANGE 4u
+
+#define IOMMU_MAX_DEVICES 4u
+#define IOMMU_DEV_DISK 0u
+
+#define MMU_MAX_CORES 32u
+
+#define MMU_BASE 0x0074F000u
+#define MMU_REG_CAP 0x000u
+#define MMU_REG_CTRL 0x004u
+#define MMU_REG_ROOT_LO 0x008u
+#define MMU_REG_ROOT_HI 0x00Cu
+#define MMU_REG_FAULT_STATUS 0x010u
+#define MMU_REG_FAULT_ADDR_LO 0x014u
+#define MMU_REG_FAULT_ADDR_HI 0x018u
+#define MMU_REG_FAULT_INFO 0x01Cu
+#define MMU_MMIO_SIZE 0x100u
+
+#define MMU_CTRL_ENABLE 0x01u
+
+#define MMU_PTE_P 0x00000001u
+#define MMU_PTE_W 0x00000002u
+#define MMU_PTE_U 0x00000004u
+#define MMU_PTE_X 0x00000008u
+
+#define MMU_FAULT_VALID 0x01u
+#define MMU_FAULT_REASON_SHIFT 4u
+#define MMU_FAULT_REASON_NOT_PRESENT 1u
+#define MMU_FAULT_REASON_PERM 2u
+#define MMU_FAULT_REASON_PTABLE_OOB 3u
+#define MMU_FAULT_REASON_BAD_ROOT 4u
+
+#define VM_MMU_ACC_READ 0x01u
+#define VM_MMU_ACC_WRITE 0x02u
+#define VM_MMU_ACC_EXEC 0x04u
+#define VM_MMU_ACC_USER 0x08u
 typedef uint32_t vm_addr_t;
 
 typedef struct {
@@ -120,6 +184,29 @@ typedef struct {
     bool thread_running;
     bool op_complete;
 } Disk;
+
+typedef struct {
+    uint32_t ctrl;
+    uint32_t selected_dev;
+    uint32_t fault_status;
+    uint32_t fault_dev;
+    uint64_t fault_iova;
+    uint32_t fault_len;
+    struct {
+        uint32_t ctrl;
+        uint32_t iova_size;
+        uint64_t iova_base;
+        uint64_t pa_base;
+    } devices[IOMMU_MAX_DEVICES];
+} IOMMU;
+
+typedef struct {
+    uint32_t ctrl[MMU_MAX_CORES];
+    uint64_t root[MMU_MAX_CORES];
+    uint32_t fault_status[MMU_MAX_CORES];
+    uint64_t fault_addr[MMU_MAX_CORES];
+    uint32_t fault_info[MMU_MAX_CORES];
+} MMU;
 typedef uint32_t (*mmio_read32_fn)(VM *vm, uint32_t addr);
 typedef void (*mmio_write32_fn)(VM *vm, uint32_t addr, uint32_t val);
 typedef struct {
@@ -171,6 +258,8 @@ struct VM{
     uint16_t serial_rx_tail;
 
     Disk disk;
+    IOMMU iommu;
+    MMU mmu;
     atomic_uint_fast64_t *interrupt_bitmap;
     atomic_uint_fast64_t *interrupt_enable_bitmap;
     atomic_uchar interrupt_priority[IVT_SIZE];

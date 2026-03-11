@@ -57,6 +57,7 @@ BIOS publishes a fixed BootInfo block at `0x002FF000` before jumping to kernel.
 - SYSINFO layout version, architecture id, endianness, physical address bits
 - page size and timer frequency
 - feature bitmap
+  - includes `INTC_MMIO`, `IOMMU_MMIO`, and `MMU_PAGING` capability bits when exposed by VM SYSINFO
 - framebuffer geometry (`width/height/bpp/stride`)
 - boot realtime timestamp (`lo/hi`)
 

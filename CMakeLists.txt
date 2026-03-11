@@ -51,6 +51,8 @@ set(SOURCES
         io_devices/vga_display/vga_mmio_register.c
         io_devices/time/time_mmio_register.c
         io_devices/intc/intc_mmio_register.c
+        io_devices/iommu/iommu_mmio_register.c
+        io_devices/mmu/mmu_mmio_register.c
         io_devices/sysinfo/sysinfo_mmio_register.c
         io_devices/time/timer.c
         float.c

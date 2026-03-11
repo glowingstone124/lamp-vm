@@ -20,7 +20,7 @@ Implemented now:
 
 Not implemented yet:
 
-- ext4 create/truncate/unlink/rename and directory mutation
+- ext4 create/unlink/rename and directory mutation
 - sparse write and deep extent-tree growth (`depth > 0`) in write path
 - real socket transport/protocol stack
 - process groups/sessions/signals beyond tty line discipline behavior
@@ -119,7 +119,8 @@ ext4 open notes:
 
 - missing path: `-1/ENOENT`
 - opening directory as file: `-1/EISDIR`
-- `O_CREAT`/`O_TRUNC`: `-1/EROFS` (not implemented yet)
+- `O_CREAT`: `-1/EROFS` (not implemented yet)
+- `O_TRUNC` on writable open: supported (current implementation keeps extents allocated and sets inode size to 0)
 - unsupported ext4 write shape: `-1/ENOSYS`
 
 Socket syscall status:

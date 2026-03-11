@@ -6,6 +6,7 @@
 
 #include <string.h>
 
+#include "memory.h"
 #include "panic.h"
 #include "vm.h"
 
@@ -17,14 +18,11 @@
             return;                                                                                \
         }                                                                                          \
         const vm_addr_t ip = (vm_addr_t)cpu->ip;                                                   \
-        if ((size_t)ip + 8u > (vm)->memory_size) {                                                 \
-            panic("IP out of bounds\n", (vm));                                                     \
+        cpu->last_ip = ip;                                                                         \
+        uint64_t inst = 0;                                                                         \
+        if (!vm_fetch64_exec((vm), ip, &inst)) {                                                   \
             return;                                                                                \
         }                                                                                          \
-        cpu->last_ip = ip;                                                                         \
-        /* Fast path: instruction fetch is always from normal RAM (not MMIO). */                  \
-        uint64_t inst = 0;                                                                         \
-        memcpy(&inst, &((vm)->memory[ip]), sizeof(uint64_t));                                      \
         cpu->ip = (size_t)(ip + 8u);                                                               \
         op = (inst >> 56) & 0xFF;                                                                  \
         rd = (inst >> 48) & 0xFF;                                                                  \

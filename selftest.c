@@ -103,6 +103,58 @@ static int run_selftest_ipi(void) {
     return ok;
 }
 
+static int run_selftest_mmu_percpu_root(void) {
+    const vm_addr_t bsp_root_addr = 0x3030;
+    const vm_addr_t ap_root_addr = 0x3034;
+    const vm_addr_t ap_done_addr = 0x3038;
+    const vm_addr_t ap_entry = PROGRAM_BASE + 18 * 8;
+    uint64_t program[] = {
+        INST(OP_MOVI, 1, 0, 0, 1),                             /* target core */
+        INST(OP_MOVI, 2, 0, 0, ap_entry),
+        INST(OP_STARTAP, 1, 2, 0, 0),
+        INST(OP_MOVI, 10, 0, 0, MMU_BASE + MMU_REG_ROOT_LO),   /* MMU root lo */
+        INST(OP_MOVI, 11, 0, 0, 0x00111000),
+        INST(OP_STORE32, 11, 10, 0, 0),                        /* BSP writes root */
+        INST(OP_MOVI, 12, 0, 0, ap_done_addr),
+        INST(OP_LOAD32, 13, 12, 0, 0),
+        INST(OP_CMPI, 13, 0, 0, 1),
+        INST(OP_JNZ, 0, 0, 0, PROGRAM_BASE + 7 * 8),           /* wait AP done */
+        INST(OP_LOAD32, 14, 10, 0, 0),                         /* read BSP root */
+        INST(OP_MOVI, 15, 0, 0, bsp_root_addr),
+        INST(OP_STORE32, 14, 15, 0, 0),
+        INST(OP_HALT, 0, 0, 0, 0),
+        INST(OP_PAUSE, 0, 0, 0, 0),
+        INST(OP_PAUSE, 0, 0, 0, 0),
+        INST(OP_PAUSE, 0, 0, 0, 0),
+        INST(OP_PAUSE, 0, 0, 0, 0),
+        /* AP entry */
+        INST(OP_MOVI, 20, 0, 0, MMU_BASE + MMU_REG_ROOT_LO),
+        INST(OP_MOVI, 21, 0, 0, 0x00222000),
+        INST(OP_STORE32, 21, 20, 0, 0),                        /* AP writes root */
+        INST(OP_LOAD32, 22, 20, 0, 0),                         /* AP reads back */
+        INST(OP_MOVI, 23, 0, 0, ap_root_addr),
+        INST(OP_STORE32, 22, 23, 0, 0),
+        INST(OP_MOVI, 24, 0, 0, ap_done_addr),
+        INST(OP_MOVI, 25, 0, 0, 1),
+        INST(OP_STORE32, 25, 24, 0, 0),
+        INST(OP_PAUSE, 0, 0, 0, 0),
+        INST(OP_JMP, 0, 0, 0, ap_entry + 9 * 8),
+    };
+
+    VM *vm = vm_create(MEM_SIZE, program, sizeof(program) / sizeof(program[0]), NULL, 0, NULL, 2);
+    if (!vm) {
+        return 0;
+    }
+    disk_init(vm, "./disk.img");
+    init_ivt(vm);
+    int ok = vm_run_headless(vm, 2500);
+    uint32_t bsp_root = vm_read32(vm, bsp_root_addr);
+    uint32_t ap_root = vm_read32(vm, ap_root_addr);
+    ok = ok && (bsp_root == 0x00111000u) && (ap_root == 0x00222000u);
+    vm_destroy(vm);
+    return ok;
+}
+
 static int run_selftest_relctrl(void) {
     const vm_addr_t flag_addr = 0x3020;
     uint64_t program[] = {
@@ -547,26 +599,28 @@ static int run_selftest_inti_imm_conformance(void) {
 int run_selftests(void) {
     int ok1 = run_selftest_startap_cpuid();
     int ok2 = run_selftest_ipi();
-    int ok3 = run_selftest_relctrl();
-    int ok4 = run_selftest_zero_branch_flags();
-    int ok5 = run_selftest_callr_unused_fields();
-    int ok6 = run_selftest_atomic_conformance();
-    int ok7 = run_selftest_div0_interrupt_conformance();
-    int ok8 = run_selftest_load16_signext_conformance();
-    int ok9 = run_selftest_indexed_rw_width_conformance();
-    int ok10 = run_selftest_relcond_extended_conformance();
-    int ok11 = run_selftest_inti_imm_conformance();
+    int ok3 = run_selftest_mmu_percpu_root();
+    int ok4 = run_selftest_relctrl();
+    int ok5 = run_selftest_zero_branch_flags();
+    int ok6 = run_selftest_callr_unused_fields();
+    int ok7 = run_selftest_atomic_conformance();
+    int ok8 = run_selftest_div0_interrupt_conformance();
+    int ok9 = run_selftest_load16_signext_conformance();
+    int ok10 = run_selftest_indexed_rw_width_conformance();
+    int ok11 = run_selftest_relcond_extended_conformance();
+    int ok12 = run_selftest_inti_imm_conformance();
 
     printf("[selftest] startap_cpuid: %s\n", ok1 ? "PASS" : "FAIL");
     printf("[selftest] ipi: %s\n", ok2 ? "PASS" : "FAIL");
-    printf("[selftest] relctrl: %s\n", ok3 ? "PASS" : "FAIL");
-    printf("[selftest] zero_branch_flags: %s\n", ok4 ? "PASS" : "FAIL");
-    printf("[selftest] callr_unused_fields: %s\n", ok5 ? "PASS" : "FAIL");
-    printf("[selftest] atomic_conformance: %s\n", ok6 ? "PASS" : "FAIL");
-    printf("[selftest] div0_interrupt_conformance: %s\n", ok7 ? "PASS" : "FAIL");
-    printf("[selftest] load16_signext_conformance: %s\n", ok8 ? "PASS" : "FAIL");
-    printf("[selftest] indexed_rw_width_conformance: %s\n", ok9 ? "PASS" : "FAIL");
-    printf("[selftest] relcond_extended_conformance: %s\n", ok10 ? "PASS" : "FAIL");
-    printf("[selftest] inti_imm_conformance: %s\n", ok11 ? "PASS" : "FAIL");
-    return (ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11) ? 0 : 1;
+    printf("[selftest] mmu_percpu_root: %s\n", ok3 ? "PASS" : "FAIL");
+    printf("[selftest] relctrl: %s\n", ok4 ? "PASS" : "FAIL");
+    printf("[selftest] zero_branch_flags: %s\n", ok5 ? "PASS" : "FAIL");
+    printf("[selftest] callr_unused_fields: %s\n", ok6 ? "PASS" : "FAIL");
+    printf("[selftest] atomic_conformance: %s\n", ok7 ? "PASS" : "FAIL");
+    printf("[selftest] div0_interrupt_conformance: %s\n", ok8 ? "PASS" : "FAIL");
+    printf("[selftest] load16_signext_conformance: %s\n", ok9 ? "PASS" : "FAIL");
+    printf("[selftest] indexed_rw_width_conformance: %s\n", ok10 ? "PASS" : "FAIL");
+    printf("[selftest] relcond_extended_conformance: %s\n", ok11 ? "PASS" : "FAIL");
+    printf("[selftest] inti_imm_conformance: %s\n", ok12 ? "PASS" : "FAIL");
+    return (ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12) ? 0 : 1;
 }
