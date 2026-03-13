@@ -117,6 +117,18 @@ static inline void ensure_halfword_aligned_or_panic(VM *vm, vm_addr_t addr, cons
     }
 }
 
+static inline int vm_stack_region_valid(const VM *vm, vm_addr_t base, size_t bytes) {
+    size_t start;
+    if (!vm) {
+        return 0;
+    }
+    start = (size_t)base;
+    if (start > vm->memory_size) {
+        return 0;
+    }
+    return bytes <= (vm->memory_size - start);
+}
+
 static inline vm_addr_t rel_target_from_last_ip(const VCPU *cpu, int32_t imm) {
     const int64_t base = (int64_t)(vm_addr_t)cpu->last_ip;
     const int64_t target = base + (int64_t)imm;
@@ -173,7 +185,7 @@ void vm_instruction_case(VM *vm) {
             break;
         }
         case OP_HALT: {
-            vm->halted = 1;
+            atomic_set_vm_halt(vm, 1);;
             return;
         }
         case OP_JMP: {
@@ -365,6 +377,22 @@ void vm_instruction_case(VM *vm) {
                     cpu->regs[rd] = cpu->irq_masked ? 1 : 0;
                     break;
                 }
+                if (addr == CPU_CTX_ISP) {
+                    cpu->regs[rd] = cpu->isp;
+                    break;
+                }
+                if (addr == CPU_CTX_CALL_BASE) {
+                    cpu->regs[rd] = (int32_t)cpu->call_stack_base;
+                    break;
+                }
+                if (addr == CPU_CTX_DATA_BASE) {
+                    cpu->regs[rd] = (int32_t)cpu->data_stack_base;
+                    break;
+                }
+                if (addr == CPU_CTX_ISR_BASE) {
+                    cpu->regs[rd] = (int32_t)cpu->isr_stack_base;
+                    break;
+                }
                 vm_shared_lock(vm);
                 if (addr == KEYBOARD) {
                     int v = 0;
@@ -425,6 +453,40 @@ void vm_instruction_case(VM *vm) {
                 }
                 if (addr == CPU_CTX_IRQ_MASK) {
                     cpu->irq_masked = (cpu->regs[rd] != 0);
+                    break;
+                }
+                if (addr == CPU_CTX_ISP) {
+                    const int v = cpu->regs[rd];
+                    if (v >= 0 && v <= ISR_STACK_SIZE) {
+                        cpu->isp = v;
+                    }
+                    break;
+                }
+                if (addr == CPU_CTX_CALL_BASE) {
+                    const vm_addr_t v = (vm_addr_t)(uint32_t)cpu->regs[rd];
+                    if (!vm_stack_region_valid(vm, v, (size_t)CALL_STACK_SIZE * 8u)) {
+                        panic(panic_format("OUT invalid call stack base 0x%08x", (uint32_t)v), vm);
+                        break;
+                    }
+                    cpu->call_stack_base = v;
+                    break;
+                }
+                if (addr == CPU_CTX_DATA_BASE) {
+                    const vm_addr_t v = (vm_addr_t)(uint32_t)cpu->regs[rd];
+                    if (!vm_stack_region_valid(vm, v, (size_t)DATA_STACK_SIZE * 4u)) {
+                        panic(panic_format("OUT invalid data stack base 0x%08x", (uint32_t)v), vm);
+                        break;
+                    }
+                    cpu->data_stack_base = v;
+                    break;
+                }
+                if (addr == CPU_CTX_ISR_BASE) {
+                    const vm_addr_t v = (vm_addr_t)(uint32_t)cpu->regs[rd];
+                    if (!vm_stack_region_valid(vm, v, (size_t)ISR_STACK_SIZE * 8u)) {
+                        panic(panic_format("OUT invalid isr stack base 0x%08x", (uint32_t)v), vm);
+                        break;
+                    }
+                    cpu->isr_stack_base = v;
                     break;
                 }
                 accept_io(vm, addr, cpu->regs[rd]);
@@ -877,7 +939,7 @@ void *vm_thread(void *arg) {
     uint64_t local_cycles = 0;
 
     while (1) {
-        if (vm->halted || vm->panic) {
+        if (atomic_is_vm_halted(vm)|| atomic_is_vm_panicked(vm)) {
             break;
         }
         if (core_id != 0 && !atomic_load_explicit(&vm->core_released[core_id], memory_order_acquire)) {
@@ -904,7 +966,7 @@ void *vm_thread(void *arg) {
 void display_loop(VM *vm) {
     vga_display_init();
     const int frame_delay = 16; // ~60FPS
-    while (!vm->halted) {
+    while (!atomic_is_vm_halted(vm)) {
         uint32_t frame_start = SDL_GetTicks();
         display_poll_events(vm);
         display_update(vm);
@@ -929,7 +991,7 @@ void vm_run(VM *vm) {
         CpuThreadArg *arg = malloc(sizeof(CpuThreadArg));
         if (!arg) {
             panic("Failed to allocate CPU thread argument", vm);
-            vm->halted = 1;
+            atomic_set_vm_halt(vm, 1);;
             break;
         }
         arg->vm = vm;
@@ -937,7 +999,7 @@ void vm_run(VM *vm) {
         if (pthread_create(&thread_ids[i], NULL, vm_thread, arg) != 0) {
             free(arg);
             panic("Failed to create CPU thread", vm);
-            vm->halted = 1;
+            atomic_set_vm_halt(vm, 1);;
             break;
         }
         created_threads++;
@@ -963,24 +1025,24 @@ int vm_run_headless(VM *vm, uint64_t timeout_ms) {
     for (int i = 0; i < cores; i++) {
         CpuThreadArg *arg = malloc(sizeof(CpuThreadArg));
         if (!arg) {
-            vm->halted = 1;
+            atomic_set_vm_halt(vm, 1);;
             break;
         }
         arg->vm = vm;
         arg->core_id = i;
         if (pthread_create(&thread_ids[i], NULL, vm_thread, arg) != 0) {
             free(arg);
-            vm->halted = 1;
+            atomic_set_vm_halt(vm, 1);;
             break;
         }
         created_threads++;
     }
 
     const uint64_t start_ns = host_monotonic_time_ns();
-    while (!vm->halted && !vm->panic) {
+    while (!atomic_is_vm_halted(vm) && !atomic_is_vm_panicked(vm)) {
         const uint64_t elapsed_ms = (host_monotonic_time_ns() - start_ns) / 1000000ull;
         if (elapsed_ms > timeout_ms) {
-            vm->halted = 1;
+            atomic_set_vm_halt(vm, 1);;
             break;
         }
         usleep(1000);
@@ -990,7 +1052,7 @@ int vm_run_headless(VM *vm, uint64_t timeout_ms) {
         pthread_join(thread_ids[i], NULL);
     }
     free(thread_ids);
-    return vm->panic ? 0 : 1;
+    return atomic_is_vm_panicked(vm) ? 0 : 1;
 }
 
 void vm_dump(const VM *vm, int mem_preview) {
@@ -1060,6 +1122,8 @@ VM *vm_create(size_t memory_size,
     memset(vm, 0, sizeof(VM));
     vm->smp_cores = (smp_cores > 0) ? smp_cores : 1;
     vm->cpus = calloc((size_t)vm->smp_cores, sizeof(VCPU));
+    atomic_init(&vm->halted, 0);
+    atomic_init(&vm->panic, 0);
     if (!vm->cpus) {
         free(vm);
         return NULL;
@@ -1179,24 +1243,31 @@ VM *vm_create(size_t memory_size,
     const size_t data_stack_bytes = (size_t)DATA_STACK_SIZE * 4u;
     const size_t isr_stack_bytes = (size_t)ISR_STACK_SIZE * 8u;
     const size_t per_core_stack_bytes = call_stack_bytes + data_stack_bytes + isr_stack_bytes;
+    const size_t stack_slot_bytes = per_core_stack_bytes + (size_t)VM_TASK_C_STACK_BYTES;
+    size_t stack_pool_slots = (size_t)vm->smp_cores;
     size_t image_end = (size_t)text_base + prog_bytes;
     if ((size_t)data_base + data_size > image_end)
         image_end = (size_t)data_base + data_size;
     if ((size_t)bss_base + bss_size > image_end)
         image_end = (size_t)bss_base + bss_size;
 
+    if (stack_pool_slots < VM_STACK_POOL_SLOTS) {
+        stack_pool_slots = VM_STACK_POOL_SLOTS;
+    }
+    vm->stack_pool_size = stack_slot_bytes * stack_pool_slots;
+    if (vm->stack_pool_size >= memory_size) {
+        panic("Stack pool too large for RAM", vm);
+        return vm;
+    }
+    vm->stack_pool_base = (vm_addr_t)(memory_size - vm->stack_pool_size);
+    if (image_end > vm->stack_pool_base) {
+        panic("Program/data overlaps stack pool", vm);
+        return vm;
+    }
+
     if (vm->smp_cores == 1) {
-        vm->stack_pool_base = CALL_STACK_BASE;
-        vm->stack_pool_size = per_core_stack_bytes;
-    } else {
-        vm->stack_pool_size = per_core_stack_bytes * (size_t)vm->smp_cores;
-        if (vm->stack_pool_size >= memory_size) {
-            panic("SMP stack pool too large for RAM", vm);
-            return vm;
-        }
-        vm->stack_pool_base = (vm_addr_t)(memory_size - vm->stack_pool_size);
-        if (image_end > vm->stack_pool_base) {
-            panic("Program/data overlaps SMP stack pool", vm);
+        if ((size_t)PROGRAM_BASE > vm->stack_pool_base) {
+            panic("Legacy core stack overlaps reserved stack pool", vm);
             return vm;
         }
     }
@@ -1236,7 +1307,7 @@ VM *vm_create(size_t memory_size,
     for (int i = 0; i < vm->smp_cores; i++) {
         vm_addr_t core_stack_base = (vm->smp_cores == 1)
             ? CALL_STACK_BASE
-            : vm->stack_pool_base + (vm_addr_t)(per_core_stack_bytes * (size_t)i);
+            : vm->stack_pool_base + (vm_addr_t)(stack_slot_bytes * (size_t)i);
         atomic_init(&vm->cpus[i].execution_times, 0);
         vm->cpus[i].core_id = i;
         vm->cpus[i].is_bsp = (i == 0) ? 1 : 0;

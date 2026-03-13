@@ -46,7 +46,10 @@ Current kernel target in this repository:
 - `src/init_task.c`: kernel init task (`init$` command loop and runtime controls)
 - `src/trap.c`: trap dispatch + INTC MMIO irq control
 - `src/irq.c`: IRQ handlers (timer/serial/keyboard/disk/syscall/div0)
-- `src/sched.c`: SMP scheduler core (per-CPU runqueue + wait queue + fd tables)
+- `src/sched.c`: scheduler core (context switch, stack pool, per-CPU runqueue)
+- `src/sched_task.c`: task lifecycle and wait queue operations
+- `src/sched_fd.c`: per-task fd table and regular-file metadata handling
+- `src/sched_internal.h`: private scheduler types, globals, and internal helpers shared by the split implementation
 - `src/syscall.c`: syscall dispatcher and ABI mailbox publish
 - `src/smp.c`: BSP/AP bootstrap and AP bring-up
 - `src/vm_info.c`: BootInfo decode/log helper

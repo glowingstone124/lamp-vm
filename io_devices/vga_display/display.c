@@ -60,7 +60,7 @@ void display_poll_events(VM *vm) {
     while (SDL_PollEvent(&e)) {
         switch (e.type) {
             case SDL_QUIT:
-                vm->halted = 1;
+                atomic_set_vm_halt(vm, 1);;
                 break;
             case SDL_TEXTINPUT: {
                 const char *p = e.text.text;

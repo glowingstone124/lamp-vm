@@ -7,7 +7,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <time.h>
-
+#include "../../vm.h"
 #include "../../interrupt.h"
 
 #define TIMER_MIN_PERIOD_US 1000u
@@ -51,7 +51,7 @@ static inline void sleep_us_interruptible(uint32_t us) {
 void *timer_tick(void *arg) {
     VM *vm = (VM *)arg;
     while (atomic_load(&vm->timer_thread_running)) {
-        if (vm->halted || vm->panic) {
+        if (atomic_is_vm_halted(vm) || atomic_is_vm_panicked(vm)) {
             break;
         }
 

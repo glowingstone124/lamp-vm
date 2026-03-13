@@ -58,6 +58,6 @@ void panic(const char *msg, VM *vm) {
     printf("Creating VM dump...");
     vm_dump(vm, DUMP_MEM_SEEK_LEN);
     if (vm)
-        vm->panic = 1;
+        atomic_set_vm_panic(vm, 1);;
     exit(1);
 }

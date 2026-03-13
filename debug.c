@@ -293,7 +293,7 @@ static void interactive_wait(VM *vm) {
             continue;
         }
         if (strcmp(cmd, "q") == 0) {
-            vm->halted = 1;
+            atomic_set_vm_halt(vm, 1);;
             return;
         }
 

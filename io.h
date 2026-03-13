@@ -18,6 +18,10 @@ enum IO_TABLE {
     CPU_CTX_CSP = 0xF0,
     CPU_CTX_DSP = 0xF1,
     CPU_CTX_IRQ_MASK = 0xF2,
+    CPU_CTX_ISP = 0xF3,
+    CPU_CTX_CALL_BASE = 0xF4,
+    CPU_CTX_DATA_BASE = 0xF5,
+    CPU_CTX_ISR_BASE = 0xF6,
 };
 
 // SCREEN / SCREEN_ATTRIBUTE / KEYBOARD are repurposed as a basic serial device:

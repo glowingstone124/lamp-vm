@@ -86,7 +86,7 @@ static void intc_write32(VM *vm, uint32_t addr, uint32_t value) {
     }
 
     fprintf(stderr, "Unknown INTC MMIO register offset: 0x%08x\n", offset);
-    vm->halted = 1;
+    atomic_set_vm_panic(vm, 1);
 }
 
 void register_intc_mmio(VM *vm) {

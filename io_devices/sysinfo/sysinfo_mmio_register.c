@@ -102,7 +102,7 @@ static uint32_t sysinfo_read32(VM *vm, uint32_t addr) {
 static void sysinfo_write32(VM *vm, uint32_t addr, uint32_t value) {
     (void)value;
     fprintf(stderr, "Attempted write to read-only SYSINFO MMIO at 0x%08x\n", addr);
-    vm->halted = 1;
+    atomic_set_vm_halt(vm, 1);;
 }
 
 void register_sysinfo_mmio(VM *vm) {

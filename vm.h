@@ -43,6 +43,8 @@ typedef struct VM_Debug VM_Debug;
 #define CALL_STACK_SIZE 256
 #define DATA_STACK_SIZE 256
 #define ISR_STACK_SIZE 256
+#define VM_TASK_C_STACK_BYTES 4096u
+#define VM_STACK_POOL_SLOTS 64u
 
 #define TIME_REALTIME_OFFSET   0
 #define TIME_MONOTONIC_OFFSET  8
@@ -239,8 +241,8 @@ extern _Thread_local VCPU *vm_tls_vcpu;
 static inline VCPU *vm_current_cpu(VM *vm);
 
 struct VM{
-    int halted;
-    int panic;
+    _Atomic int halted;
+    _Atomic int panic;
     uint8_t *memory;
     size_t memory_size;
 
@@ -453,6 +455,22 @@ static inline uint64_t host_monotonic_time_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+}
+
+static inline int atomic_is_vm_halted(const VM *vm) {
+    return atomic_load_explicit(&vm->halted, memory_order_acquire);
+}
+
+static inline int atomic_is_vm_panicked(const VM *vm) {
+    return atomic_load_explicit(&vm->panic, memory_order_acquire);
+}
+
+static inline void atomic_set_vm_halt(VM *vm, int value) {
+    atomic_store_explicit(&vm->halted, value, memory_order_release);
+}
+
+static inline void atomic_set_vm_panic(VM *vm, int value) {
+    atomic_store_explicit(&vm->panic, value, memory_order_release);
 }
 
 #endif

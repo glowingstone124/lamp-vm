@@ -187,7 +187,7 @@ static void mmu_write32(VM *vm, uint32_t addr, uint32_t value) {
             return;
         default:
             fprintf(stderr, "Unknown MMU MMIO register offset: 0x%08x\n", offset);
-            vm->halted = 1;
+            atomic_set_vm_halt(vm, 1);;
             return;
     }
 }
