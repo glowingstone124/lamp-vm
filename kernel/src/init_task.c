@@ -125,6 +125,34 @@ static void init_set_log_level(const char *lvl) {
     init_puts("\n");
 }
 
+static uint32_t init_parse_u32(const char *s, uint32_t *out) {
+    uint32_t v = 0u;
+    uint32_t seen = 0u;
+    if (!s || !out) {
+        return 0u;
+    }
+    while (*s == ' ') {
+        s++;
+    }
+    while (*s >= '0' && *s <= '9') {
+        uint32_t digit = (uint32_t)(*s - '0');
+        if (v > 429496729u || (v == 429496729u && digit > 5u)) {
+            return 0u;
+        }
+        v = v * 10u + digit;
+        seen = 1u;
+        s++;
+    }
+    while (*s == ' ') {
+        s++;
+    }
+    if (!seen || *s != '\0') {
+        return 0u;
+    }
+    *out = v;
+    return 1u;
+}
+
 static void init_wait_child_and_report(int32_t tid) {
     uint32_t status = 0u;
     for (;;) {
@@ -141,6 +169,31 @@ static void init_wait_child_and_report(int32_t tid) {
         kprint_hex32((status >> 8u) & 0xFFu);
         init_puts("\n");
         return;
+    }
+}
+
+static void init_run_uhello(uint32_t count) {
+    static const char *const argv[] = {"/bin/hello", 0};
+    if (count == 0u) {
+        init_puts("uhello count must be >= 1\n");
+        return;
+    }
+    for (uint32_t i = 0u; i < count; i++) {
+        int32_t tid = user_exec_spawn_path("/bin/hello", argv, 0);
+        if (tid < 0) {
+            init_puts("uhello spawn failed\n");
+            return;
+        }
+        init_puts("uhello tid=");
+        kprint_hex32((uint32_t)tid);
+        if (count > 1u) {
+            init_puts(" run=");
+            kprint_hex32(i + 1u);
+            init_puts("/");
+            kprint_hex32(count);
+        }
+        init_puts("\n");
+        init_wait_child_and_report(tid);
     }
 }
 
@@ -163,7 +216,7 @@ static void init_handle_cmd(char *line) {
         init_puts("  poll\n");
         init_puts("  clear\n");
         init_puts("  fdtest\n");
-        init_puts("  uhello\n");
+        init_puts("  uhello [count]\n");
         return;
     }
     if (init_streq(line, "tty")) {
@@ -195,16 +248,16 @@ static void init_handle_cmd(char *line) {
         return;
     }
     if (init_streq(line, "uhello")) {
-        static const char *const argv[] = {"/bin/hello", 0};
-        int32_t tid = user_exec_spawn_path("/bin/hello", argv, 0);
-        if (tid < 0) {
-            init_puts("uhello spawn failed\n");
+        init_run_uhello(1u);
+        return;
+    }
+    if (init_starts_with(line, "uhello ")) {
+        uint32_t count = 0u;
+        if (!init_parse_u32(line + 7, &count)) {
+            init_puts("usage: uhello [count]\n");
             return;
         }
-        init_puts("uhello tid=");
-        kprint_hex32((uint32_t)tid);
-        init_puts("\n");
-        init_wait_child_and_report(tid);
+        init_run_uhello(count);
         return;
     }
     if (init_starts_with(line, "log ")) {

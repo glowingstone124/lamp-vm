@@ -2,14 +2,23 @@
 
 extern int main(int argc, char **argv, char **envp);
 
-int _start(void) {
-    uint32_t sp = 0u;
+int start_c(uint32_t sp);
+
+__asm__(
+    ".text\n"
+    ".globl _start\n"
+    "_start:\n"
+    "  mov r0, r30\n"
+    "  rcall start_c\n"
+    "  ret\n"
+);
+
+int start_c(uint32_t sp) {
     int argc;
     char **argv;
     char **envp;
     int code;
 
-    __asm__ volatile("mov %0, r30\n" : "=r"(sp));
     argc = *(volatile int32_t *)(uintptr_t)sp;
     argv = (char **)(uintptr_t)(sp + 4u);
     envp = argv + (uint32_t)argc + 1u;

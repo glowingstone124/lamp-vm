@@ -8,6 +8,9 @@
 #include "../include/kernel/trap.h"
 #include "../include/kernel/types.h"
 
+#define STR1(x) #x
+#define STR(x) STR1(x)
+
 volatile uint32_t g_irq_stub_no;
 volatile uint32_t g_irq_stub_r0;
 volatile uint32_t g_irq_stub_r1;
@@ -137,7 +140,10 @@ __asm__(
     "  mov r13, r5\n"
     "  mov r14, r6\n"
     "  mov r2, r31\n"
-    "  movi r30, 0x003FF000\n"
+    "  cpuid r15\n"
+    "  shli r15, r15, " STR(KERNEL_IRQ_STACK_SHIFT) "\n"
+    "  movi r30, " STR(KERNEL_IRQ_STACK_TOP) "\n"
+    "  sub r30, r30, r15\n"
     "  mov r31, r30\n"
     "  movi r0, g_irq_stub_no\n"
     "  store32 r2, r0, 0\n"

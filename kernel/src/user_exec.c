@@ -131,6 +131,22 @@ static void user_exec_lazy_init(void) {
     g_user_exec_inited = 1u;
 }
 
+static inline uint32_t user_exec_vm_read32(uint32_t addr) {
+    return *(volatile uint32_t *)(uintptr_t)addr;
+}
+
+static inline uint64_t user_exec_monotonic_ns(void) {
+    uint32_t hi_a;
+    uint32_t lo;
+    uint32_t hi_b;
+    do {
+        hi_a = user_exec_vm_read32(TIMER_MMIO_BASE + 0x10u);
+        lo = user_exec_vm_read32(TIMER_MMIO_BASE + 0x0Cu);
+        hi_b = user_exec_vm_read32(TIMER_MMIO_BASE + 0x10u);
+    } while (hi_a != hi_b);
+    return ((uint64_t)hi_a << 32) | (uint64_t)lo;
+}
+
 static uint32_t str_copy_trunc(char *dst, uint32_t cap, const char *src) {
     uint32_t i = 0u;
     if (!dst || cap == 0u) {
@@ -146,6 +162,14 @@ static uint32_t str_copy_trunc(char *dst, uint32_t cap, const char *src) {
     }
     dst[i] = '\0';
     return i;
+}
+
+static int str_copy_exact(char *dst, uint32_t cap, const char *src) {
+    uint32_t n = str_copy_trunc(dst, cap, src);
+    if (!src) {
+        return 0;
+    }
+    return (src[n] == '\0') ? 0 : -1;
 }
 
 static uint32_t str_len(const char *s) {
@@ -182,9 +206,28 @@ static void mem_copy_u8(uint8_t *dst, const uint8_t *src, uint32_t n) {
     }
 }
 
+static void mem_zero_u8(uint8_t *dst, uint32_t n) {
+    if (!dst || n == 0u) {
+        return;
+    }
+    for (uint32_t i = 0u; i < n; i++) {
+        dst[i] = 0u;
+    }
+}
+
+static void user_exec_ctx_reset(user_exec_ctx_t *ctx) {
+    if (!ctx) {
+        return;
+    }
+    mem_zero_u8((uint8_t *)ctx, (uint32_t)sizeof(*ctx));
+}
+
 static int user_exec_read_file(const char *path, uint32_t *out_size) {
     int fd;
     int n;
+    uint64_t t_open_begin;
+    uint64_t t_open_end;
+    uint64_t t_read_end;
     uint32_t fs_backend = 0u;
     uint32_t file_id = 0u;
     uint32_t file_size = 0u;
@@ -210,6 +253,7 @@ static int user_exec_read_file(const char *path, uint32_t *out_size) {
     }
     spinlock_unlock(&g_user_exec_lock);
 
+    t_open_begin = user_exec_monotonic_ns();
     fd = fs_open(path, SYS_O_RDONLY);
     if (fd < 0) {
         return fd;
@@ -218,18 +262,48 @@ static int user_exec_read_file(const char *path, uint32_t *out_size) {
         (void)sched_fd_close(fd);
         return FS_ERR_INVAL;
     }
+    klog_begin(KLOG_LEVEL_INFO, "user_exec");
+    klog_puts("open done fd=");
+    klog_hex32((uint32_t)fd);
+    klog_puts(" size=");
+    klog_hex32(file_size);
+    klog_puts(" path=");
+    klog_puts(path);
+    klog_end();
+    t_open_end = user_exec_monotonic_ns();
+    klog_begin(KLOG_LEVEL_INFO, "user_exec");
+    klog_puts("open elapsed_ns=");
+    klog_hex32((uint32_t)(t_open_end - t_open_begin));
+    klog_puts(" path=");
+    klog_puts(path);
+    klog_end();
     if (file_size == 0u || file_size > USER_EXEC_ELF_MAX) {
         (void)sched_fd_close(fd);
         return FS_ERR_INVAL;
     }
 
-    n = fs_read(fd, &g_user_exec_elf_buf[0], file_size);
-    if (n <= 0 || (uint32_t)n != file_size) {
-        (void)sched_fd_close(fd);
-        return FS_ERR_IO;
+    while (done < file_size) {
+        n = fs_read(fd, &g_user_exec_elf_buf[done], file_size - done);
+        if (n <= 0) {
+            (void)sched_fd_close(fd);
+            return FS_ERR_IO;
+        }
+        done += (uint32_t)n;
     }
-    done = (uint32_t)n;
     (void)sched_fd_close(fd);
+    klog_begin(KLOG_LEVEL_INFO, "user_exec");
+    klog_puts("read done bytes=");
+    klog_hex32(done);
+    klog_puts(" path=");
+    klog_puts(path);
+    klog_end();
+    t_read_end = user_exec_monotonic_ns();
+    klog_begin(KLOG_LEVEL_INFO, "user_exec");
+    klog_puts("read elapsed_ns=");
+    klog_hex32((uint32_t)(t_read_end - t_open_end));
+    klog_puts(" path=");
+    klog_puts(path);
+    klog_end();
     spinlock_lock(&g_user_exec_lock);
     str_copy_trunc(&g_user_exec_cache_path[0], USER_EXEC_PATH_CAP, path);
     g_user_exec_cache_size = done;
@@ -337,9 +411,9 @@ int user_exec_load_elf_from_ext4(const char *path,
                                  const char *const argv[],
                                  const char *const envp[],
                                  user_image_t *out_img) {
-    uint32_t file_size;
-    int rc;
-    const elf32_ehdr_t *eh;
+    uint32_t file_size = 0u;
+    int rc = FS_ERR_INVAL;
+    const elf32_ehdr_t *eh = 0;
     uint32_t user_end = USER_REGION_BASE + USER_REGION_SIZE;
     uint32_t phdr_addr = 0u;
     user_image_t img;
@@ -369,10 +443,6 @@ int user_exec_load_elf_from_ext4(const char *path,
         return FS_ERR_INVAL;
     }
     if (eh->e_entry < USER_REGION_BASE || eh->e_entry >= user_end) {
-        return FS_ERR_INVAL;
-    }
-
-    if (mmu_map_identity(USER_REGION_BASE, USER_REGION_SIZE, MMU_PROT_READ | MMU_PROT_WRITE | MMU_PROT_USER) != 0) {
         return FS_ERR_INVAL;
     }
 
@@ -460,7 +530,7 @@ static void user_exec_release_ctx(user_exec_ctx_t *ctx) {
         return;
     }
     spinlock_lock(&g_user_exec_lock);
-    ctx->used = 0u;
+    user_exec_ctx_reset(ctx);
     spinlock_unlock(&g_user_exec_lock);
 }
 
@@ -475,10 +545,18 @@ static void user_exec_task_entry(sched_task_t *task, void *arg) {
     const char *envp[USER_EXEC_MAX_ENVP + 1u];
     uint32_t i;
     int rc;
+    uint64_t t_load_begin;
+    uint64_t t_load_end;
 
     if (!task || !ctx) {
         return;
     }
+
+    klog_begin(KLOG_LEVEL_INFO, "user_exec");
+    klog_puts("load start path=");
+    klog_puts(&ctx->path[0]);
+    klog_end();
+    t_load_begin = user_exec_monotonic_ns();
 
     for (i = 0u; i < ctx->argc && i < USER_EXEC_MAX_ARGV; i++) {
         argv[i] = &ctx->argv[i][0];
@@ -503,8 +581,30 @@ static void user_exec_task_entry(sched_task_t *task, void *arg) {
         }
         return;
     }
+    t_load_end = user_exec_monotonic_ns();
+
+    klog_begin(KLOG_LEVEL_INFO, "user_exec");
+    klog_puts("load done entry=");
+    klog_hex32(img.entry);
+    klog_puts(" sp=");
+    klog_hex32(img.stack_ptr);
+    klog_puts(" path=");
+    klog_puts(&ctx->path[0]);
+    klog_end();
+    klog_begin(KLOG_LEVEL_INFO, "user_exec");
+    klog_puts("load elapsed_ns=");
+    klog_hex32((uint32_t)(t_load_end - t_load_begin));
+    klog_puts(" path=");
+    klog_puts(&ctx->path[0]);
+    klog_end();
 
     rc = user_exec_enter(img.entry, img.stack_ptr);
+    klog_begin(KLOG_LEVEL_INFO, "user_exec");
+    klog_puts("user return rc=");
+    klog_hex32((uint32_t)rc);
+    klog_puts(" path=");
+    klog_puts(&ctx->path[0]);
+    klog_end();
     user_exec_release_ctx(ctx);
     if (task->state != SCHED_TASK_ZOMBIE) {
         sched_exit_code((uint32_t)(rc & 0xFF));
@@ -526,6 +626,7 @@ int user_exec_spawn_path(const char *path, const char *const argv[], const char 
     for (i = 0u; i < USER_EXEC_MAX_TASKS; i++) {
         if (g_user_exec_ctx[i].used == 0u) {
             ctx = &g_user_exec_ctx[i];
+            user_exec_ctx_reset(ctx);
             ctx->used = 1u;
             break;
         }
@@ -535,24 +636,44 @@ int user_exec_spawn_path(const char *path, const char *const argv[], const char 
         return -1;
     }
 
-    str_copy_trunc(&ctx->path[0], USER_EXEC_PATH_CAP, path);
+    if (str_copy_exact(&ctx->path[0], USER_EXEC_PATH_CAP, path) != 0) {
+        user_exec_release_ctx(ctx);
+        return -1;
+    }
 
     ctx->argc = 0u;
     if (argv && argv[0]) {
         while (ctx->argc < USER_EXEC_MAX_ARGV && argv[ctx->argc]) {
-            str_copy_trunc(&ctx->argv[ctx->argc][0], USER_EXEC_ARG_STR_CAP, argv[ctx->argc]);
+            if (str_copy_exact(&ctx->argv[ctx->argc][0], USER_EXEC_ARG_STR_CAP, argv[ctx->argc]) != 0) {
+                user_exec_release_ctx(ctx);
+                return -1;
+            }
             ctx->argc++;
         }
+        if (argv[ctx->argc]) {
+            user_exec_release_ctx(ctx);
+            return -1;
+        }
     } else {
-        str_copy_trunc(&ctx->argv[0][0], USER_EXEC_ARG_STR_CAP, path);
+        if (str_copy_exact(&ctx->argv[0][0], USER_EXEC_ARG_STR_CAP, path) != 0) {
+            user_exec_release_ctx(ctx);
+            return -1;
+        }
         ctx->argc = 1u;
     }
 
     ctx->envc = 0u;
     if (envp) {
         while (ctx->envc < USER_EXEC_MAX_ENVP && envp[ctx->envc]) {
-            str_copy_trunc(&ctx->envp[ctx->envc][0], USER_EXEC_ENV_STR_CAP, envp[ctx->envc]);
+            if (str_copy_exact(&ctx->envp[ctx->envc][0], USER_EXEC_ENV_STR_CAP, envp[ctx->envc]) != 0) {
+                user_exec_release_ctx(ctx);
+                return -1;
+            }
             ctx->envc++;
+        }
+        if (envp[ctx->envc]) {
+            user_exec_release_ctx(ctx);
+            return -1;
         }
     }
 

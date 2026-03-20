@@ -29,3 +29,4 @@ Optional:
 Then from init console run:
 
 - `uhello`
+- `uhello 10` to repeat the smoke test 10 times

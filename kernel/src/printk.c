@@ -21,6 +21,10 @@ static inline void io_out32(uint32_t addr, uint32_t value) {
     __asm__ volatile("out %0, %1" :: "r"(value), "r"(addr));
 }
 
+static inline uint32_t vm_read32(uint32_t addr) {
+    return *(volatile uint32_t *)(uintptr_t)addr;
+}
+
 static inline void kputc_raw(uint32_t c) {
     io_out32(IO_SERIAL_TX, c & 0xFFu);
     console_fb_putc(c);
@@ -42,6 +46,27 @@ static inline void kprint_hex32_raw(uint32_t v) {
         uint32_t nib = (v >> (uint32_t)shift) & 0xFu;
         kputc_raw((uint32_t)(uint8_t)hexdig[nib]);
     }
+}
+
+static inline uint64_t klog_read_monotonic_ns(void) {
+    uint32_t hi_a;
+    uint32_t lo;
+    uint32_t hi_b;
+    do {
+        hi_a = vm_read32(TIMER_MMIO_BASE + 0x10u);
+        lo = vm_read32(TIMER_MMIO_BASE + 0x0Cu);
+        hi_b = vm_read32(TIMER_MMIO_BASE + 0x10u);
+    } while (hi_a != hi_b);
+    return ((uint64_t)hi_a << 32) | (uint64_t)lo;
+}
+
+static inline void klog_print_timestamp_raw(void) {
+    uint64_t ns = klog_read_monotonic_ns();
+    kputc_raw((uint32_t)'[');
+    kprint_hex32_raw((uint32_t)(ns >> 32));
+    kputc_raw((uint32_t)':');
+    kprint_hex32_raw((uint32_t)ns);
+    kputc_raw((uint32_t)']');
 }
 
 static inline void klog_lock_enter(void) {
@@ -142,6 +167,7 @@ void klog_begin(uint32_t level, const char *tag) {
         return;
     }
     klog_lock_enter();
+    klog_print_timestamp_raw();
     kputc_raw((uint32_t)'[');
     kputs_raw(klog_level_name(level));
     kputc_raw((uint32_t)']');

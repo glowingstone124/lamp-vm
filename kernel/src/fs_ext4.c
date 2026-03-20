@@ -37,6 +37,16 @@ typedef struct ext4_state {
     uint32_t feature_incompat;
 } ext4_state_t;
 
+enum {
+    EXT4_BLOCK_CACHE_SLOTS = 8u
+};
+
+typedef struct ext4_block_cache_entry {
+    uint32_t valid;
+    uint32_t fs_block;
+    uint8_t data[4096];
+} ext4_block_cache_entry_t;
+
 static ext4_state_t g_ext4;
 static spinlock_t g_ext4_lock;
 static sched_waitq_t g_ext4_waitq;
@@ -47,6 +57,7 @@ static uint8_t g_io_block[4096];
 static uint8_t g_tree_block[4096];
 static uint8_t g_inode_buf[512];
 static uint8_t g_desc_buf[64];
+static ext4_block_cache_entry_t g_block_cache[EXT4_BLOCK_CACHE_SLOTS];
 
 static int ext4_probe_fail_nosys(const char *reason, uint32_t v0, uint32_t v1) {
     klog_begin(KLOG_LEVEL_ERROR, "ext4");
@@ -94,6 +105,47 @@ static inline uint32_t mem_eq_u8(const uint8_t *a, const uint8_t *b, uint32_t n)
     return 1u;
 }
 
+static inline void mem_copy_u8(uint8_t *dst, const uint8_t *src, uint32_t n) {
+    for (uint32_t i = 0u; i < n; i++) {
+        dst[i] = src[i];
+    }
+}
+
+static void ext4_block_cache_reset(void) {
+    for (uint32_t i = 0u; i < EXT4_BLOCK_CACHE_SLOTS; i++) {
+        g_block_cache[i].valid = 0u;
+        g_block_cache[i].fs_block = 0u;
+    }
+}
+
+static ext4_block_cache_entry_t *ext4_block_cache_slot(uint32_t fs_block) {
+    return &g_block_cache[fs_block % EXT4_BLOCK_CACHE_SLOTS];
+}
+
+static int ext4_block_cache_read(uint32_t fs_block, uint8_t *dst) {
+    ext4_block_cache_entry_t *entry;
+    if (!dst || g_ext4.block_size == 0u || g_ext4.block_size > 4096u) {
+        return 0;
+    }
+    entry = ext4_block_cache_slot(fs_block);
+    if (entry->valid == 0u || entry->fs_block != fs_block) {
+        return 0;
+    }
+    mem_copy_u8(dst, &entry->data[0], g_ext4.block_size);
+    return 1;
+}
+
+static void ext4_block_cache_store(uint32_t fs_block, const uint8_t *src) {
+    ext4_block_cache_entry_t *entry;
+    if (!src || g_ext4.block_size == 0u || g_ext4.block_size > 4096u) {
+        return;
+    }
+    entry = ext4_block_cache_slot(fs_block);
+    mem_copy_u8(&entry->data[0], src, g_ext4.block_size);
+    entry->fs_block = fs_block;
+    entry->valid = 1u;
+}
+
 static void ext4_mutex_lock(void) {
     for (;;) {
         spinlock_lock(&g_ext4_lock);
@@ -126,9 +178,13 @@ static int ext4_read_block_locked(uint32_t fs_block, uint8_t *dst) {
     if (!dst || g_ext4.block_size == 0u || g_ext4.block_size > sizeof(g_io_block)) {
         return FS_ERR_IO;
     }
+    if (ext4_block_cache_read(fs_block, dst)) {
+        return 0;
+    }
     if (blk_read_sectors(lba, g_ext4.sectors_per_block, (uint32_t)(uintptr_t)dst) != BLK_OK) {
         return FS_ERR_IO;
     }
+    ext4_block_cache_store(fs_block, dst);
     return 0;
 }
 
@@ -140,6 +196,7 @@ static int ext4_write_block_locked(uint32_t fs_block, const uint8_t *src) {
     if (blk_write_sectors(lba, g_ext4.sectors_per_block, (uint32_t)(uintptr_t)src) != BLK_OK) {
         return FS_ERR_IO;
     }
+    ext4_block_cache_store(fs_block, src);
     return 0;
 }
 
@@ -1040,6 +1097,7 @@ void fs_ext4_init(void) {
     g_ext4.group_count = 0u;
     g_ext4.desc_size = 0u;
     g_ext4.feature_incompat = 0u;
+    ext4_block_cache_reset();
     spinlock_init(&g_ext4_lock);
     sched_waitq_init(&g_ext4_waitq);
     g_ext4_lock_held = 0u;

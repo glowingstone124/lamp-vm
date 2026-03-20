@@ -9,6 +9,10 @@ static sched_waitq_t g_blk_waitq;
 static volatile uint32_t g_blk_busy;
 static volatile uint32_t g_blk_done;
 
+enum {
+    BLK_QUICK_POLL_ITERS = 131072u
+};
+
 static inline uint32_t io_in32(uint32_t addr) {
     uint32_t v;
     __asm__ volatile ("in %0, %1" : "=r"(v) : "r"(addr));
@@ -79,10 +83,14 @@ static int blk_submit_and_wait(uint32_t cmd, uint32_t lba, uint32_t count, uint3
             spinlock_unlock(&g_blk_lock);
             return (status == DISK_STATUS_FREE) ? BLK_OK : BLK_ERR_IO;
         }
-        if (quick_poll_budget < 1024u) {
+        if (quick_poll_budget < BLK_QUICK_POLL_ITERS) {
             quick_poll_budget++;
             spinlock_unlock(&g_blk_lock);
-            sched_yield();
+            /*
+             * For short I/O completions, switching away on every poll costs more
+             * than the device latency itself, especially on single-core bring-up.
+             * Keep the first window as a pure poll loop and only sleep after it.
+             */
             continue;
         }
         quick_poll_budget = 0u;
