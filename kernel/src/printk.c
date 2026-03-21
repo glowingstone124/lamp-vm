@@ -3,6 +3,7 @@
 #include "../include/kernel/printk.h"
 #include "../include/kernel/spinlock.h"
 #include "../include/kernel/types.h"
+#include "../include/kernel/timedate.h"
 
 #define KLOG_OWNER_NONE 0xFFFFFFFFu
 
@@ -60,15 +61,90 @@ static inline uint64_t klog_read_monotonic_ns(void) {
     return ((uint64_t)hi_a << 32) | (uint64_t)lo;
 }
 
-static inline void klog_print_timestamp_raw(void) {
-    uint64_t ns = klog_read_monotonic_ns();
-    kputc_raw((uint32_t)'[');
-    kprint_hex32_raw((uint32_t)(ns >> 32));
-    kputc_raw((uint32_t)':');
-    kprint_hex32_raw((uint32_t)ns);
-    kputc_raw((uint32_t)']');
+static inline int64_t klog_read_real_ns(void) {
+    uint32_t hi_a;
+    uint32_t lo;
+    uint32_t hi_b;
+    do {
+        hi_a = vm_read32(TIMER_MMIO_BASE + 0x08u);
+        lo = vm_read32(TIMER_MMIO_BASE + 0x04u);
+        hi_b = vm_read32(TIMER_MMIO_BASE + 0x08u);
+    } while (hi_a != hi_b);
+    return ((uint64_t)hi_a << 32) | (uint64_t)lo;
+}
+static inline void kprint_u32_dec_raw(uint32_t v) {
+    char buf[10]; // max 4294967295
+    int i = 0;
+
+    if (v == 0) {
+        kputc_raw('0');
+        return;
+    }
+
+    while (v > 0) {
+        buf[i++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    while (i > 0) {
+        kputc_raw((uint32_t)buf[--i]);
+    }
+}
+static inline void kprint_u64_dec_raw(uint64_t v) {
+    char buf[20]; // max 18446744073709551615
+    int i = 0;
+
+    if (v == 0) {
+        kputc_raw('0');
+        return;
+    }
+
+    while (v > 0) {
+        buf[i++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+
+    while (i > 0) {
+        kputc_raw((uint32_t)buf[--i]);
+    }
+}
+static inline void kprint_2d(uint32_t v) {
+    kputc_raw((uint32_t)('0' + (v / 10)));
+    kputc_raw((uint32_t)('0' + (v % 10)));
 }
 
+static inline void kprint_4d(uint32_t v) {
+    kputc_raw((uint32_t)('0' + (v / 1000) % 10));
+    kputc_raw((uint32_t)('0' + (v / 100) % 10));
+    kputc_raw((uint32_t)('0' + (v / 10) % 10));
+    kputc_raw((uint32_t)('0' + (v % 10)));
+}
+
+static inline void kprint_datetime_raw(const DateTime *dt) {
+    kputc_raw('[');
+
+    kprint_4d(dt->year);
+    kputc_raw('-');
+    kprint_2d(dt->month);
+    kputc_raw('-');
+    kprint_2d(dt->day);
+    kputc_raw(' ');
+
+    kprint_2d(dt->hour);
+    kputc_raw(':');
+    kprint_2d(dt->minute);
+    kputc_raw(':');
+    kprint_2d(dt->second);
+
+    kputc_raw(']');
+}
+static inline void klog_print_timestamp_raw(void) {
+    DateTime dt;
+    uint64_t ns = klog_read_real_ns();
+
+    unix_to_datetime_utc((int64_t)(ns / 1000000000ull), &dt);
+
+    kprint_datetime_raw(&dt);
+}
 static inline void klog_lock_enter(void) {
     uint32_t cpu_id = klog_cpu_id();
     if (g_klog_owner == cpu_id) {
