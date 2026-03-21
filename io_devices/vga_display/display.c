@@ -14,7 +14,7 @@ int vga_display_init(void) {
         return -1;
 
     window = SDL_CreateWindow(
-        "VM Display", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, FB_WIDTH, FB_HEIGHT, SDL_WINDOW_BORDERLESS);
+        "VM Display", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, FB_WIDTH, FB_HEIGHT, SDL_WINDOW_SHOWN);
 
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     texture = SDL_CreateTexture(
