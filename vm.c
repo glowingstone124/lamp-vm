@@ -1108,6 +1108,18 @@ void vm_dump(const VM *vm, int mem_preview) {
     printf("ZF = %d\n", (cpu->flags & FLAG_ZF) != 0);
 }
 
+void vm_error(const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    printf("======================\n\n");
+    fprintf(stderr, "VM encountered a fatal error and could not recover:\n");
+    vfprintf(stderr, fmt, args);
+    fprintf(stderr, "\n");
+    va_end(args);
+    printf("\n======================\n");
+    fflush(stderr);
+}
+
 VM *vm_create(size_t memory_size,
               const uint64_t *program,
               size_t program_size,
@@ -1126,12 +1138,14 @@ VM *vm_create(size_t memory_size,
     atomic_init(&vm->panic, 0);
     if (!vm->cpus) {
         free(vm);
+        vm_error("Couldn't create CPU.");
         return NULL;
     }
     vm->core_released = calloc((size_t)vm->smp_cores, sizeof(atomic_bool));
     if (!vm->core_released) {
         free(vm->cpus);
         free(vm);
+        vm_error("Couldn't allocate VM CPU list");
         return NULL;
     }
     vm->interrupt_bitmap = calloc((size_t)vm->smp_cores * (size_t)IRQ_BITMAP_WORDS,
@@ -1140,6 +1154,7 @@ VM *vm_create(size_t memory_size,
         free(vm->core_released);
         free(vm->cpus);
         free(vm);
+        vm_error("Couldn't allocate VM CPU Interrupt bitmap");
         return NULL;
     }
     vm->interrupt_enable_bitmap = calloc((size_t)vm->smp_cores * (size_t)IRQ_BITMAP_WORDS,
@@ -1149,6 +1164,7 @@ VM *vm_create(size_t memory_size,
         free(vm->core_released);
         free(vm->cpus);
         free(vm);
+        vm_error("Couldn't allocate VM CPU Interrupt enable bitmap");
         return NULL;
     }
 
@@ -1166,6 +1182,7 @@ VM *vm_create(size_t memory_size,
         free(vm->core_released);
         free(vm->cpus);
         free(vm);
+        vm_error("Couldn't allocate VM memory %zu", memory_size);
         return NULL;
     }
     memset(vm->memory, 0, memory_size);
@@ -1183,6 +1200,7 @@ VM *vm_create(size_t memory_size,
         free(vm->core_released);
         free(vm->cpus);
         free(vm);
+        vm_error("Couldn't allocate VM frame buffer");
         return NULL;
     }
     memset(vm->fb, 0, FB_SIZE);
@@ -1200,6 +1218,7 @@ VM *vm_create(size_t memory_size,
             free(vm->core_released);
             free(vm->cpus);
             free(vm);
+            vm_error("Couldn't allocate VM frame buffer row lock");
             return NULL;
         }
     }
@@ -1381,6 +1400,10 @@ static int parse_positive_int(const char *s, int *out) {
 }
 
 int main(int argc, char **argv) {
+    printf("Lamp VM version 1.0.0-rc1 \n");
+#ifdef DEBUG_BUILD
+    printf("This copy was built with debug flag. It may causing huge performance impact. \n");
+#endif
     const char *filename = "boot.bin";
     int smp_cores = 1;
     int selftest = 0;

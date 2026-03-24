@@ -14,7 +14,7 @@
 #include <time.h>
 #include <pthread.h>
 #include <stdatomic.h>
-
+void vm_error(const char *fmt, ...);
 static inline uint64_t INST(uint8_t op, uint8_t rd, uint8_t rs1, uint8_t rs2, uint32_t imm) {
     return ((uint64_t)op << 56 | (uint64_t)rd << 48 | (uint64_t)rs1 << 40 | (uint64_t)rs2 << 32) |
         imm;

@@ -1,14 +1,16 @@
 #include <stdio.h>
-#include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "loadbin.h"
 
+#include "vm.h"
+
 uint64_t *load_program(const char *filename, size_t *out_size) {
     FILE *fp = fopen(filename, "rb");
     if (!fp) {
         perror("fopen");
+        vm_error("Error opening program binary.");
         return NULL;
     }
 
