@@ -63,6 +63,44 @@ void sched_fd_table_init_stdio(sched_task_slot_t *slot) {
     slot->fdtab[2].ofile_idx = 2u;
 }
 
+int sched_fd_table_clone(sched_task_slot_t *dst, const sched_task_slot_t *src) {
+    uint32_t i;
+    if (!dst || !src) {
+        return SCHED_FD_EINVAL;
+    }
+    sched_fd_table_clear(dst);
+    for (i = 0u; i < SCHED_MAX_FDS; i++) {
+        dst->ofiles[i].used = src->ofiles[i].used;
+        dst->ofiles[i].refs = src->ofiles[i].refs;
+        dst->ofiles[i].type = src->ofiles[i].type;
+        dst->ofiles[i].status_flags = src->ofiles[i].status_flags;
+        dst->ofiles[i].fs_backend = src->ofiles[i].fs_backend;
+        dst->ofiles[i].file_id = src->ofiles[i].file_id;
+        dst->ofiles[i].file_size = src->ofiles[i].file_size;
+        dst->ofiles[i].file_offset = src->ofiles[i].file_offset;
+        dst->ofiles[i].file_is_dir = src->ofiles[i].file_is_dir;
+
+        dst->fdtab[i].used = src->fdtab[i].used;
+        dst->fdtab[i].ofile_idx = src->fdtab[i].ofile_idx;
+        dst->fdtab[i].fd_flags = src->fdtab[i].fd_flags;
+    }
+    for (i = 0u; i < SCHED_MAX_FDS; i++) {
+        dst->ofiles[i].refs = 0u;
+    }
+    for (i = 0u; i < SCHED_MAX_FDS; i++) {
+        uint32_t of_idx;
+        if (!dst->fdtab[i].used) {
+            continue;
+        }
+        of_idx = dst->fdtab[i].ofile_idx;
+        if (of_idx >= SCHED_MAX_FDS || !dst->ofiles[of_idx].used) {
+            return SCHED_FD_EBADF;
+        }
+        dst->ofiles[of_idx].refs++;
+    }
+    return SCHED_FD_OK;
+}
+
 static sched_ofile_t *sched_slot_ofile_by_fd(sched_task_slot_t *slot, int32_t fd, sched_fdent_t **fdent_out) {
     uint32_t of_idx;
     sched_fdent_t *fdent;
@@ -500,6 +538,27 @@ int sched_fd_open_regular(uint32_t status_flags, uint32_t fs_backend, uint32_t f
     slot->fdtab[(uint32_t)fd_idx].fd_flags = 0u;
     spinlock_unlock(&slot->fd_lock);
     return fd_idx;
+}
+
+int sched_fd_close_cloexec(void) {
+    int closed = 0;
+    sched_task_slot_t *slot = sched_current_slot_fd_locked();
+    if (!slot) {
+        return SCHED_FD_EBADF;
+    }
+    for (uint32_t i = 0u; i < SCHED_MAX_FDS; i++) {
+        if (!slot->fdtab[i].used) {
+            continue;
+        }
+        if ((slot->fdtab[i].fd_flags & SCHED_FD_CLOEXEC) == 0u) {
+            continue;
+        }
+        if (sched_slot_close_fd(slot, (int32_t)i) == SCHED_FD_OK) {
+            closed++;
+        }
+    }
+    spinlock_unlock(&slot->fd_lock);
+    return closed;
 }
 
 int sched_fd_get_type(int32_t fd, uint32_t *out_type) {

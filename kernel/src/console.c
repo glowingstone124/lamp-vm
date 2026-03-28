@@ -1,5 +1,6 @@
 #include "../include/kernel/console.h"
 #include "../include/kernel/console_fb.h"
+#include "../include/kernel/platform.h"
 #include "../include/kernel/printk.h"
 #include "../include/kernel/sched.h"
 #include "../include/kernel/spinlock.h"
@@ -25,6 +26,10 @@ static volatile uint32_t g_tty_lflag;
 static uint8_t g_rx_buf[CONSOLE_RX_CAP];
 static sched_waitq_t g_rx_waitq;
 static spinlock_t g_rx_lock;
+
+static inline void console_io_out32(uint32_t addr, uint32_t value) {
+    __asm__ volatile("out %0, %1" :: "r"(value), "r"(addr));
+}
 
 static void console_echo_data_char(uint8_t c) {
     if ((g_tty_lflag & TTY_LFLAG_ECHO) == 0u) {
@@ -323,6 +328,7 @@ uint32_t console_write(const uint8_t *src, uint32_t len) {
     }
     kio_lock();
     for (n = 0u; n < len; n++) {
+        console_io_out32(IO_SERIAL_TX, (uint32_t)src[n]);
         console_fb_putc((uint32_t)src[n]);
     }
     kio_unlock();

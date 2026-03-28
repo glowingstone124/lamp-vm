@@ -65,12 +65,17 @@ typedef struct sched_task_slot {
     uint32_t exit_code;
     sched_task_entry_t entry;
     const char *name;
+    uint32_t vfork_child_start;
+    uint32_t vfork_child_active;
     sched_waitq_t *waitq;
     sched_waitq_t child_waitq;
-    spinlock_t fd_lock;
     sched_ofile_t ofiles[SCHED_MAX_FDS];
     sched_fdent_t fdtab[SCHED_MAX_FDS];
     sched_stack_ctx_t stack_ctx;
+    sched_stack_ctx_t vfork_resume_ctx;
+    uint32_t vfork_resume_ret;
+    uint32_t vfork_resume_valid;
+    spinlock_t fd_lock;
 } sched_task_slot_t;
 
 typedef struct sched_runq {
@@ -121,15 +126,15 @@ static inline uint32_t sched_stack_pool_slot_base(uint32_t slot) {
 }
 
 static inline void sched_stack_bitmap_set(uint32_t slot) {
-    g_stack_pool_bitmap[slot / 32u] |= (1u << (slot % 32u));
+    g_stack_pool_bitmap[slot >> 5u] |= (1u << (slot & 31u));
 }
 
 static inline void sched_stack_bitmap_clr(uint32_t slot) {
-    g_stack_pool_bitmap[slot / 32u] &= ~(1u << (slot % 32u));
+    g_stack_pool_bitmap[slot >> 5u] &= ~(1u << (slot & 31u));
 }
 
 static inline uint32_t sched_stack_bitmap_tst(uint32_t slot) {
-    return (g_stack_pool_bitmap[slot / 32u] >> (slot % 32u)) & 1u;
+    return (g_stack_pool_bitmap[slot >> 5u] >> (slot & 31u)) & 1u;
 }
 
 static inline uint32_t sched_tick_now(void) {
@@ -137,19 +142,20 @@ static inline uint32_t sched_tick_now(void) {
 }
 
 static inline void waitq_set_bit(sched_waitq_t *q, uint32_t idx) {
-    q->bits[idx / 32u] |= (1u << (idx % 32u));
+    q->bits[idx >> 5u] |= (1u << (idx & 31u));
 }
 
 static inline void waitq_clear_bit(sched_waitq_t *q, uint32_t idx) {
-    q->bits[idx / 32u] &= ~(1u << (idx % 32u));
+    q->bits[idx >> 5u] &= ~(1u << (idx & 31u));
 }
 
 static inline uint32_t waitq_test_bit(const sched_waitq_t *q, uint32_t idx) {
-    return (q->bits[idx / 32u] >> (idx % 32u)) & 1u;
+    return (q->bits[idx >> 5u] >> (idx & 31u)) & 1u;
 }
 
 void sched_fd_table_clear(sched_task_slot_t *slot);
 void sched_fd_table_init_stdio(sched_task_slot_t *slot);
+int sched_fd_table_clone(sched_task_slot_t *dst, const sched_task_slot_t *src);
 int sched_slot_close_fd(sched_task_slot_t *slot, int32_t fd);
 void sched_slot_close_all_fds(sched_task_slot_t *slot);
 
@@ -163,6 +169,8 @@ void sched_runq_del(uint32_t cpu_id, uint32_t idx);
 uint32_t sched_slot_index(const sched_task_slot_t *slot);
 sched_task_slot_t *sched_current_slot(void);
 sched_task_slot_t *sched_current_slot_fd_locked(void);
+void sched_ctx_swap(sched_stack_ctx_t *from, const sched_stack_ctx_t *to);
+void sched_ctx_capture(sched_stack_ctx_t *out);
 void sched_switch_current_to_scheduler(void);
 void sched_waitq_init_locked(sched_waitq_t *q);
 void sched_try_wake_sleepers(uint32_t now_tick);

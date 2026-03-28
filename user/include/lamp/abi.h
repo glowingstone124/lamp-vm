@@ -31,7 +31,9 @@ enum {
     LAMP_SYS_LISTEN = 24u,
     LAMP_SYS_ACCEPT = 25u,
     LAMP_SYS_SEND = 26u,
-    LAMP_SYS_RECV = 27u
+    LAMP_SYS_RECV = 27u,
+    LAMP_SYS_EXECVE = 28u,
+    LAMP_SYS_VFORK = 29u
 };
 
 enum {

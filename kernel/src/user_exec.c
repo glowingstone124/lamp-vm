@@ -2,6 +2,8 @@
 #include "../include/kernel/mmu.h"
 #include "../include/kernel/platform.h"
 #include "../include/kernel/printk.h"
+#include "../include/kernel/irq.h"
+#include "../include/kernel/trap.h"
 #include "../include/kernel/sched.h"
 #include "../include/kernel/spinlock.h"
 #include "../include/kernel/syscall.h"
@@ -89,8 +91,86 @@ static char g_user_exec_cache_path[USER_EXEC_PATH_CAP];
 static uint8_t g_user_exec_cache_buf[USER_EXEC_ELF_MAX];
 volatile uint32_t g_user_exec_saved_sp[32];
 volatile uint32_t g_user_exec_saved_csp[32];
+static volatile uint32_t g_user_exec_enter_entry[32];
+static volatile uint32_t g_user_exec_enter_sp[32];
 
 extern int user_exec_enter_asm(uint32_t entry, uint32_t stack_ptr);
+
+static inline uint32_t user_exec_cpu_ctx_read32(uint32_t io_addr) {
+    uint32_t value;
+    __asm__ volatile("in %0, %1" : "=r"(value) : "r"(io_addr));
+    return value;
+}
+
+static inline uint32_t user_exec_cpu_index(void) {
+    uint32_t cpu = 0u;
+    __asm__ volatile("cpuid %0" : "=r"(cpu));
+    if (cpu >= 32u) {
+        cpu = 0u;
+    }
+    return cpu;
+}
+
+static inline void user_exec_cpu_ctx_write32(uint32_t io_addr, uint32_t value) {
+    __asm__ volatile("out %0, %1" :: "r"(value), "r"(io_addr));
+}
+
+static inline void user_exec_isr_write_u32(uint32_t isr_base, uint32_t index, uint32_t value) {
+    volatile uint32_t *slot = (volatile uint32_t *)(uintptr_t)(isr_base + index * 8u);
+    slot[0] = value;
+    slot[1] = 0u;
+}
+
+__attribute__((noreturn)) static void user_exec_enter_iret_current(uint32_t entry, uint32_t stack_ptr) {
+    uint32_t isr_base = user_exec_cpu_ctx_read32(IO_CPU_CTX_ISR_BASE);
+    uint32_t isp = user_exec_cpu_ctx_read32(IO_CPU_CTX_ISP);
+
+    if (isp > (VM_ISR_STACK_ENTRIES - 34u)) {
+        sched_exit_code(USER_EXIT_CODE_LOAD_FAIL);
+    }
+
+    for (uint32_t reg = 0u; reg < 32u; reg++) {
+        user_exec_isr_write_u32(isr_base, isp + (31u - reg), 0u);
+    }
+    user_exec_isr_write_u32(isr_base, isp + (31u - 30u), stack_ptr);
+    user_exec_isr_write_u32(isr_base, isp + (31u - 31u), stack_ptr);
+    user_exec_isr_write_u32(isr_base, isp + 32u, 0u);
+    user_exec_isr_write_u32(isr_base, isp + 33u, entry);
+
+    user_exec_cpu_ctx_write32(IO_CPU_CTX_DSP, VM_DATA_STACK_ENTRIES);
+    user_exec_cpu_ctx_write32(IO_CPU_CTX_IRQ_MASK, 0u);
+    __asm__ volatile(
+        "out %0, %1\n"
+        "iret\n"
+        :
+        : "r"(VM_CALL_STACK_ENTRIES), "r"(IO_CPU_CTX_CSP)
+        : "memory");
+    __builtin_unreachable();
+}
+
+__attribute__((noreturn)) static void user_exec_enter_via_irq(uint32_t entry, uint32_t stack_ptr) {
+    uint32_t cpu = user_exec_cpu_index();
+    uint32_t irq = IRQ_USER_EXEC_ENTER;
+    g_user_exec_enter_entry[cpu] = entry;
+    g_user_exec_enter_sp[cpu] = stack_ptr;
+    __asm__ volatile("int %0" :: "r"(irq) : "memory");
+    __builtin_unreachable();
+}
+
+static void user_exec_irq_enter(uint32_t irq_no) {
+    uint32_t cpu;
+    uint32_t entry;
+    uint32_t stack_ptr;
+    if (irq_no != IRQ_USER_EXEC_ENTER) {
+        sched_exit_code(USER_EXIT_CODE_LOAD_FAIL);
+    }
+    cpu = user_exec_cpu_index();
+    entry = g_user_exec_enter_entry[cpu];
+    stack_ptr = g_user_exec_enter_sp[cpu];
+    g_user_exec_enter_entry[cpu] = 0u;
+    g_user_exec_enter_sp[cpu] = 0u;
+    user_exec_enter_iret_current(entry, stack_ptr);
+}
 
 __asm__(
     ".text\n"
@@ -125,6 +205,9 @@ static void user_exec_lazy_init(void) {
         return;
     }
     spinlock_init(&g_user_exec_lock);
+    trap_register(IRQ_USER_EXEC_ENTER, user_exec_irq_enter);
+    irq_set_priority(IRQ_USER_EXEC_ENTER, 0xE8u);
+    irq_enable(IRQ_USER_EXEC_ENTER);
     g_user_exec_cache_valid = 0u;
     g_user_exec_cache_size = 0u;
     g_user_exec_cache_path[0] = '\0';
@@ -551,6 +634,8 @@ static void user_exec_task_entry(sched_task_t *task, void *arg) {
     if (!task || !ctx) {
         return;
     }
+    sched_task_set_kind(SCHED_TASK_KIND_USER);
+    sched_task_set_exec_state(SCHED_EXEC_STATE_USER);
 
     klog_begin(KLOG_LEVEL_INFO, "user_exec");
     klog_puts("load start path=");
@@ -598,17 +683,8 @@ static void user_exec_task_entry(sched_task_t *task, void *arg) {
     klog_puts(&ctx->path[0]);
     klog_end();
 
-    rc = user_exec_enter(img.entry, img.stack_ptr);
-    klog_begin(KLOG_LEVEL_INFO, "user_exec");
-    klog_puts("user return rc=");
-    klog_hex32((uint32_t)rc);
-    klog_puts(" path=");
-    klog_puts(&ctx->path[0]);
-    klog_end();
     user_exec_release_ctx(ctx);
-    if (task->state != SCHED_TASK_ZOMBIE) {
-        sched_exit_code((uint32_t)(rc & 0xFF));
-    }
+    user_exec_enter_via_irq(img.entry, img.stack_ptr);
 }
 
 int user_exec_spawn_path(const char *path, const char *const argv[], const char *const envp[]) {
@@ -683,4 +759,26 @@ int user_exec_spawn_path(const char *path, const char *const argv[], const char 
         return -1;
     }
     return tid;
+}
+
+int user_exec_execve_current(const char *path, const char *const argv[], const char *const envp[]) {
+    user_image_t img;
+
+    if (!path || path[0] == '\0') {
+        return FS_ERR_INVAL;
+    }
+
+    int rc = user_exec_load_elf_from_ext4(path, argv, envp, &img);
+    if (rc != 0) {
+        return rc;
+    }
+
+    if (sched_fd_close_cloexec() < 0) {
+        return FS_ERR_INVAL;
+    }
+
+    sched_task_set_kind(SCHED_TASK_KIND_USER);
+    sched_task_set_exec_state(SCHED_EXEC_STATE_USER);
+    sched_vfork_release_parent();
+    user_exec_enter_iret_current(img.entry, img.stack_ptr);
 }

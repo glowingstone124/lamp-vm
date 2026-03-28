@@ -27,7 +27,7 @@ void kernel_entry(void) {
     kernel_early_init();
     console_fb_init();
     console_init();
-    KLOGI("kernel", "LAMP KERNEL V0.06 boot");
+    KLOGI("kernel", "LAMP KERNEL V0.31 boot");
     vm_info_log_boot();
     mmu_init();
     /* Kernel owns IVT policy after BIOS handoff. */

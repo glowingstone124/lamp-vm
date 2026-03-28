@@ -71,6 +71,7 @@ sched_stack_ctx_t g_sched_ctx[SCHED_MAX_CPUS];
 #define SCHED_STR(x) SCHED_STR1(x)
 
 extern void sched_ctx_swap(sched_stack_ctx_t *from, const sched_stack_ctx_t *to);
+extern void sched_ctx_capture(sched_stack_ctx_t *out);
 
 static void sched_task_bootstrap(void);
 
@@ -172,6 +173,59 @@ __asm__(
     "  movi r5, " SCHED_STR(SCHED_IO_IRQ_MASK) "\n"
     "  load32 r4, r3, " SCHED_STR(SCHED_CTX_OFF_IRQ_MASK) "\n"
     "  out r4, r5\n"
+    "  ret\n"
+);
+
+__asm__(
+    ".text\n"
+    ".globl sched_ctx_capture\n"
+    "sched_ctx_capture:\n"
+    "  mov r2, r0\n"
+    "  movi r5, " SCHED_STR(SCHED_IO_IRQ_MASK) "\n"
+    "  in r4, r5\n"
+    "  store32 r4, r2, " SCHED_STR(SCHED_CTX_OFF_IRQ_MASK) "\n"
+    "  movi r5, " SCHED_STR(SCHED_IO_CALL_BASE) "\n"
+    "  in r4, r5\n"
+    "  store32 r4, r2, " SCHED_STR(SCHED_CTX_OFF_CALL_BASE) "\n"
+    "  movi r5, " SCHED_STR(SCHED_IO_DATA_BASE) "\n"
+    "  in r4, r5\n"
+    "  store32 r4, r2, " SCHED_STR(SCHED_CTX_OFF_DATA_BASE) "\n"
+    "  movi r5, " SCHED_STR(SCHED_IO_ISR_BASE) "\n"
+    "  in r4, r5\n"
+    "  store32 r4, r2, " SCHED_STR(SCHED_CTX_OFF_ISR_BASE) "\n"
+    "  movi r5, " SCHED_STR(SCHED_IO_CSP) "\n"
+    "  in r4, r5\n"
+    "  store32 r4, r2, " SCHED_STR(SCHED_CTX_OFF_CSP) "\n"
+    "  movi r5, " SCHED_STR(SCHED_IO_DSP) "\n"
+    "  in r4, r5\n"
+    "  store32 r4, r2, " SCHED_STR(SCHED_CTX_OFF_DSP) "\n"
+    "  movi r5, " SCHED_STR(SCHED_IO_ISP) "\n"
+    "  in r4, r5\n"
+    "  store32 r4, r2, " SCHED_STR(SCHED_CTX_OFF_ISP) "\n"
+    "  store32 r8, r2, " SCHED_STR(SCHED_CTX_OFF_REG8) "\n"
+    "  store32 r9, r2, " SCHED_STR(SCHED_CTX_OFF_REG9) "\n"
+    "  store32 r10, r2, " SCHED_STR(SCHED_CTX_OFF_REG10) "\n"
+    "  store32 r11, r2, " SCHED_STR(SCHED_CTX_OFF_REG11) "\n"
+    "  store32 r12, r2, " SCHED_STR(SCHED_CTX_OFF_REG12) "\n"
+    "  store32 r13, r2, " SCHED_STR(SCHED_CTX_OFF_REG13) "\n"
+    "  store32 r14, r2, " SCHED_STR(SCHED_CTX_OFF_REG14) "\n"
+    "  store32 r15, r2, " SCHED_STR(SCHED_CTX_OFF_REG15) "\n"
+    "  store32 r16, r2, " SCHED_STR(SCHED_CTX_OFF_REG16) "\n"
+    "  store32 r17, r2, " SCHED_STR(SCHED_CTX_OFF_REG17) "\n"
+    "  store32 r18, r2, " SCHED_STR(SCHED_CTX_OFF_REG18) "\n"
+    "  store32 r19, r2, " SCHED_STR(SCHED_CTX_OFF_REG19) "\n"
+    "  store32 r20, r2, " SCHED_STR(SCHED_CTX_OFF_REG20) "\n"
+    "  store32 r21, r2, " SCHED_STR(SCHED_CTX_OFF_REG21) "\n"
+    "  store32 r22, r2, " SCHED_STR(SCHED_CTX_OFF_REG22) "\n"
+    "  store32 r23, r2, " SCHED_STR(SCHED_CTX_OFF_REG23) "\n"
+    "  store32 r24, r2, " SCHED_STR(SCHED_CTX_OFF_REG24) "\n"
+    "  store32 r25, r2, " SCHED_STR(SCHED_CTX_OFF_REG25) "\n"
+    "  store32 r26, r2, " SCHED_STR(SCHED_CTX_OFF_REG26) "\n"
+    "  store32 r27, r2, " SCHED_STR(SCHED_CTX_OFF_REG27) "\n"
+    "  store32 r28, r2, " SCHED_STR(SCHED_CTX_OFF_REG28) "\n"
+    "  store32 r29, r2, " SCHED_STR(SCHED_CTX_OFF_REG29) "\n"
+    "  store32 r30, r2, " SCHED_STR(SCHED_CTX_OFF_REG30) "\n"
+    "  store32 r31, r2, " SCHED_STR(SCHED_CTX_OFF_REG31) "\n"
     "  ret\n"
 );
 
@@ -538,7 +592,11 @@ void sched_init(void) {
     root->exit_code = 0u;
     sched_waitq_init_locked(&root->child_waitq);
     root->pub.tid = 0u;
+    root->pub.pid = 0u;
+    root->pub.ppid = -1;
     root->pub.state = SCHED_TASK_RUNNABLE;
+    root->pub.kind = SCHED_TASK_KIND_KERNEL;
+    root->pub.exec_state = SCHED_EXEC_STATE_KERNEL;
     root->pub.wake_tick = 0u;
     root->pub.run_ticks = 0u;
     root->pub.arg = 0;

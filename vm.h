@@ -258,6 +258,12 @@ struct VM{
     uint8_t serial_rx_fifo[256];
     uint16_t serial_rx_head;
     uint16_t serial_rx_tail;
+    uint8_t ps2_kbd_fifo[256];
+    uint16_t ps2_kbd_head;
+    uint16_t ps2_kbd_tail;
+    uint8_t ps2_mouse_fifo[256];
+    uint16_t ps2_mouse_head;
+    uint16_t ps2_mouse_tail;
 
     Disk disk;
     IOMMU iommu;

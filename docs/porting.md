@@ -88,6 +88,20 @@ Exit criteria:
 
 - user test program can `vfork -> execve("/bin/echo") -> waitpid`
 
+Current implementation snapshot:
+
+- syscall IDs wired: `execve=28`, `vfork=29`
+- kernel path:
+  - `execve` replaces current user image and applies `FD_CLOEXEC`
+  - `vfork` child returns `0`, parent blocks until child `execve` succeeds or child exits
+- init shell smoke command: `uvfork [count]` (loads `/bin/vfork_exec`)
+- userspace M1 smoke binaries:
+  - `/bin/echo`
+  - `/bin/vfork_exec`
+- disk install helpers:
+  - `user/install_user_to_disk.sh` for single binary
+  - `user/install_m1_to_disk.sh` for one-shot M1 set install
+
 ## M2 - Pipe and Redirection Foundations
 
 Deliverables:

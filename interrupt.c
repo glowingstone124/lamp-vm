@@ -6,6 +6,9 @@
 
 // Created by Max Wang on 2025/12/30.
 
+extern volatile int g_vfork_trace_steps[32];
+volatile int g_vfork_irq_probe_remaining[32];
+
 #define ISR_ARG_REG 31
 
 static inline size_t irq_word_index(int core_id, uint32_t int_no) {
@@ -55,6 +58,35 @@ static inline void isr_push_u32(VM *vm, uint32_t v) {
 
 static inline uint32_t isr_pop_u32(VM *vm) {
     return (uint32_t)isr_pop(vm);
+}
+
+static void irqprobe_dump_call_top(VM *vm, const VCPU *cpu, const char *tag) {
+    if (!vm || !cpu) {
+        return;
+    }
+    if (cpu->csp >= CALL_STACK_SIZE) {
+        fprintf(stderr, "[%s] callstack empty csp=0x%08x\n", tag, (uint32_t)cpu->csp);
+        return;
+    }
+    uint32_t start = cpu->csp;
+    if (start >= 8u) {
+        start -= 8u;
+    } else {
+        start = 0u;
+    }
+    for (int i = 0; i < 16; i++) {
+        uint32_t idx = start + (uint32_t)i;
+        if (idx >= CALL_STACK_SIZE) {
+            break;
+        }
+        uint64_t v = vm_read64(vm, cpu->call_stack_base + (vm_addr_t)(idx * 8u));
+        fprintf(stderr,
+                "[%s] core=%d call[%u]=0x%08x\n",
+                tag,
+                cpu->core_id,
+                idx,
+                (uint32_t)v);
+    }
 }
 
 uint32_t vm_interrupt_read_pending32(VM *vm, int core_id, uint32_t reg_index) {
@@ -140,6 +172,24 @@ void vm_enter_interrupt(VM *vm, uint32_t int_no) {
     if (isr_ip == UINT64_MAX)
         return;
 
+    if (cpu->core_id >= 0 && cpu->core_id < 32 && g_vfork_irq_probe_remaining[cpu->core_id] > 0) {
+        fprintf(stderr,
+                "[irqprobe-enter] core=%d int=0x%08x ip=0x%08zx last_ip=0x%08zx flags=0x%08x r31=0x%08x call_base=0x%08x csp=0x%08x dsp=0x%08x isp=0x%08x in_interrupt=%d irq_masked=%d\n",
+                cpu->core_id,
+                int_no,
+                cpu->ip,
+                cpu->last_ip,
+                cpu->flags,
+                (uint32_t)cpu->regs[31],
+                (uint32_t)cpu->call_stack_base,
+                (uint32_t)cpu->csp,
+                (uint32_t)cpu->dsp,
+                (uint32_t)cpu->isp,
+                cpu->in_interrupt ? 1 : 0,
+                cpu->irq_masked ? 1 : 0);
+        g_vfork_irq_probe_remaining[cpu->core_id]--;
+    }
+
     isr_push(vm, (uint64_t)cpu->ip);
     isr_push(vm, (uint64_t)cpu->flags);
 
@@ -159,6 +209,10 @@ void vm_enter_interrupt(VM *vm, uint32_t int_no) {
 
 void vm_iret(VM *vm) {
     VCPU *cpu = vm_current_cpu(vm);
+    const int traced_vfork_iret =
+        cpu &&
+        cpu->last_ip >= (size_t)0x00134358u &&
+        cpu->last_ip < (size_t)0x001349A8u;
     if (!cpu)
         return;
     if (!cpu->in_interrupt)
@@ -171,6 +225,38 @@ void vm_iret(VM *vm) {
     cpu->flags = (unsigned int)isr_pop(vm);
 
     cpu->ip = (size_t)(vm_addr_t)isr_pop(vm);
+
+    if (traced_vfork_iret) {
+        g_vfork_trace_steps[cpu->core_id] = 0;
+        g_vfork_irq_probe_remaining[cpu->core_id] = 8;
+        fprintf(stderr,
+                "[iretprobe] core=%d last_ip=0x%08zx resume_ip=0x%08zx flags=0x%08x r30=0x%08x r31=0x%08x call_base=0x%08x csp=0x%08x dsp=0x%08x isp=0x%08x\n",
+                cpu->core_id,
+                cpu->last_ip,
+                cpu->ip,
+                cpu->flags,
+                (uint32_t)cpu->regs[30],
+                (uint32_t)cpu->regs[31],
+                (uint32_t)cpu->call_stack_base,
+                (uint32_t)cpu->csp,
+                (uint32_t)cpu->dsp,
+                (uint32_t)cpu->isp);
+        irqprobe_dump_call_top(vm, cpu, "iretprobe-call");
+    } else if (cpu->core_id >= 0 && cpu->core_id < 32 && g_vfork_irq_probe_remaining[cpu->core_id] > 0) {
+        fprintf(stderr,
+                "[irqprobe-iret] core=%d last_ip=0x%08zx resume_ip=0x%08zx flags=0x%08x r30=0x%08x r31=0x%08x call_base=0x%08x csp=0x%08x dsp=0x%08x isp=0x%08x\n",
+                cpu->core_id,
+                cpu->last_ip,
+                cpu->ip,
+                cpu->flags,
+                (uint32_t)cpu->regs[30],
+                (uint32_t)cpu->regs[31],
+                (uint32_t)cpu->call_stack_base,
+                (uint32_t)cpu->csp,
+                (uint32_t)cpu->dsp,
+                (uint32_t)cpu->isp);
+        irqprobe_dump_call_top(vm, cpu, "irqprobe-iret-call");
+    }
 
     cpu->in_interrupt = 0;
 }

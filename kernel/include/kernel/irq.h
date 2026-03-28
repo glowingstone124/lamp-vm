@@ -30,5 +30,7 @@ void irq_eoi(uint32_t irq_no);
 void irq_input_init(void);
 uint32_t irq_input_dropped(void);
 const trap_frame_t *irq_last_trap_frame(void);
+uint32_t irq_saved_user_csp(void);
+uint32_t irq_saved_user_dsp(void);
 
 #endif

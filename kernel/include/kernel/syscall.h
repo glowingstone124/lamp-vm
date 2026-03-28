@@ -31,7 +31,9 @@ enum {
     SYS_LISTEN = 24u,
     SYS_ACCEPT = 25u,
     SYS_SEND = 26u,
-    SYS_RECV = 27u
+    SYS_RECV = 27u,
+    SYS_EXECVE = 28u,
+    SYS_VFORK = 29u
 };
 
 enum {

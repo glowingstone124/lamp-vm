@@ -18,8 +18,26 @@ mkdir -p build-user
   -ffreestanding -fno-builtin -fno-stack-protector -O0 \
   -Iuser/include -c user/apps/hello.c -o build-user/hello.o
 
+"$LAMP_CLANG" --target=lamp-unknown-unknown \
+  -ffreestanding -fno-builtin -fno-stack-protector -O0 \
+  -Iuser/include -c user/apps/echo.c -o build-user/echo.o
+
+"$LAMP_CLANG" --target=lamp-unknown-unknown \
+  -ffreestanding -fno-builtin -fno-stack-protector -O0 \
+  -Iuser/include -c user/apps/vfork_exec.c -o build-user/vfork_exec.o
+
 "$LAMP_LD" -T user/linker.ld -e _start \
   build-user/start.o build-user/libsys.o build-user/hello.o \
   -o build-user/hello.elf
 
+"$LAMP_LD" -T user/linker.ld -e _start \
+  build-user/start.o build-user/libsys.o build-user/echo.o \
+  -o build-user/echo.elf
+
+"$LAMP_LD" -T user/linker.ld -e _start \
+  build-user/start.o build-user/libsys.o build-user/vfork_exec.o \
+  -o build-user/vfork_exec.elf
+
 echo "built: build-user/hello.elf"
+echo "built: build-user/echo.elf"
+echo "built: build-user/vfork_exec.elf"

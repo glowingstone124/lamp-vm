@@ -30,6 +30,17 @@ enum {
 };
 
 enum {
+    SCHED_TASK_KIND_KERNEL = 0u,
+    SCHED_TASK_KIND_USER = 1u
+};
+
+enum {
+    SCHED_EXEC_STATE_NONE = 0u,
+    SCHED_EXEC_STATE_KERNEL = 1u,
+    SCHED_EXEC_STATE_USER = 2u
+};
+
+enum {
     SCHED_FD_O_ACCMODE = 0x00000003u,
     SCHED_FD_O_RDONLY = 0x00000000u,
     SCHED_FD_O_WRONLY = 0x00000001u,
@@ -69,7 +80,11 @@ enum {
 
 struct sched_task {
     uint32_t tid;
+    uint32_t pid;
+    int32_t ppid;
     uint32_t state;
+    uint32_t kind;
+    uint32_t exec_state;
     uint32_t wake_tick;
     uint32_t run_ticks;
     void *arg;
@@ -88,6 +103,8 @@ void sched_sleep_ticks(uint32_t ticks);
 int sched_current_tid(void);
 uint32_t sched_tick_period_us(void);
 int sched_waitpid(int32_t pid, uint32_t options, uint32_t *status_out);
+int sched_vfork(void);
+void sched_vfork_release_parent(void);
 
 int sched_fd_close(int32_t fd);
 int sched_fd_dup(int32_t oldfd);
@@ -105,11 +122,17 @@ uint32_t sched_fd_is_tty(int32_t fd);
 int sched_fd_open_special(uint32_t special_type, uint32_t status_flags);
 int sched_fd_open_regular(uint32_t status_flags, uint32_t fs_backend, uint32_t file_id, uint32_t file_size,
                           uint32_t is_dir);
+int sched_fd_close_cloexec(void);
 int sched_fd_get_type(int32_t fd, uint32_t *out_type);
 int sched_fd_regular_get(int32_t fd, uint32_t *fs_backend, uint32_t *file_id, uint32_t *file_size,
                          uint32_t *file_offset, uint32_t *is_dir);
 int sched_fd_regular_advance(int32_t fd, uint32_t delta, uint32_t *new_offset);
 int sched_fd_regular_commit_write(int32_t fd, uint32_t written, uint32_t new_size, uint32_t *new_offset);
+
+void sched_task_set_kind(uint32_t kind);
+void sched_task_set_exec_state(uint32_t exec_state);
+uint32_t sched_task_get_kind(void);
+uint32_t sched_task_get_exec_state(void);
 
 void sched_waitq_init(sched_waitq_t *q);
 void sched_waitq_sleep(sched_waitq_t *q, uint32_t timeout_ticks);

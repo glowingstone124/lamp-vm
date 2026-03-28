@@ -5,11 +5,17 @@
 
 void accept_io(VM *vm, int addr, int value);
 int vm_serial_rx_enqueue(VM *vm, uint8_t c);
+int vm_ps2_kbd_enqueue(VM *vm, uint8_t c);
+int vm_ps2_mouse_enqueue(VM *vm, uint8_t c);
 
 enum IO_TABLE {
     SCREEN = 0x01,
     SCREEN_ATTRIBUTE = 0x02,
     KEYBOARD = 0x03,
+    PS2_KBD_STATUS = 0x04,
+    PS2_KBD_DATA = 0x05,
+    PS2_MOUSE_STATUS = 0x06,
+    PS2_MOUSE_DATA = 0x07,
     DISK_CMD = 0x10,
     DISK_LBA = 0x11,
     DISK_MEM = 0x12,
@@ -29,4 +35,6 @@ enum IO_TABLE {
 #define SERIAL_STATUS_RX_READY 0x01
 #define SERIAL_STATUS_TX_READY 0x02
 #define SERIAL_CTRL_RX_INT_ENABLE 0x01
+
+#define PS2_STATUS_RX_READY 0x01
 #endif

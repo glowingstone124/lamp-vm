@@ -29,6 +29,7 @@ typedef enum InterruptNo {
     INT_DISK_COMPLETE   = 0x02,
     INT_SERIAL          = 0x03,
     INT_TIMER           = 0x04,
+    INT_MOUSE           = 0x05,
 } InterruptNo;
 
 #endif // VM_INTERRUPT_H

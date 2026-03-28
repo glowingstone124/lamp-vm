@@ -4,6 +4,7 @@
 #include "../include/kernel/platform.h"
 #include "../include/kernel/sched.h"
 #include "../include/kernel/syscall.h"
+#include "../include/kernel/user_exec.h"
 
 /*
  * Current VM interrupt model restores caller registers on IRET.
@@ -81,7 +82,9 @@ enum {
     SOCK_AF_UNIX = 1u,
     SOCK_AF_INET = 2u,
     SOCK_AF_INET6 = 10u,
-    SOCK_NONBLOCK = 0x00000800u
+    SOCK_NONBLOCK = 0x00000800u,
+    SYSCALL_EXEC_MAX_ARGV = 16u,
+    SYSCALL_EXEC_MAX_ENVP = 16u
 };
 
 static uint32_t g_realtime_offset_neg;
@@ -106,6 +109,14 @@ static inline uint32_t abi_user_write32(uint32_t addr, uint32_t v) {
         return 0u;
     }
     *(volatile uint32_t *)(uintptr_t)addr = v;
+    return 1u;
+}
+
+static inline uint32_t abi_user_read32(uint32_t addr, uint32_t *out) {
+    if (!out || !abi_ptr_range_ok(addr, 4u)) {
+        return 0u;
+    }
+    *out = *(volatile uint32_t *)(uintptr_t)addr;
     return 1u;
 }
 
@@ -163,6 +174,38 @@ static inline uint32_t abi_user_read_timespec(uint32_t addr, syscall_timespec32_
     out->tv_sec = *(volatile int32_t *)(uintptr_t)(addr + 0u);
     out->tv_nsec = *(volatile int32_t *)(uintptr_t)(addr + 4u);
     return 1u;
+}
+
+static uint32_t abi_user_read_cstrv(uint32_t vec_addr,
+                                    char storage[][FS_PATH_CAP],
+                                    const char *out_vec[],
+                                    uint32_t storage_cap) {
+    uint32_t i;
+    if (!out_vec) {
+        return 0u;
+    }
+    if (vec_addr == 0u) {
+        out_vec[0] = 0;
+        return 1u;
+    }
+    if (!storage || storage_cap == 0u) {
+        return 0u;
+    }
+    for (i = 0u; i < storage_cap; i++) {
+        uint32_t p = 0u;
+        if (!abi_user_read32(vec_addr + i * 4u, &p)) {
+            return 0u;
+        }
+        if (p == 0u) {
+            out_vec[i] = 0;
+            return 1u;
+        }
+        if (!abi_user_read_cstr(p, &storage[i][0], FS_PATH_CAP)) {
+            return 0u;
+        }
+        out_vec[i] = &storage[i][0];
+    }
+    return 0u;
 }
 
 static inline uint32_t abi_user_write_timespec(uint32_t addr, const syscall_timespec32_t *ts) {
@@ -953,6 +996,57 @@ uint32_t syscall_dispatch(const syscall_regs_t *regs) {
             rc = sched_fd_open_special(SCHED_FD_SPECIAL_SOCKET, status_flags);
             if (rc < 0) {
                 err = errno_from_sched_fd_rc(rc);
+                ret = (uint32_t)-1;
+                break;
+            }
+            ret = (uint32_t)rc;
+            break;
+        }
+        case SYS_EXECVE: {
+            uint32_t path_addr = regs->arg0;
+            uint32_t argv_addr = regs->arg1;
+            uint32_t envp_addr = regs->arg2;
+            char path[FS_PATH_CAP];
+            char argv_storage[SYSCALL_EXEC_MAX_ARGV][FS_PATH_CAP];
+            char envp_storage[SYSCALL_EXEC_MAX_ENVP][FS_PATH_CAP];
+            const char *argv_vec[SYSCALL_EXEC_MAX_ARGV + 1u];
+            const char *envp_vec[SYSCALL_EXEC_MAX_ENVP + 1u];
+            int rc;
+
+            if (!abi_user_read_cstr(path_addr, path, (uint32_t)sizeof(path))) {
+                err = ERRNO_EFAULT;
+                ret = (uint32_t)-1;
+                break;
+            }
+            if (!abi_user_read_cstrv(argv_addr, argv_storage, argv_vec, SYSCALL_EXEC_MAX_ARGV)) {
+                err = ERRNO_EFAULT;
+                ret = (uint32_t)-1;
+                break;
+            }
+            if (!abi_user_read_cstrv(envp_addr, envp_storage, envp_vec, SYSCALL_EXEC_MAX_ENVP)) {
+                err = ERRNO_EFAULT;
+                ret = (uint32_t)-1;
+                break;
+            }
+            if (argv_vec[0] == 0) {
+                argv_storage[0][0] = '\0';
+                for (uint32_t i = 0u; path[i] != '\0' && i + 1u < FS_PATH_CAP; i++) {
+                    argv_storage[0][i] = path[i];
+                    argv_storage[0][i + 1u] = '\0';
+                }
+                argv_vec[0] = &argv_storage[0][0];
+                argv_vec[1] = 0;
+            }
+
+            rc = user_exec_execve_current(path, argv_vec, envp_vec);
+            err = errno_from_fs_rc(rc);
+            ret = (uint32_t)-1;
+            break;
+        }
+        case SYS_VFORK: {
+            int rc = sched_vfork();
+            if (rc < 0) {
+                err = ERRNO_EAGAIN;
                 ret = (uint32_t)-1;
                 break;
             }

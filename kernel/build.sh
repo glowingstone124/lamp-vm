@@ -17,7 +17,7 @@ mkdir -p build-kernel
 
 for f in kernel/src/*.c; do
   "$LAMP_CLANG" --target=lamp-unknown-unknown \
-    -ffreestanding -fno-builtin -fno-stack-protector -O0 \
+    -ffreestanding -fno-builtin -fno-stack-protector -fomit-frame-pointer -O0 \
     -Ikernel/include -c "$f" \
     -o "build-kernel/$(basename "$f" .c).o"
 done

@@ -16,5 +16,6 @@ int user_exec_load_elf_from_ext4(const char *path,
                                  const char *const envp[],
                                  user_image_t *out_img);
 int user_exec_spawn_path(const char *path, const char *const argv[], const char *const envp[]);
+int user_exec_execve_current(const char *path, const char *const argv[], const char *const envp[]);
 
 #endif

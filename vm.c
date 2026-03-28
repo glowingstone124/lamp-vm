@@ -4,6 +4,7 @@
 #define __USE_MISC
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <sched.h>
 #include <SDL2/SDL_timer.h>
 #include <pthread.h>
@@ -39,6 +40,16 @@ typedef struct {
 } CpuThreadArg;
 
 _Thread_local VCPU *vm_tls_vcpu = NULL;
+volatile int g_vfork_trace_steps[32];
+extern volatile int g_vfork_irq_probe_remaining[32];
+
+static inline int vfork_irq_probe_active(const VCPU *cpu) {
+    return cpu && cpu->core_id >= 0 && cpu->core_id < 32 && g_vfork_irq_probe_remaining[cpu->core_id] > 0;
+}
+
+static inline int vfork_irq_probe_addr(vm_addr_t addr) {
+    return addr >= (vm_addr_t)0x00121f78u && addr < (vm_addr_t)0x001224d0u;
+}
 
 void update_zf_sf(VM *vm, int32_t result,VCPU *cpu) {
     if (!cpu)
@@ -129,6 +140,17 @@ static inline int vm_stack_region_valid(const VM *vm, vm_addr_t base, size_t byt
     return bytes <= (vm->memory_size - start);
 }
 
+static inline void vm_irq_ack_input(VM *vm, uint32_t int_no) {
+    if (!vm || !vm->interrupt_bitmap || int_no >= IVT_SIZE) {
+        return;
+    }
+    {
+        const size_t word_idx = ((size_t)int_no >> 6);
+        const uint_fast64_t bit = (uint_fast64_t)(1ULL << (int_no & 63u));
+        atomic_fetch_and(&vm->interrupt_bitmap[word_idx], ~bit);
+    }
+}
+
 static inline vm_addr_t rel_target_from_last_ip(const VCPU *cpu, int32_t imm) {
     const int64_t base = (int64_t)(vm_addr_t)cpu->last_ip;
     const int64_t target = base + (int64_t)imm;
@@ -158,6 +180,24 @@ void vm_instruction_case(VM *vm) {
     uint8_t op, rd, rs1, rs2;
     int32_t imm;
     FETCH64(vm, op, rd, rs1, rs2, imm);
+    if (cpu->core_id >= 0 && cpu->core_id < 32 && g_vfork_trace_steps[cpu->core_id] > 0) {
+        g_vfork_trace_steps[cpu->core_id]--;
+        fprintf(stderr,
+                "[steptrace] core=%d ip=0x%08zx op=%u rd=%u rs1=%u rs2=%u imm=0x%08x call_base=0x%08x csp=0x%08x dsp=0x%08x isp=0x%08x in_interrupt=%d irq_masked=%d\n",
+                cpu->core_id,
+                cpu->last_ip,
+                (unsigned)op,
+                (unsigned)rd,
+                (unsigned)rs1,
+                (unsigned)rs2,
+                (uint32_t)imm,
+                (uint32_t)cpu->call_stack_base,
+                (uint32_t)cpu->csp,
+                (uint32_t)cpu->dsp,
+                (uint32_t)cpu->isp,
+                cpu->in_interrupt ? 1 : 0,
+                cpu->irq_masked ? 1 : 0);
+    }
     vm_debug_count_instruction(vm, op);
     //printf("IP=%lu, executing opcode=%d\n", cpu->ip, op);
     //printf("0x%08x,0x%08x,0x%08x,0x%08x\n", rd,rs1,rs2,imm);
@@ -206,22 +246,118 @@ void vm_instruction_case(VM *vm) {
             break;
         }
         case OP_CALL: {
+            if (vfork_irq_probe_active(cpu) && vfork_irq_probe_addr((vm_addr_t)imm)) {
+                fprintf(stderr,
+                        "[irqcall] core=%d kind=call last_ip=0x%08zx ret=0x%08zx target=0x%08x call_base=0x%08x csp=0x%08x dsp=0x%08x isp=0x%08x in_interrupt=%d\n",
+                        cpu->core_id,
+                        cpu->last_ip,
+                        cpu->ip,
+                        (uint32_t)(vm_addr_t)imm,
+                        (uint32_t)cpu->call_stack_base,
+                        (uint32_t)cpu->csp,
+                        (uint32_t)cpu->dsp,
+                        (uint32_t)cpu->isp,
+                        cpu->in_interrupt ? 1 : 0);
+            }
+            if (0 && ((vm_addr_t)imm == (vm_addr_t)0x00125DC8u ||
+                 (vm_addr_t)imm == (vm_addr_t)0x00127BC0u) && cpu->core_id == 1) {
+                fprintf(stderr,
+                        "[callprobe] core=%d kind=call last_ip=0x%08zx ret=0x%08zx target=0x%08x call_base=0x%08x csp=0x%08x r0=0x%08x r1=0x%08x in_interrupt=%d\n",
+                        cpu->core_id,
+                        cpu->last_ip,
+                        cpu->ip,
+                        (uint32_t)(vm_addr_t)imm,
+                        (uint32_t)cpu->call_stack_base,
+                        (uint32_t)cpu->csp,
+                        (uint32_t)cpu->regs[0],
+                        (uint32_t)cpu->regs[1],
+                        cpu->in_interrupt ? 1 : 0);
+            }
             call_push(vm, (uint64_t)(vm_addr_t)cpu->ip);
             cpu->ip = (size_t)(vm_addr_t)imm;
             break;
         }
         case OP_RCALL: {
+            const vm_addr_t target = rel_target_from_last_ip(cpu, imm);
+            if (vfork_irq_probe_active(cpu) && (vfork_irq_probe_addr(target) || vfork_irq_probe_addr((vm_addr_t)cpu->last_ip))) {
+                fprintf(stderr,
+                        "[irqcall] core=%d kind=rcall last_ip=0x%08zx ret=0x%08zx target=0x%08x call_base=0x%08x csp=0x%08x dsp=0x%08x isp=0x%08x in_interrupt=%d\n",
+                        cpu->core_id,
+                        cpu->last_ip,
+                        cpu->ip,
+                        (uint32_t)target,
+                        (uint32_t)cpu->call_stack_base,
+                        (uint32_t)cpu->csp,
+                        (uint32_t)cpu->dsp,
+                        (uint32_t)cpu->isp,
+                        cpu->in_interrupt ? 1 : 0);
+            }
+            if (0 && (target == (vm_addr_t)0x00125DC8u ||
+                 target == (vm_addr_t)0x00127BC0u) && cpu->core_id == 1) {
+                fprintf(stderr,
+                        "[callprobe] core=%d kind=rcall last_ip=0x%08zx ret=0x%08zx target=0x%08x call_base=0x%08x csp=0x%08x r0=0x%08x r1=0x%08x in_interrupt=%d\n",
+                        cpu->core_id,
+                        cpu->last_ip,
+                        cpu->ip,
+                        (uint32_t)target,
+                        (uint32_t)cpu->call_stack_base,
+                        (uint32_t)cpu->csp,
+                        (uint32_t)cpu->regs[0],
+                        (uint32_t)cpu->regs[1],
+                        cpu->in_interrupt ? 1 : 0);
+            }
             call_push(vm, (uint64_t)(vm_addr_t)cpu->ip);
-            cpu->ip = (size_t)rel_target_from_last_ip(cpu, imm);
+            cpu->ip = (size_t)target;
             break;
         }
         case OP_CALLR: {
+            if (0 && ((vm_addr_t)cpu->regs[rd] == (vm_addr_t)0x00125DC8u ||
+                 (vm_addr_t)cpu->regs[rd] == (vm_addr_t)0x00127BC0u) && cpu->core_id == 1) {
+                fprintf(stderr,
+                        "[callprobe] core=%d kind=callr last_ip=0x%08zx ret=0x%08zx target=0x%08x call_base=0x%08x csp=0x%08x r0=0x%08x r1=0x%08x in_interrupt=%d\n",
+                        cpu->core_id,
+                        cpu->last_ip,
+                        cpu->ip,
+                        (uint32_t)(vm_addr_t)cpu->regs[rd],
+                        (uint32_t)cpu->call_stack_base,
+                        (uint32_t)cpu->csp,
+                        (uint32_t)cpu->regs[0],
+                        (uint32_t)cpu->regs[1],
+                        cpu->in_interrupt ? 1 : 0);
+            }
             call_push(vm, (uint64_t)(vm_addr_t)cpu->ip);
             cpu->ip = (size_t)(vm_addr_t)cpu->regs[rd];
             break;
         }
         case OP_RET: {
-            cpu->ip = (size_t)(vm_addr_t)call_pop(vm);
+            const vm_addr_t before_call_base = cpu->call_stack_base;
+            const int before_csp = cpu->csp;
+            const uint64_t ret_addr = call_pop(vm);
+            if (vfork_irq_probe_active(cpu) &&
+                (vfork_irq_probe_addr((vm_addr_t)cpu->last_ip) || vfork_irq_probe_addr((vm_addr_t)ret_addr))) {
+                fprintf(stderr,
+                        "[irqret] core=%d last_ip=0x%08zx ret=0x%08x before_call_base=0x%08x before_csp=0x%08x after_call_base=0x%08x after_csp=0x%08x in_interrupt=%d\n",
+                        cpu->core_id,
+                        cpu->last_ip,
+                        (uint32_t)ret_addr,
+                        (uint32_t)before_call_base,
+                        (uint32_t)before_csp,
+                        (uint32_t)cpu->call_stack_base,
+                        (uint32_t)cpu->csp,
+                        cpu->in_interrupt ? 1 : 0);
+            }
+            if (0 && (vm_addr_t)ret_addr == (vm_addr_t)0x00130D00u) {
+                fprintf(stderr,
+                        "[retprobe] core=%d last_ip=0x%08zx ret=0x%08x before_call_base=0x%08x before_csp=0x%08x after_call_base=0x%08x after_csp=0x%08x\n",
+                        cpu->core_id,
+                        cpu->last_ip,
+                        (uint32_t)ret_addr,
+                        (uint32_t)before_call_base,
+                        (uint32_t)before_csp,
+                        (uint32_t)cpu->call_stack_base,
+                        (uint32_t)cpu->csp);
+            }
+            cpu->ip = (size_t)(vm_addr_t)ret_addr;
             break;
         }
         case OP_LOAD: {
@@ -412,19 +548,54 @@ void vm_instruction_case(VM *vm) {
                      * RX read acts as IRQ acknowledge: clear serial/keyboard bits on core 0.
                      * This prevents stale pending bits from retriggering the same input forever.
                      */
-                    {
-                        const size_t word_idx = ((size_t)INT_SERIAL >> 6);
-                        const uint_fast64_t serial_mask = (uint_fast64_t)(1ULL << (INT_SERIAL & 63u));
-                        const uint_fast64_t keyboard_mask = (uint_fast64_t)(1ULL << (INT_KEYBOARD & 63u));
-                        const uint_fast64_t clear_mask = ~(serial_mask | keyboard_mask);
-                        atomic_fetch_and(&vm->interrupt_bitmap[word_idx], clear_mask);
-                    }
+                    vm_irq_ack_input(vm, INT_SERIAL);
+                    vm_irq_ack_input(vm, INT_KEYBOARD);
                     if (vm->serial_rx_tail != vm->serial_rx_head &&
                         ((vm->io[SCREEN_ATTRIBUTE] >> 8) & SERIAL_CTRL_RX_INT_ENABLE)) {
                         trigger_interrupt(vm, INT_SERIAL);
                     }
+                } else if (addr == PS2_KBD_DATA) {
+                    int v = 0;
+                    if (vm->ps2_kbd_tail != vm->ps2_kbd_head) {
+                        v = (int)vm->ps2_kbd_fifo[vm->ps2_kbd_tail];
+                        vm->ps2_kbd_tail = (uint16_t)((vm->ps2_kbd_tail + 1u) & 0xFFu);
+                    }
+                    cpu->regs[rd] = v;
+                    if (vm->ps2_kbd_tail != vm->ps2_kbd_head) {
+                        vm->io[PS2_KBD_DATA] = (int)vm->ps2_kbd_fifo[vm->ps2_kbd_tail];
+                        vm->io[PS2_KBD_STATUS] |= PS2_STATUS_RX_READY;
+                    } else {
+                        vm->io[PS2_KBD_DATA] = 0;
+                        vm->io[PS2_KBD_STATUS] &= ~PS2_STATUS_RX_READY;
+                    }
+                    vm_irq_ack_input(vm, INT_KEYBOARD);
+                    if (vm->ps2_kbd_tail != vm->ps2_kbd_head) {
+                        trigger_interrupt(vm, INT_KEYBOARD);
+                    }
+                } else if (addr == PS2_MOUSE_DATA) {
+                    int v = 0;
+                    if (vm->ps2_mouse_tail != vm->ps2_mouse_head) {
+                        v = (int)vm->ps2_mouse_fifo[vm->ps2_mouse_tail];
+                        vm->ps2_mouse_tail = (uint16_t)((vm->ps2_mouse_tail + 1u) & 0xFFu);
+                    }
+                    cpu->regs[rd] = v;
+                    if (vm->ps2_mouse_tail != vm->ps2_mouse_head) {
+                        vm->io[PS2_MOUSE_DATA] = (int)vm->ps2_mouse_fifo[vm->ps2_mouse_tail];
+                        vm->io[PS2_MOUSE_STATUS] |= PS2_STATUS_RX_READY;
+                    } else {
+                        vm->io[PS2_MOUSE_DATA] = 0;
+                        vm->io[PS2_MOUSE_STATUS] &= ~PS2_STATUS_RX_READY;
+                    }
+                    vm_irq_ack_input(vm, INT_MOUSE);
+                    if (vm->ps2_mouse_tail != vm->ps2_mouse_head) {
+                        trigger_interrupt(vm, INT_MOUSE);
+                    }
                 } else if (addr == SCREEN_ATTRIBUTE) {
                     cpu->regs[rd] = vm->io[SCREEN_ATTRIBUTE] & 0xFF;
+                } else if (addr == PS2_KBD_STATUS) {
+                    cpu->regs[rd] = vm->io[PS2_KBD_STATUS] & 0xFF;
+                } else if (addr == PS2_MOUSE_STATUS) {
+                    cpu->regs[rd] = vm->io[PS2_MOUSE_STATUS] & 0xFF;
                 } else {
                     cpu->regs[rd] = vm->io[addr];
                 }
@@ -464,9 +635,23 @@ void vm_instruction_case(VM *vm) {
                 }
                 if (addr == CPU_CTX_CALL_BASE) {
                     const vm_addr_t v = (vm_addr_t)(uint32_t)cpu->regs[rd];
+                    const vm_addr_t old = cpu->call_stack_base;
                     if (!vm_stack_region_valid(vm, v, (size_t)CALL_STACK_SIZE * 8u)) {
                         panic(panic_format("OUT invalid call stack base 0x%08x", (uint32_t)v), vm);
                         break;
+                    }
+                    if (0 && cpu->core_id == 1 &&
+                        (v == (vm_addr_t)0x03DCBC00u || v == (vm_addr_t)0x03DD5000u ||
+                         old == (vm_addr_t)0x03DCBC00u || old == (vm_addr_t)0x03DD5000u)) {
+                        fprintf(stderr,
+                                "[callbase-out] core=%d last_ip=0x%08zx old=0x%08x new=0x%08x csp=0x%08x irq_masked=%d in_interrupt=%d\n",
+                                cpu->core_id,
+                                cpu->last_ip,
+                                (uint32_t)old,
+                                (uint32_t)v,
+                                (uint32_t)cpu->csp,
+                                cpu->irq_masked,
+                                cpu->in_interrupt);
                     }
                     cpu->call_stack_base = v;
                     break;
@@ -1013,6 +1198,65 @@ void vm_run(VM *vm) {
     free(thread_ids);
 }
 
+void vm_run_serial(VM *vm) {
+    const int cores = (vm->smp_cores > 0) ? vm->smp_cores : 1;
+    pthread_t *thread_ids = malloc(sizeof(pthread_t) * (size_t)cores);
+    int created_threads = 0;
+    int stdin_flags = -1;
+    int stdin_restore = 0;
+    int raw_mode = 0;
+    if (!thread_ids) {
+        panic("Failed to allocate CPU thread list", vm);
+        return;
+    }
+
+    stdin_flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    if (stdin_flags >= 0) {
+        if (fcntl(STDIN_FILENO, F_SETFL, stdin_flags | O_NONBLOCK) == 0) {
+            stdin_restore = 1;
+        }
+    }
+    if (isatty(STDIN_FILENO)) {
+        enable_raw_mode();
+        raw_mode = 1;
+    }
+
+    for (int i = 0; i < cores; i++) {
+        CpuThreadArg *arg = malloc(sizeof(CpuThreadArg));
+        if (!arg) {
+            panic("Failed to allocate CPU thread argument", vm);
+            atomic_set_vm_halt(vm, 1);
+            break;
+        }
+        arg->vm = vm;
+        arg->core_id = i;
+        if (pthread_create(&thread_ids[i], NULL, vm_thread, arg) != 0) {
+            free(arg);
+            panic("Failed to create CPU thread", vm);
+            atomic_set_vm_halt(vm, 1);
+            break;
+        }
+        created_threads++;
+    }
+
+    while (!atomic_is_vm_halted(vm) && !atomic_is_vm_panicked(vm)) {
+        vm_handle_keyboard(vm);
+        usleep(1000);
+    }
+
+    if (raw_mode) {
+        disable_raw_mode();
+    }
+    if (stdin_restore) {
+        (void)fcntl(STDIN_FILENO, F_SETFL, stdin_flags);
+    }
+
+    for (int i = 0; i < created_threads; i++) {
+        pthread_join(thread_ids[i], NULL);
+    }
+    free(thread_ids);
+}
+
 int vm_run_headless(VM *vm, uint64_t timeout_ms) {
     const int cores = (vm->smp_cores > 0) ? vm->smp_cores : 1;
     pthread_t *thread_ids = malloc(sizeof(pthread_t) * (size_t)cores);
@@ -1385,7 +1629,7 @@ void vm_destroy(VM *vm) {
 }
 
 static void print_usage(const char *prog) {
-    printf("Usage: %s [--bin <file>] [--smp <cores>] [--selftest]\n", prog);
+    printf("Usage: %s [--bin <file>] [--smp <cores>] [--selftest] [--serial-stdin]\n", prog);
     printf("Defaults: --bin boot.bin --smp 1\n");
 }
 
@@ -1407,6 +1651,7 @@ int main(int argc, char **argv) {
     const char *filename = "boot.bin";
     int smp_cores = 1;
     int selftest = 0;
+    int serial_stdin = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--bin") == 0) {
             if (i + 1 >= argc) {
@@ -1426,6 +1671,8 @@ int main(int argc, char **argv) {
             return 0;
         } else if (strcmp(argv[i], "--selftest") == 0) {
             selftest = 1;
+        } else if (strcmp(argv[i], "--serial-stdin") == 0) {
+            serial_stdin = 1;
         } else {
             printf("Unknown argument: %s\n", argv[i]);
             print_usage(argv[0]);
@@ -1473,7 +1720,12 @@ int main(int argc, char **argv) {
            MEM_SIZE,
            (void *) vm->memory);
     init_screen();
-    vm_run(vm);
+    if (serial_stdin) {
+        printf("Serial stdin mode enabled (headless).\n");
+        vm_run_serial(vm);
+    } else {
+        vm_run(vm);
+    }
 #ifdef DBEUG
     vm_dump(vm, 1024);
 #endif

@@ -48,6 +48,13 @@ Current IDs (must match kernel `include/kernel/syscall.h`):
 - `25 accept`
 - `26 send`
 - `27 recv`
+- `28 execve`
+- `29 vfork`
+
+Current `vfork` note:
+
+- returns `0` in child and `child_pid` in parent
+- parent is blocked until child `execve` succeeds or child exits
 
 ## Errno mapping
 

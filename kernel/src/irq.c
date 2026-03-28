@@ -11,14 +11,16 @@
 #define STR1(x) #x
 #define STR(x) STR1(x)
 
-volatile uint32_t g_irq_stub_no;
-volatile uint32_t g_irq_stub_r0;
-volatile uint32_t g_irq_stub_r1;
-volatile uint32_t g_irq_stub_r2;
-volatile uint32_t g_irq_stub_r3;
-volatile uint32_t g_irq_stub_r4;
-volatile uint32_t g_irq_stub_r5;
-volatile uint32_t g_irq_stub_r6;
+volatile uint32_t g_irq_stub_no[32];
+volatile uint32_t g_irq_stub_r0[32];
+volatile uint32_t g_irq_stub_r1[32];
+volatile uint32_t g_irq_stub_r2[32];
+volatile uint32_t g_irq_stub_r3[32];
+volatile uint32_t g_irq_stub_r4[32];
+volatile uint32_t g_irq_stub_r5[32];
+volatile uint32_t g_irq_stub_r6[32];
+volatile uint32_t g_irq_saved_user_csp[32];
+volatile uint32_t g_irq_saved_user_dsp[32];
 static volatile trap_frame_t g_last_trap_frame;
 static volatile uint32_t g_irq_counts[KERNEL_IVT_SIZE];
 static volatile uint32_t g_fault_div0;
@@ -31,6 +33,15 @@ static inline uint32_t io_in32(uint32_t addr) {
 
 static inline void io_out32(uint32_t addr, uint32_t value) {
     __asm__ volatile ("out %0, %1" :: "r"(value), "r"(addr));
+}
+
+static inline uint32_t irq_stub_cpu_index(void) {
+    uint32_t cpu = 0u;
+    __asm__ volatile("cpuid %0" : "=r"(cpu));
+    if (cpu >= 32u) {
+        cpu = 0u;
+    }
+    return cpu;
 }
 
 static void serial_drain_rx(void) {
@@ -54,7 +65,7 @@ void irq_common_entry(uint32_t irq_no) {
 }
 
 void irq_common_entry_from_stub(void) {
-    irq_common_entry(g_irq_stub_no);
+    irq_common_entry(g_irq_stub_no[irq_stub_cpu_index()]);
 }
 
 void irq_input_init(void) {
@@ -67,6 +78,24 @@ uint32_t irq_input_dropped(void) {
 
 const trap_frame_t *irq_last_trap_frame(void) {
     return (const trap_frame_t *)&g_last_trap_frame;
+}
+
+uint32_t irq_saved_user_csp(void) {
+    uint32_t cpu = 0u;
+    __asm__ volatile("cpuid %0" : "=r"(cpu));
+    if (cpu >= 32u) {
+        cpu = 0u;
+    }
+    return g_irq_saved_user_csp[cpu];
+}
+
+uint32_t irq_saved_user_dsp(void) {
+    uint32_t cpu = 0u;
+    __asm__ volatile("cpuid %0" : "=r"(cpu));
+    if (cpu >= 32u) {
+        cpu = 0u;
+    }
+    return g_irq_saved_user_dsp[cpu];
 }
 
 void irq_default(uint32_t irq_no) {
@@ -118,13 +147,14 @@ void irq_syscall(uint32_t irq_no) {
      * Keep IRQ syscall entry on a pointer-based call path.
      * This avoids relying on wide C argument passing in the current backend.
      */
-    regs.nr = g_irq_stub_r0;
-    regs.arg0 = g_irq_stub_r1;
-    regs.arg1 = g_irq_stub_r2;
-    regs.arg2 = g_irq_stub_r3;
-    regs.arg3 = g_irq_stub_r4;
-    regs.arg4 = g_irq_stub_r5;
-    regs.arg5 = g_irq_stub_r6;
+    const uint32_t cpu = irq_stub_cpu_index();
+    regs.nr = g_irq_stub_r0[cpu];
+    regs.arg0 = g_irq_stub_r1[cpu];
+    regs.arg1 = g_irq_stub_r2[cpu];
+    regs.arg2 = g_irq_stub_r3[cpu];
+    regs.arg3 = g_irq_stub_r4[cpu];
+    regs.arg4 = g_irq_stub_r5[cpu];
+    regs.arg5 = g_irq_stub_r6[cpu];
     (void)syscall_dispatch(&regs);
 }
 
@@ -141,25 +171,46 @@ __asm__(
     "  mov r14, r6\n"
     "  mov r2, r31\n"
     "  cpuid r15\n"
+    "  mov r7, r15\n"
+    "  add r7, r7, r7\n"
+    "  add r7, r7, r7\n"
+    "  movi r0, g_irq_saved_user_csp\n"
+    "  add r0, r0, r7\n"
+    "  movi r1, " STR(IO_CPU_CTX_CSP) "\n"
+    "  in r3, r1\n"
+    "  store32 r3, r0, 0\n"
+    "  movi r0, g_irq_saved_user_dsp\n"
+    "  add r0, r0, r7\n"
+    "  movi r1, " STR(IO_CPU_CTX_DSP) "\n"
+    "  in r3, r1\n"
+    "  store32 r3, r0, 0\n"
     "  shli r15, r15, " STR(KERNEL_IRQ_STACK_SHIFT) "\n"
     "  movi r30, " STR(KERNEL_IRQ_STACK_TOP) "\n"
     "  sub r30, r30, r15\n"
     "  mov r31, r30\n"
     "  movi r0, g_irq_stub_no\n"
+    "  add r0, r0, r7\n"
     "  store32 r2, r0, 0\n"
     "  movi r0, g_irq_stub_r0\n"
+    "  add r0, r0, r7\n"
     "  store32 r8, r0, 0\n"
     "  movi r0, g_irq_stub_r1\n"
+    "  add r0, r0, r7\n"
     "  store32 r9, r0, 0\n"
     "  movi r0, g_irq_stub_r2\n"
+    "  add r0, r0, r7\n"
     "  store32 r10, r0, 0\n"
     "  movi r0, g_irq_stub_r3\n"
+    "  add r0, r0, r7\n"
     "  store32 r11, r0, 0\n"
     "  movi r0, g_irq_stub_r4\n"
+    "  add r0, r0, r7\n"
     "  store32 r12, r0, 0\n"
     "  movi r0, g_irq_stub_r5\n"
+    "  add r0, r0, r7\n"
     "  store32 r13, r0, 0\n"
     "  movi r0, g_irq_stub_r6\n"
+    "  add r0, r0, r7\n"
     "  store32 r14, r0, 0\n"
     "  call irq_common_entry_from_stub\n"
     "  iret\n"
