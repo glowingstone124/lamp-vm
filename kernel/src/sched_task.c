@@ -3,51 +3,6 @@
 #include "../include/kernel/printk.h"
 #include "../include/kernel/syscall.h"
 
-static volatile uint32_t g_vfork_dbg_stage;
-static volatile uint32_t g_vfork_dbg_parent_slot_base;
-static volatile uint32_t g_vfork_dbg_child_slot_base;
-static volatile uint32_t g_vfork_dbg_parent_sp;
-static volatile uint32_t g_vfork_dbg_live_top;
-static volatile uint32_t g_vfork_dbg_child_ptr;
-static volatile uint32_t g_vfork_dbg_self_ptr;
-static volatile uint32_t g_vfork_dbg_parent_live_in_ptr;
-static volatile uint32_t g_vfork_dbg_child_live_out_ptr;
-static volatile uint32_t g_vfork_dbg_caller_parent_live_ptr;
-static volatile uint32_t g_vfork_dbg_caller_child_live_ptr;
-static volatile uint32_t g_vfork_dbg_postprep_rc;
-static volatile uint32_t g_vfork_dbg_postprep_parent_sp;
-static volatile uint32_t g_vfork_dbg_postprep_parent_call_base;
-static volatile uint32_t g_vfork_dbg_postprep_call_local;
-static volatile uint32_t g_vfork_dbg_postprep_child_base;
-static volatile uint32_t g_vfork_dbg_postprep_live_slot;
-static volatile uint32_t g_vfork_dbg_postprep_call_slot;
-static volatile uint32_t g_vfork_dbg_postprep_self_slot;
-static volatile uint32_t g_vfork_dbg_postprep_fp_reg;
-static volatile uint32_t g_vfork_dbg_postprep_parent_sp_ptr;
-static volatile uint32_t g_vfork_dbg_postprep_parent_call_base_ptr;
-static volatile uint32_t g_vfork_dbg_postprep_child_sp_ptr;
-static volatile uint32_t g_vfork_dbg_postprep_child_call_base_ptr;
-static volatile uint32_t g_vfork_dbg_preprep_parent_sp;
-static volatile uint32_t g_vfork_dbg_preprep_parent_call_base;
-static volatile uint32_t g_vfork_dbg_preprep_call_local;
-static volatile uint32_t g_vfork_dbg_preprep_child_base;
-static volatile uint32_t g_vfork_dbg_preprep_fp_reg;
-static volatile uint32_t g_vfork_dbg_preprep_sp_reg;
-static volatile uint32_t g_vfork_dbg_postprep_sp_reg;
-static volatile uint32_t g_vfork_dbg_prep_entry_sp_reg;
-static volatile uint32_t g_vfork_dbg_prep_exit_sp_reg;
-static volatile uint32_t g_vfork_dbg_preprep_cpu_call_base;
-static volatile uint32_t g_vfork_dbg_preprep_cpu_csp;
-static volatile uint32_t g_vfork_dbg_postprep_cpu_call_base;
-static volatile uint32_t g_vfork_dbg_postprep_cpu_csp;
-static volatile uint32_t g_vfork_dbg_prep_entry_cpu_call_base;
-static volatile uint32_t g_vfork_dbg_prep_entry_cpu_csp;
-static volatile uint32_t g_vfork_dbg_prep_exit_cpu_call_base;
-static volatile uint32_t g_vfork_dbg_prep_exit_cpu_csp;
-static volatile uint32_t g_vfork_dbg_prep_exit_parent_ret_lo;
-static volatile uint32_t g_vfork_dbg_prep_exit_parent_ret_hi;
-static volatile uint32_t g_vfork_dbg_prep_exit_child_ret_lo;
-static volatile uint32_t g_vfork_dbg_prep_exit_child_ret_hi;
 static sched_stack_ctx_t g_vfork_discard_ctx[SCHED_MAX_CPUS];
 
 enum {
@@ -82,11 +37,7 @@ __attribute__((noinline)) static void sched_mem_copy_u8(uint32_t dst_addr, uint3
     volatile uint8_t *dst = (volatile uint8_t *)(uintptr_t)dst_addr;
     volatile const uint8_t *src = (volatile const uint8_t *)(uintptr_t)src_addr;
     for (uint32_t i = 0u; i < len; i++) {
-        uint8_t b = src[i];
-        if (g_vfork_dbg_stage == 0xFFFFFFFFu) {
-            b = (uint8_t)(b ^ 0u);
-        }
-        dst[i] = b;
+        dst[i] = src[i];
     }
 }
 
@@ -134,10 +85,6 @@ __attribute__((always_inline)) static inline uint32_t sched_cpu_ctx_read32(uint3
 
 __attribute__((always_inline)) static inline void sched_cpu_ctx_write32(uint32_t io_addr, uint32_t value) {
     __asm__ volatile("out %0, %1" :: "r"(value), "r"(io_addr));
-}
-
-__attribute__((always_inline)) static inline uint32_t sched_read32_relaxed(uint32_t addr) {
-    return *(volatile const uint32_t *)(uintptr_t)addr;
 }
 
 static void sched_reloc_words(uint32_t base,
@@ -741,9 +688,6 @@ static int sched_prepare_vfork_child_ctx(const sched_task_slot_t *parent,
                                          const sched_stack_ctx_t *parent_live_in,
                                          const sched_task_slot_t *child,
                                          sched_stack_ctx_t *child_live_out) {
-    uint32_t sp_reg_now;
-    uint32_t cpu_call_base_now;
-    uint32_t cpu_csp_now;
     uint32_t parent_slot_base;
     uint32_t parent_slot_top;
     uint32_t child_slot_base;
@@ -761,24 +705,9 @@ static int sched_prepare_vfork_child_ctx(const sched_task_slot_t *parent,
     sched_stack_ctx_t child_live;
 
     if (!parent || !parent_live_in || !child || !child_live_out) {
-        __asm__ volatile("mov %0, r30" : "=r"(sp_reg_now));
-        g_vfork_dbg_prep_exit_sp_reg = sp_reg_now;
-        g_vfork_dbg_prep_exit_cpu_call_base = sched_cpu_ctx_read32(IO_CPU_CTX_CALL_BASE);
-        g_vfork_dbg_prep_exit_cpu_csp = sched_cpu_ctx_read32(IO_CPU_CTX_CSP);
         return VFORK_PREP_ERR_BAD_ARG;
     }
-    __asm__ volatile("mov %0, r30" : "=r"(sp_reg_now));
-    g_vfork_dbg_prep_entry_sp_reg = sp_reg_now;
-    g_vfork_dbg_prep_entry_cpu_call_base = sched_cpu_ctx_read32(IO_CPU_CTX_CALL_BASE);
-    g_vfork_dbg_prep_entry_cpu_csp = sched_cpu_ctx_read32(IO_CPU_CTX_CSP);
-    g_vfork_dbg_stage = 1u;
-    g_vfork_dbg_parent_live_in_ptr = (uint32_t)(uintptr_t)parent_live_in;
-    g_vfork_dbg_child_live_out_ptr = (uint32_t)(uintptr_t)child_live_out;
     if (!parent->stack_ctx.valid || !child->stack_ctx.valid) {
-        __asm__ volatile("mov %0, r30" : "=r"(sp_reg_now));
-        g_vfork_dbg_prep_exit_sp_reg = sp_reg_now;
-        g_vfork_dbg_prep_exit_cpu_call_base = sched_cpu_ctx_read32(IO_CPU_CTX_CALL_BASE);
-        g_vfork_dbg_prep_exit_cpu_csp = sched_cpu_ctx_read32(IO_CPU_CTX_CSP);
         return VFORK_PREP_ERR_BAD_STACK_CTX;
     }
     parent_sp = parent_live_in->regs[30];
@@ -807,34 +736,17 @@ static int sched_prepare_vfork_child_ctx(const sched_task_slot_t *parent,
     } else if (has_sp_slot) {
         parent_slot_base = sp_slot_base;
     } else {
-        __asm__ volatile("mov %0, r30" : "=r"(sp_reg_now));
-        g_vfork_dbg_prep_exit_sp_reg = sp_reg_now;
-        g_vfork_dbg_prep_exit_cpu_call_base = sched_cpu_ctx_read32(IO_CPU_CTX_CALL_BASE);
-        g_vfork_dbg_prep_exit_cpu_csp = sched_cpu_ctx_read32(IO_CPU_CTX_CSP);
         return VFORK_PREP_ERR_PARENT_SLOT;
     }
     parent_slot_top = parent_slot_base + VM_STACK_SLOT_BYTES;
     child_slot_base = child->stack_ctx.call_base;
     delta_slot = (int32_t)(child_slot_base - parent_slot_base);
-    g_vfork_dbg_stage = 2u;
-    g_vfork_dbg_parent_slot_base = parent_slot_base;
-    g_vfork_dbg_child_slot_base = child_slot_base;
-    g_vfork_dbg_parent_sp = parent_sp;
 
     if (child_slot_base == parent_slot_base) {
-        __asm__ volatile("mov %0, r30" : "=r"(sp_reg_now));
-        g_vfork_dbg_prep_exit_sp_reg = sp_reg_now;
-        g_vfork_dbg_prep_exit_cpu_call_base = sched_cpu_ctx_read32(IO_CPU_CTX_CALL_BASE);
-        g_vfork_dbg_prep_exit_cpu_csp = sched_cpu_ctx_read32(IO_CPU_CTX_CSP);
         return VFORK_PREP_ERR_CHILD_ALIAS;
     }
-    g_vfork_dbg_stage = 3u;
 
     if ((parent_sp & 0x3u) != 0u) {
-        __asm__ volatile("mov %0, r30" : "=r"(sp_reg_now));
-        g_vfork_dbg_prep_exit_sp_reg = sp_reg_now;
-        g_vfork_dbg_prep_exit_cpu_call_base = sched_cpu_ctx_read32(IO_CPU_CTX_CALL_BASE);
-        g_vfork_dbg_prep_exit_cpu_csp = sched_cpu_ctx_read32(IO_CPU_CTX_CSP);
         return VFORK_PREP_ERR_PARENT_SP_ALIGN;
     }
     if (sched_irq_live_top_for_sp(parent_sp, &live_top) == 0) {
@@ -842,21 +754,11 @@ static int sched_prepare_vfork_child_ctx(const sched_task_slot_t *parent,
     } else if (parent_sp >= parent_slot_base && parent_sp <= parent_slot_top) {
         live_top = parent_slot_top;
     } else {
-        __asm__ volatile("mov %0, r30" : "=r"(sp_reg_now));
-        g_vfork_dbg_prep_exit_sp_reg = sp_reg_now;
-        g_vfork_dbg_prep_exit_cpu_call_base = sched_cpu_ctx_read32(IO_CPU_CTX_CALL_BASE);
-        g_vfork_dbg_prep_exit_cpu_csp = sched_cpu_ctx_read32(IO_CPU_CTX_CSP);
         return VFORK_PREP_ERR_LIVE_RANGE;
     }
-    g_vfork_dbg_stage = 4u;
-    g_vfork_dbg_live_top = live_top;
 
     live_active_bytes = live_top - parent_sp;
     if (live_active_bytes == 0u || live_active_bytes > VM_TASK_C_STACK_BYTES) {
-        __asm__ volatile("mov %0, r30" : "=r"(sp_reg_now));
-        g_vfork_dbg_prep_exit_sp_reg = sp_reg_now;
-        g_vfork_dbg_prep_exit_cpu_call_base = sched_cpu_ctx_read32(IO_CPU_CTX_CALL_BASE);
-        g_vfork_dbg_prep_exit_cpu_csp = sched_cpu_ctx_read32(IO_CPU_CTX_CSP);
         return VFORK_PREP_ERR_LIVE_BYTES;
     }
 
@@ -905,387 +807,11 @@ static int sched_prepare_vfork_child_ctx(const sched_task_slot_t *parent,
                       delta_live);
 
     sched_stack_ctx_copy(child_live_out, &child_live);
-    __asm__ volatile("mov %0, r30" : "=r"(sp_reg_now));
-    g_vfork_dbg_prep_exit_sp_reg = sp_reg_now;
-    cpu_call_base_now = sched_cpu_ctx_read32(IO_CPU_CTX_CALL_BASE);
-    cpu_csp_now = sched_cpu_ctx_read32(IO_CPU_CTX_CSP);
-    g_vfork_dbg_prep_exit_cpu_call_base = cpu_call_base_now;
-    g_vfork_dbg_prep_exit_cpu_csp = cpu_csp_now;
-    g_vfork_dbg_prep_exit_parent_ret_lo =
-        sched_read32_relaxed(cpu_call_base_now + cpu_csp_now * 8u);
-    g_vfork_dbg_prep_exit_parent_ret_hi =
-        sched_read32_relaxed(cpu_call_base_now + cpu_csp_now * 8u + 4u);
-    g_vfork_dbg_prep_exit_child_ret_lo =
-        sched_read32_relaxed(child_slot_base + cpu_csp_now * 8u);
-    g_vfork_dbg_prep_exit_child_ret_hi =
-        sched_read32_relaxed(child_slot_base + cpu_csp_now * 8u + 4u);
     return 0;
 }
 
 int sched_vfork(void) {
     return sched_vfork_trampoline();
-    sched_stack_ctx_t parent_live;
-    sched_task_slot_t *self;
-    sched_task_slot_t *child;
-    sched_stack_ctx_t child_live;
-    uint32_t live_slot;
-    uint32_t call_slot;
-    uint32_t self_slot;
-    uint32_t old_slot;
-    uint32_t parent_call_base;
-    int slot_idx;
-    int child_tid;
-
-    self = sched_current_slot();
-    if (!self || self->is_idle) {
-        KLOGE("vfork", "entry: current slot invalid");
-        return -1;
-    }
-    g_vfork_dbg_stage = 0u;
-    g_vfork_dbg_parent_slot_base = 0u;
-    g_vfork_dbg_child_slot_base = 0u;
-    g_vfork_dbg_parent_sp = 0u;
-    g_vfork_dbg_live_top = 0u;
-    g_vfork_dbg_child_ptr = 0u;
-    g_vfork_dbg_self_ptr = (uint32_t)(uintptr_t)self;
-    g_vfork_dbg_parent_live_in_ptr = 0u;
-    g_vfork_dbg_child_live_out_ptr = 0u;
-    g_vfork_dbg_caller_parent_live_ptr = 0u;
-    g_vfork_dbg_caller_child_live_ptr = 0u;
-    g_vfork_dbg_postprep_rc = 0u;
-    g_vfork_dbg_postprep_parent_sp = 0u;
-    g_vfork_dbg_postprep_parent_call_base = 0u;
-    g_vfork_dbg_postprep_call_local = 0u;
-    g_vfork_dbg_postprep_child_base = 0u;
-    g_vfork_dbg_postprep_live_slot = 0u;
-    g_vfork_dbg_postprep_call_slot = 0u;
-    g_vfork_dbg_postprep_self_slot = 0u;
-    g_vfork_dbg_postprep_fp_reg = 0u;
-    g_vfork_dbg_postprep_parent_sp_ptr = 0u;
-    g_vfork_dbg_postprep_parent_call_base_ptr = 0u;
-    g_vfork_dbg_postprep_child_sp_ptr = 0u;
-    g_vfork_dbg_postprep_child_call_base_ptr = 0u;
-    g_vfork_dbg_preprep_parent_sp = 0u;
-    g_vfork_dbg_preprep_parent_call_base = 0u;
-    g_vfork_dbg_preprep_call_local = 0u;
-    g_vfork_dbg_preprep_child_base = 0u;
-    g_vfork_dbg_preprep_fp_reg = 0u;
-    g_vfork_dbg_preprep_sp_reg = 0u;
-    g_vfork_dbg_postprep_sp_reg = 0u;
-    g_vfork_dbg_prep_entry_sp_reg = 0u;
-    g_vfork_dbg_prep_exit_sp_reg = 0u;
-    g_vfork_dbg_preprep_cpu_call_base = 0u;
-    g_vfork_dbg_preprep_cpu_csp = 0u;
-    g_vfork_dbg_postprep_cpu_call_base = 0u;
-    g_vfork_dbg_postprep_cpu_csp = 0u;
-    g_vfork_dbg_prep_entry_cpu_call_base = 0u;
-    g_vfork_dbg_prep_entry_cpu_csp = 0u;
-    g_vfork_dbg_prep_exit_cpu_call_base = 0u;
-    g_vfork_dbg_prep_exit_cpu_csp = 0u;
-    g_vfork_dbg_prep_exit_parent_ret_lo = 0u;
-    g_vfork_dbg_prep_exit_parent_ret_hi = 0u;
-    g_vfork_dbg_prep_exit_child_ret_lo = 0u;
-    g_vfork_dbg_prep_exit_child_ret_hi = 0u;
-
-    sched_ctx_capture(&parent_live);
-    self = sched_current_slot();
-    if (self && self->vfork_child_start) {
-        self->vfork_child_start = 0u;
-        return 0;
-    }
-
-    spinlock_lock(&g_sched_lock);
-    self = sched_current_slot();
-    if (!self || self->is_idle || !self->used || !self->stack_ctx.valid) {
-        spinlock_unlock(&g_sched_lock);
-        KLOGE("vfork", "entry: slot state invalid under lock");
-        return -1;
-    }
-
-    live_slot = VM_STACK_POOL_SLOTS;
-    {
-        uint32_t base = VM_STACK_POOL_BASE;
-        uint32_t sp = parent_live.regs[30];
-        for (uint32_t i = 0u; i < VM_STACK_POOL_SLOTS; i++) {
-            if (sp >= base && sp < (base + VM_STACK_SLOT_BYTES)) {
-                live_slot = i;
-                break;
-            }
-            base += VM_STACK_SLOT_BYTES;
-        }
-    }
-    if (live_slot >= VM_STACK_POOL_SLOTS) {
-        uint32_t base = VM_STACK_POOL_BASE;
-        for (uint32_t i = 0u; i < VM_STACK_POOL_SLOTS; i++) {
-            if (parent_live.call_base == base) {
-                live_slot = i;
-                break;
-            }
-            base += VM_STACK_SLOT_BYTES;
-        }
-    }
-    if (live_slot >= VM_STACK_POOL_SLOTS) {
-        spinlock_unlock(&g_sched_lock);
-        KLOGE("vfork", "entry: failed to sync live ctx");
-        return -1;
-    }
-    old_slot = self->stack_ctx.pool_slot;
-    parent_call_base = parent_live.call_base;
-    g_vfork_dbg_caller_parent_live_ptr = (uint32_t)(uintptr_t)&parent_live;
-    g_vfork_dbg_caller_child_live_ptr = (uint32_t)(uintptr_t)&child_live;
-    if (sched_vfork_sync_parent_locked(self, &parent_live, &live_slot, &call_slot) != 0) {
-        spinlock_unlock(&g_sched_lock);
-        KLOGE("vfork", "entry: failed to sync live ctx");
-        return -1;
-    }
-    self_slot = self->stack_ctx.pool_slot;
-    (void)old_slot;
-
-    slot_idx = sched_alloc_slot();
-    if (slot_idx < 0) {
-        spinlock_unlock(&g_sched_lock);
-        KLOGE("vfork", "entry: no free task slot");
-        return -1;
-    }
-
-    child = &g_tasks[(uint32_t)slot_idx];
-    g_vfork_dbg_child_ptr = (uint32_t)(uintptr_t)child;
-    child->used = 0u;
-    child->is_idle = 0u;
-    child->entry = self->entry;
-    child->name = self->name;
-    child->vfork_child_start = 0u;
-    child->vfork_child_active = 0u;
-    child->waitq = 0;
-    sched_waitq_init_locked(&child->child_waitq);
-    child->quantum_used = 0u;
-    child->run_cpu = self->run_cpu;
-    child->exit_code = 0u;
-    child->parent_tid = (int32_t)self->pub.tid;
-    child->pub.tid = g_next_tid++;
-    child->pub.pid = child->pub.tid;
-    child->pub.ppid = (int32_t)self->pub.pid;
-    child->pub.state = SCHED_TASK_BLOCKED;
-    child->pub.kind = self->pub.kind;
-    child->pub.exec_state = self->pub.exec_state;
-    child->pub.wake_tick = 0u;
-    child->pub.run_ticks = self->pub.run_ticks;
-    child->pub.arg = self->pub.arg;
-    if (g_next_tid == 0u) {
-        g_next_tid = 1u;
-    }
-    if (sched_vfork_alloc_child_stack_locked(child, parent_live.regs[30], parent_call_base) != 0) {
-        sched_clear_task(child);
-        spinlock_unlock(&g_sched_lock);
-        KLOGE("vfork", "entry: stack alloc failed");
-        return -1;
-    }
-    if (child->stack_ctx.call_base == parent_call_base) {
-        klog_begin(KLOG_LEVEL_ERROR, "vfork");
-        klog_puts("entry: child stack alias parent call_base=");
-        klog_hex32(parent_call_base);
-        klog_puts(" child_base=");
-        klog_hex32(child->stack_ctx.call_base);
-        klog_puts(" live_slot=");
-        klog_hex32(live_slot);
-        klog_puts(" call_slot=");
-        klog_hex32(call_slot);
-        klog_end();
-        sched_stack_free_locked(child);
-        sched_clear_task(child);
-        spinlock_unlock(&g_sched_lock);
-        return -1;
-    }
-    spinlock_init(&child->fd_lock);
-    if (sched_fd_table_clone(child, self) != SCHED_FD_OK) {
-        sched_stack_free_locked(child);
-        sched_clear_task(child);
-        spinlock_unlock(&g_sched_lock);
-        KLOGE("vfork", "entry: fd table clone failed");
-        return -1;
-    }
-    {
-        int prep_rc;
-        uint32_t fp_reg_now;
-        uint32_t sp_reg_now;
-        const sched_stack_ctx_t *parent_live_ptr;
-        const sched_stack_ctx_t *child_live_ptr;
-        g_vfork_dbg_preprep_parent_sp = parent_live.regs[30];
-        g_vfork_dbg_preprep_parent_call_base = parent_live.call_base;
-        g_vfork_dbg_preprep_call_local = parent_call_base;
-        g_vfork_dbg_preprep_child_base = child->stack_ctx.call_base;
-        __asm__ volatile("mov %0, r31" : "=r"(fp_reg_now));
-        g_vfork_dbg_preprep_fp_reg = fp_reg_now;
-        __asm__ volatile("mov %0, r30" : "=r"(sp_reg_now));
-        g_vfork_dbg_preprep_sp_reg = sp_reg_now;
-        g_vfork_dbg_preprep_cpu_call_base = sched_cpu_ctx_read32(IO_CPU_CTX_CALL_BASE);
-        g_vfork_dbg_preprep_cpu_csp = sched_cpu_ctx_read32(IO_CPU_CTX_CSP);
-        prep_rc = sched_prepare_vfork_child_ctx(self, &parent_live, child, &child_live);
-        if (prep_rc == VFORK_PREP_ERR_CHILD_ALIAS) {
-            uint32_t alias_slot = child->stack_ctx.pool_slot;
-            uint32_t forbid_a = live_slot;
-            uint32_t forbid_b = alias_slot;
-            if (forbid_b == forbid_a) {
-                forbid_b = call_slot;
-            }
-            sched_stack_free_locked(child);
-            child->stack_ctx.valid = 0u;
-            if (sched_stack_alloc_vfork_child_locked(&child->stack_ctx, forbid_a, forbid_b) == 0) {
-                prep_rc = sched_prepare_vfork_child_ctx(self, &parent_live, child, &child_live);
-            }
-        }
-        g_vfork_dbg_postprep_rc = (uint32_t)prep_rc;
-        g_vfork_dbg_postprep_parent_sp = parent_live.regs[30];
-        g_vfork_dbg_postprep_parent_call_base = parent_live.call_base;
-        g_vfork_dbg_postprep_call_local = parent_call_base;
-        g_vfork_dbg_postprep_child_base = child->stack_ctx.call_base;
-        g_vfork_dbg_postprep_live_slot = live_slot;
-        g_vfork_dbg_postprep_call_slot = call_slot;
-        g_vfork_dbg_postprep_self_slot = self->stack_ctx.pool_slot;
-        __asm__ volatile("mov %0, r31" : "=r"(fp_reg_now));
-        g_vfork_dbg_postprep_fp_reg = fp_reg_now;
-        __asm__ volatile("mov %0, r30" : "=r"(sp_reg_now));
-        g_vfork_dbg_postprep_sp_reg = sp_reg_now;
-        g_vfork_dbg_postprep_cpu_call_base = sched_cpu_ctx_read32(IO_CPU_CTX_CALL_BASE);
-        g_vfork_dbg_postprep_cpu_csp = sched_cpu_ctx_read32(IO_CPU_CTX_CSP);
-        parent_live_ptr = (const sched_stack_ctx_t *)(uintptr_t)g_vfork_dbg_caller_parent_live_ptr;
-        child_live_ptr = (const sched_stack_ctx_t *)(uintptr_t)g_vfork_dbg_caller_child_live_ptr;
-        if (parent_live_ptr) {
-            g_vfork_dbg_postprep_parent_sp_ptr = parent_live_ptr->regs[30];
-            g_vfork_dbg_postprep_parent_call_base_ptr = parent_live_ptr->call_base;
-        }
-        if (child_live_ptr) {
-            g_vfork_dbg_postprep_child_sp_ptr = child_live_ptr->regs[30];
-            g_vfork_dbg_postprep_child_call_base_ptr = child_live_ptr->call_base;
-        }
-        if (prep_rc != 0) {
-            klog_begin(KLOG_LEVEL_ERROR, "vfork");
-            klog_puts("entry: child ctx prepare failed rev=0x0000001C rc=");
-            klog_hex32(g_vfork_dbg_postprep_rc);
-            klog_puts(" sp=");
-            klog_hex32(g_vfork_dbg_postprep_parent_sp);
-            klog_puts(" call_base=");
-            klog_hex32(g_vfork_dbg_postprep_parent_call_base);
-            klog_puts(" call_local=");
-            klog_hex32(g_vfork_dbg_postprep_call_local);
-            klog_puts(" child_base=");
-            klog_hex32(g_vfork_dbg_postprep_child_base);
-            klog_puts(" child_slot=");
-            klog_hex32(child->stack_ctx.pool_slot);
-            klog_puts(" live_slot=");
-            klog_hex32(g_vfork_dbg_postprep_live_slot);
-            klog_puts(" call_slot=");
-            klog_hex32(g_vfork_dbg_postprep_call_slot);
-            klog_puts(" self_slot=");
-            klog_hex32(g_vfork_dbg_postprep_self_slot);
-            klog_puts(" cpu=");
-            klog_hex32(sched_cpu_id());
-            klog_puts(" prep_stage=");
-            klog_hex32(g_vfork_dbg_stage);
-            klog_puts(" prep_parent_base=");
-            klog_hex32(g_vfork_dbg_parent_slot_base);
-            klog_puts(" prep_child_base=");
-            klog_hex32(g_vfork_dbg_child_slot_base);
-            klog_puts(" prep_parent_sp=");
-            klog_hex32(g_vfork_dbg_parent_sp);
-            klog_puts(" prep_live_top=");
-            klog_hex32(g_vfork_dbg_live_top);
-            klog_puts(" dbg_self=");
-            klog_hex32(g_vfork_dbg_self_ptr);
-            klog_puts(" dbg_child=");
-            klog_hex32(g_vfork_dbg_child_ptr);
-            klog_puts(" caller_parent_live=");
-            klog_hex32(g_vfork_dbg_caller_parent_live_ptr);
-            klog_puts(" caller_child_live=");
-            klog_hex32(g_vfork_dbg_caller_child_live_ptr);
-            klog_puts(" callee_parent_live_in=");
-            klog_hex32(g_vfork_dbg_parent_live_in_ptr);
-            klog_puts(" callee_child_live_out=");
-            klog_hex32(g_vfork_dbg_child_live_out_ptr);
-            klog_puts(" preprep_sp=");
-            klog_hex32(g_vfork_dbg_preprep_parent_sp);
-            klog_puts(" preprep_call_base=");
-            klog_hex32(g_vfork_dbg_preprep_parent_call_base);
-            klog_puts(" preprep_call_local=");
-            klog_hex32(g_vfork_dbg_preprep_call_local);
-            klog_puts(" preprep_child_base=");
-            klog_hex32(g_vfork_dbg_preprep_child_base);
-            klog_puts(" preprep_fp=");
-            klog_hex32(g_vfork_dbg_preprep_fp_reg);
-            klog_puts(" preprep_spreg=");
-            klog_hex32(g_vfork_dbg_preprep_sp_reg);
-            klog_puts(" prep_entry_spreg=");
-            klog_hex32(g_vfork_dbg_prep_entry_sp_reg);
-            klog_puts(" prep_exit_spreg=");
-            klog_hex32(g_vfork_dbg_prep_exit_sp_reg);
-            klog_puts(" prep_entry_cpu_call_base=");
-            klog_hex32(g_vfork_dbg_prep_entry_cpu_call_base);
-            klog_puts(" prep_entry_cpu_csp=");
-            klog_hex32(g_vfork_dbg_prep_entry_cpu_csp);
-            klog_puts(" prep_exit_cpu_call_base=");
-            klog_hex32(g_vfork_dbg_prep_exit_cpu_call_base);
-            klog_puts(" prep_exit_cpu_csp=");
-            klog_hex32(g_vfork_dbg_prep_exit_cpu_csp);
-            klog_puts(" prep_exit_parent_ret_lo=");
-            klog_hex32(g_vfork_dbg_prep_exit_parent_ret_lo);
-            klog_puts(" prep_exit_parent_ret_hi=");
-            klog_hex32(g_vfork_dbg_prep_exit_parent_ret_hi);
-            klog_puts(" prep_exit_child_ret_lo=");
-            klog_hex32(g_vfork_dbg_prep_exit_child_ret_lo);
-            klog_puts(" prep_exit_child_ret_hi=");
-            klog_hex32(g_vfork_dbg_prep_exit_child_ret_hi);
-            klog_puts(" preprep_cpu_call_base=");
-            klog_hex32(g_vfork_dbg_preprep_cpu_call_base);
-            klog_puts(" preprep_cpu_csp=");
-            klog_hex32(g_vfork_dbg_preprep_cpu_csp);
-            klog_puts(" postprep_fp=");
-            klog_hex32(g_vfork_dbg_postprep_fp_reg);
-            klog_puts(" postprep_spreg=");
-            klog_hex32(g_vfork_dbg_postprep_sp_reg);
-            klog_puts(" postprep_cpu_call_base=");
-            klog_hex32(g_vfork_dbg_postprep_cpu_call_base);
-            klog_puts(" postprep_cpu_csp=");
-            klog_hex32(g_vfork_dbg_postprep_cpu_csp);
-            klog_puts(" postprep_parent_sp_ptr=");
-            klog_hex32(g_vfork_dbg_postprep_parent_sp_ptr);
-            klog_puts(" postprep_parent_call_base_ptr=");
-            klog_hex32(g_vfork_dbg_postprep_parent_call_base_ptr);
-            klog_puts(" postprep_child_sp_ptr=");
-            klog_hex32(g_vfork_dbg_postprep_child_sp_ptr);
-            klog_puts(" postprep_child_call_base_ptr=");
-            klog_hex32(g_vfork_dbg_postprep_child_call_base_ptr);
-            klog_end();
-            sched_stack_free_locked(child);
-            sched_clear_task(child);
-            spinlock_unlock(&g_sched_lock);
-            return -1;
-        }
-    }
-    child = &g_tasks[(uint32_t)slot_idx];
-    child->stack_ctx.call_base = child_live.call_base;
-    child->stack_ctx.data_base = child_live.data_base;
-    child->stack_ctx.isr_base = child_live.isr_base;
-    child->stack_ctx.csp = child_live.csp;
-    child->stack_ctx.dsp = child_live.dsp;
-    child->stack_ctx.isp = child_live.isp;
-    child->stack_ctx.irq_masked = child_live.irq_masked;
-    child->stack_ctx.pool_slot = child_live.pool_slot;
-    child->stack_ctx.valid = child_live.valid;
-    for (uint32_t i = 0u; i < 32u; i++) {
-        child->stack_ctx.regs[i] = child_live.regs[i];
-    }
-
-    child->vfork_child_start = 1u;
-    child->vfork_child_active = 1u;
-    child->pub.state = SCHED_TASK_RUNNABLE;
-    child->used = 1u;
-    sched_runq_add(child->run_cpu, (uint32_t)slot_idx);
-    sched_waitq_sleep_locked(&self->child_waitq, 0u);
-    sched_mark_resched_all();
-    child_tid = (int)child->pub.tid;
-    spinlock_unlock(&g_sched_lock);
-    sched_switch_current_to_scheduler();
-    return child_tid;
 }
 
 int sched_spawn(const char *name, sched_task_entry_t entry, void *arg) {

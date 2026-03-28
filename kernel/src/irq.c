@@ -24,6 +24,47 @@ volatile uint32_t g_irq_saved_user_dsp[32];
 static volatile trap_frame_t g_last_trap_frame;
 static volatile uint32_t g_irq_counts[KERNEL_IVT_SIZE];
 static volatile uint32_t g_fault_div0;
+static volatile uint32_t g_ps2_kbd_shift_l;
+static volatile uint32_t g_ps2_kbd_shift_r;
+static volatile uint32_t g_ps2_kbd_ctrl_l;
+static volatile uint32_t g_ps2_kbd_ctrl_r;
+static volatile uint32_t g_ps2_kbd_caps_lock;
+static volatile uint32_t g_ps2_kbd_ext;
+
+static const uint8_t g_ps2_kbd_ascii_plain[128] = {
+    [0x01] = 0x1Bu,
+    [0x02] = '1', [0x03] = '2', [0x04] = '3', [0x05] = '4',
+    [0x06] = '5', [0x07] = '6', [0x08] = '7', [0x09] = '8',
+    [0x0A] = '9', [0x0B] = '0', [0x0C] = '-', [0x0D] = '=',
+    [0x0E] = 0x08u, [0x0F] = '\t',
+    [0x10] = 'q', [0x11] = 'w', [0x12] = 'e', [0x13] = 'r',
+    [0x14] = 't', [0x15] = 'y', [0x16] = 'u', [0x17] = 'i',
+    [0x18] = 'o', [0x19] = 'p', [0x1A] = '[', [0x1B] = ']',
+    [0x1C] = '\n',
+    [0x1E] = 'a', [0x1F] = 's', [0x20] = 'd', [0x21] = 'f',
+    [0x22] = 'g', [0x23] = 'h', [0x24] = 'j', [0x25] = 'k',
+    [0x26] = 'l', [0x27] = ';', [0x28] = '\'', [0x29] = '`',
+    [0x2B] = '\\',
+    [0x2C] = 'z', [0x2D] = 'x', [0x2E] = 'c', [0x2F] = 'v',
+    [0x30] = 'b', [0x31] = 'n', [0x32] = 'm', [0x33] = ',',
+    [0x34] = '.', [0x35] = '/', [0x39] = ' '
+};
+
+static const uint8_t g_ps2_kbd_ascii_shift[128] = {
+    [0x02] = '!', [0x03] = '@', [0x04] = '#', [0x05] = '$',
+    [0x06] = '%', [0x07] = '^', [0x08] = '&', [0x09] = '*',
+    [0x0A] = '(', [0x0B] = ')', [0x0C] = '_', [0x0D] = '+',
+    [0x10] = 'Q', [0x11] = 'W', [0x12] = 'E', [0x13] = 'R',
+    [0x14] = 'T', [0x15] = 'Y', [0x16] = 'U', [0x17] = 'I',
+    [0x18] = 'O', [0x19] = 'P', [0x1A] = '{', [0x1B] = '}',
+    [0x1E] = 'A', [0x1F] = 'S', [0x20] = 'D', [0x21] = 'F',
+    [0x22] = 'G', [0x23] = 'H', [0x24] = 'J', [0x25] = 'K',
+    [0x26] = 'L', [0x27] = ':', [0x28] = '"', [0x29] = '~',
+    [0x2B] = '|',
+    [0x2C] = 'Z', [0x2D] = 'X', [0x2E] = 'C', [0x2F] = 'V',
+    [0x30] = 'B', [0x31] = 'N', [0x32] = 'M', [0x33] = '<',
+    [0x34] = '>', [0x35] = '?', [0x39] = ' '
+};
 
 static inline uint32_t io_in32(uint32_t addr) {
     uint32_t v;
@@ -48,6 +89,88 @@ static void serial_drain_rx(void) {
     while ((io_in32(IO_SERIAL_STATUS) & SERIAL_STATUS_RX_READY) != 0u) {
         uint32_t v = io_in32(IO_SERIAL_RX);
         console_rx_feed((uint8_t)(v & 0xFFu));
+    }
+}
+
+static void ps2_keyboard_handle_scancode(uint8_t scancode) {
+    uint32_t release;
+    uint8_t scan;
+    uint32_t shift;
+    uint32_t ctrl;
+    uint8_t out = 0u;
+
+    if (scancode == 0xE0u) {
+        g_ps2_kbd_ext = 1u;
+        return;
+    }
+
+    release = (scancode & 0x80u) ? 1u : 0u;
+    scan = (uint8_t)(scancode & 0x7Fu);
+
+    if (g_ps2_kbd_ext != 0u) {
+        g_ps2_kbd_ext = 0u;
+        if (scan == 0x1Du) {
+            g_ps2_kbd_ctrl_r = release ? 0u : 1u;
+        }
+        return;
+    }
+
+    if (scan == 0x2Au) {
+        g_ps2_kbd_shift_l = release ? 0u : 1u;
+        return;
+    }
+    if (scan == 0x36u) {
+        g_ps2_kbd_shift_r = release ? 0u : 1u;
+        return;
+    }
+    if (scan == 0x1Du) {
+        g_ps2_kbd_ctrl_l = release ? 0u : 1u;
+        return;
+    }
+    if (scan == 0x3Au) {
+        if (!release) {
+            g_ps2_kbd_caps_lock ^= 1u;
+        }
+        return;
+    }
+    if (release) {
+        return;
+    }
+
+    shift = (g_ps2_kbd_shift_l | g_ps2_kbd_shift_r) ? 1u : 0u;
+    ctrl = (g_ps2_kbd_ctrl_l | g_ps2_kbd_ctrl_r) ? 1u : 0u;
+
+    if (ctrl != 0u) {
+        const uint8_t base = g_ps2_kbd_ascii_plain[scan];
+        if (base >= 'a' && base <= 'z') {
+            out = (uint8_t)(base - 'a' + 1u);
+        } else if (base >= 'A' && base <= 'Z') {
+            out = (uint8_t)(base - 'A' + 1u);
+        }
+    } else {
+        out = shift ? g_ps2_kbd_ascii_shift[scan] : g_ps2_kbd_ascii_plain[scan];
+        if (g_ps2_kbd_caps_lock != 0u && out >= 'a' && out <= 'z') {
+            out = (uint8_t)(out - 'a' + 'A');
+        } else if (g_ps2_kbd_caps_lock != 0u && out >= 'A' && out <= 'Z' && shift != 0u) {
+            out = (uint8_t)(out - 'A' + 'a');
+        }
+    }
+
+    if (out != 0u) {
+        console_rx_feed(out);
+    }
+}
+
+static void ps2_keyboard_drain_rx(void) {
+    while ((io_in32(IO_PS2_KBD_STATUS) & PS2_STATUS_RX_READY) != 0u) {
+        const uint32_t v = io_in32(IO_PS2_KBD_DATA);
+        ps2_keyboard_handle_scancode((uint8_t)(v & 0xFFu));
+    }
+}
+
+static void ps2_mouse_drain_rx(void) {
+    while ((io_in32(IO_PS2_MOUSE_STATUS) & PS2_STATUS_RX_READY) != 0u) {
+        (void)io_in32(IO_PS2_MOUSE_DATA);
     }
 }
 
@@ -128,7 +251,14 @@ void irq_keyboard(uint32_t irq_no) {
     if (irq_no < KERNEL_IVT_SIZE) {
         g_irq_counts[irq_no]++;
     }
-    serial_drain_rx();
+    ps2_keyboard_drain_rx();
+}
+
+void irq_mouse(uint32_t irq_no) {
+    if (irq_no < KERNEL_IVT_SIZE) {
+        g_irq_counts[irq_no]++;
+    }
+    ps2_mouse_drain_rx();
 }
 
 void irq_timer(uint32_t irq_no) {

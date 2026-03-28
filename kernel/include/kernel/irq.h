@@ -15,6 +15,7 @@ void irq_divide_by_zero(uint32_t irq_no);
 void irq_disk_complete(uint32_t irq_no);
 void irq_serial(uint32_t irq_no);
 void irq_keyboard(uint32_t irq_no);
+void irq_mouse(uint32_t irq_no);
 void irq_timer(uint32_t irq_no);
 void irq_syscall(uint32_t irq_no);
 

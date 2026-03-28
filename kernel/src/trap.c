@@ -161,6 +161,7 @@ void trap_init(void) {
     trap_register(IRQ_DISK_COMPLETE, irq_disk_complete);
     trap_register(IRQ_SERIAL, irq_serial);
     trap_register(IRQ_KEYBOARD, irq_keyboard);
+    trap_register(IRQ_MOUSE, irq_mouse);
     trap_register(IRQ_TIMER, irq_timer);
     trap_register(IRQ_SYSCALL, irq_syscall);
 
@@ -169,12 +170,14 @@ void trap_init(void) {
     irq_set_priority(IRQ_TIMER, 0xC0u);
     irq_set_priority(IRQ_SERIAL, 0xB0u);
     irq_set_priority(IRQ_KEYBOARD, 0xB0u);
+    irq_set_priority(IRQ_MOUSE, 0xB0u);
     irq_set_priority(IRQ_DISK_COMPLETE, 0xA0u);
 
     irq_enable(IRQ_DIVIDE_BY_ZERO);
     irq_enable(IRQ_DISK_COMPLETE);
     irq_enable(IRQ_SERIAL);
     irq_enable(IRQ_KEYBOARD);
+    irq_enable(IRQ_MOUSE);
     irq_enable(IRQ_TIMER);
     irq_enable(IRQ_SYSCALL);
 

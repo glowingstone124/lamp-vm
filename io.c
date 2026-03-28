@@ -37,6 +37,68 @@ int vm_serial_rx_enqueue(VM *vm, uint8_t c) {
     return 1;
 }
 
+int vm_ps2_kbd_enqueue(VM *vm, uint8_t c) {
+    if (!vm) {
+        return 0;
+    }
+
+    vm_shared_lock(vm);
+
+    {
+        const uint16_t head = vm->ps2_kbd_head;
+        const uint16_t tail = vm->ps2_kbd_tail;
+        const uint16_t next = (uint16_t)((head + 1u) & SERIAL_RX_FIFO_MASK);
+        if (next == tail) {
+            vm_shared_unlock(vm);
+            return 0;
+        }
+
+        const int was_empty = (head == tail);
+        vm->ps2_kbd_fifo[head] = c;
+        vm->ps2_kbd_head = next;
+
+        if (was_empty) {
+            vm->io[PS2_KBD_DATA] = (int)vm->ps2_kbd_fifo[tail];
+            vm->io[PS2_KBD_STATUS] |= PS2_STATUS_RX_READY;
+            trigger_interrupt(vm, INT_KEYBOARD);
+        }
+    }
+
+    vm_shared_unlock(vm);
+    return 1;
+}
+
+int vm_ps2_mouse_enqueue(VM *vm, uint8_t c) {
+    if (!vm) {
+        return 0;
+    }
+
+    vm_shared_lock(vm);
+
+    {
+        const uint16_t head = vm->ps2_mouse_head;
+        const uint16_t tail = vm->ps2_mouse_tail;
+        const uint16_t next = (uint16_t)((head + 1u) & SERIAL_RX_FIFO_MASK);
+        if (next == tail) {
+            vm_shared_unlock(vm);
+            return 0;
+        }
+
+        const int was_empty = (head == tail);
+        vm->ps2_mouse_fifo[head] = c;
+        vm->ps2_mouse_head = next;
+
+        if (was_empty) {
+            vm->io[PS2_MOUSE_DATA] = (int)vm->ps2_mouse_fifo[tail];
+            vm->io[PS2_MOUSE_STATUS] |= PS2_STATUS_RX_READY;
+            trigger_interrupt(vm, INT_MOUSE);
+        }
+    }
+
+    vm_shared_unlock(vm);
+    return 1;
+}
+
 void accept_io(VM *vm, const int addr, const int value) {
     if (addr < 0 || addr >= IO_SIZE)
         return;

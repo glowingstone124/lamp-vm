@@ -25,6 +25,10 @@
 #define IO_SERIAL_TX 0x01u
 #define IO_SERIAL_STATUS 0x02u
 #define IO_SERIAL_RX 0x03u
+#define IO_PS2_KBD_STATUS 0x04u
+#define IO_PS2_KBD_DATA 0x05u
+#define IO_PS2_MOUSE_STATUS 0x06u
+#define IO_PS2_MOUSE_DATA 0x07u
 #define IO_DISK_CMD 0x10u
 #define IO_DISK_LBA 0x11u
 #define IO_DISK_MEM 0x12u
@@ -40,6 +44,7 @@
 
 #define SERIAL_STATUS_RX_READY 0x01u
 #define SERIAL_CTRL_RX_INT_ENABLE 0x01u
+#define PS2_STATUS_RX_READY 0x01u
 #define DISK_STATUS_FREE 0x00u
 #define DISK_STATUS_BUSY 0x01u
 #define DISK_STATUS_ERROR 0x02u
@@ -67,6 +72,7 @@
 #define IRQ_DISK_COMPLETE 0x02u
 #define IRQ_SERIAL 0x03u
 #define IRQ_TIMER 0x04u
+#define IRQ_MOUSE 0x05u
 #define IRQ_SYSCALL 0x80u
 #define IRQ_USER_EXEC_ENTER 0x81u
 
