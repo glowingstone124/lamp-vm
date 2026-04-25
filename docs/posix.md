@@ -28,8 +28,8 @@ Not implemented yet:
 ## Syscall ABI
 
 - interrupt vector: `IRQ_SYSCALL = 0x80`
-- input registers at trap entry: `r0=nr`, `r1..r6=arg0..arg5`
-- return path: fixed syscall mailbox at `SYSCALL_ABI_ADDR (0x002FE000)`
+- input registers at trap entry: `r0=nr`, `r1..r6=arg0..arg5`, optional `r8=mailbox`
+- return path: caller-provided syscall mailbox, with fixed `SYSCALL_ABI_ADDR (0x002FE000)` fallback
 - mailbox carries: `ret`, `errno`, last syscall nr/args, current tick snapshot
 
 Note:

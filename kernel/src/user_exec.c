@@ -218,18 +218,6 @@ static inline uint32_t user_exec_vm_read32(uint32_t addr) {
     return *(volatile uint32_t *)(uintptr_t)addr;
 }
 
-static inline uint64_t user_exec_monotonic_ns(void) {
-    uint32_t hi_a;
-    uint32_t lo;
-    uint32_t hi_b;
-    do {
-        hi_a = user_exec_vm_read32(TIMER_MMIO_BASE + 0x10u);
-        lo = user_exec_vm_read32(TIMER_MMIO_BASE + 0x0Cu);
-        hi_b = user_exec_vm_read32(TIMER_MMIO_BASE + 0x10u);
-    } while (hi_a != hi_b);
-    return ((uint64_t)hi_a << 32) | (uint64_t)lo;
-}
-
 static uint32_t str_copy_trunc(char *dst, uint32_t cap, const char *src) {
     uint32_t i = 0u;
     if (!dst || cap == 0u) {
@@ -308,9 +296,6 @@ static void user_exec_ctx_reset(user_exec_ctx_t *ctx) {
 static int user_exec_read_file(const char *path, uint32_t *out_size) {
     int fd;
     int n;
-    uint64_t t_open_begin;
-    uint64_t t_open_end;
-    uint64_t t_read_end;
     uint32_t fs_backend = 0u;
     uint32_t file_id = 0u;
     uint32_t file_size = 0u;
@@ -336,7 +321,6 @@ static int user_exec_read_file(const char *path, uint32_t *out_size) {
     }
     spinlock_unlock(&g_user_exec_lock);
 
-    t_open_begin = user_exec_monotonic_ns();
     fd = fs_open(path, SYS_O_RDONLY);
     if (fd < 0) {
         return fd;
@@ -345,21 +329,6 @@ static int user_exec_read_file(const char *path, uint32_t *out_size) {
         (void)sched_fd_close(fd);
         return FS_ERR_INVAL;
     }
-    klog_begin(KLOG_LEVEL_INFO, "user_exec");
-    klog_puts("open done fd=");
-    klog_hex32((uint32_t)fd);
-    klog_puts(" size=");
-    klog_hex32(file_size);
-    klog_puts(" path=");
-    klog_puts(path);
-    klog_end();
-    t_open_end = user_exec_monotonic_ns();
-    klog_begin(KLOG_LEVEL_INFO, "user_exec");
-    klog_puts("open elapsed_ns=");
-    klog_hex32((uint32_t)(t_open_end - t_open_begin));
-    klog_puts(" path=");
-    klog_puts(path);
-    klog_end();
     if (file_size == 0u || file_size > USER_EXEC_ELF_MAX) {
         (void)sched_fd_close(fd);
         return FS_ERR_INVAL;
@@ -374,19 +343,6 @@ static int user_exec_read_file(const char *path, uint32_t *out_size) {
         done += (uint32_t)n;
     }
     (void)sched_fd_close(fd);
-    klog_begin(KLOG_LEVEL_INFO, "user_exec");
-    klog_puts("read done bytes=");
-    klog_hex32(done);
-    klog_puts(" path=");
-    klog_puts(path);
-    klog_end();
-    t_read_end = user_exec_monotonic_ns();
-    klog_begin(KLOG_LEVEL_INFO, "user_exec");
-    klog_puts("read elapsed_ns=");
-    klog_hex32((uint32_t)(t_read_end - t_open_end));
-    klog_puts(" path=");
-    klog_puts(path);
-    klog_end();
     spinlock_lock(&g_user_exec_lock);
     str_copy_trunc(&g_user_exec_cache_path[0], USER_EXEC_PATH_CAP, path);
     g_user_exec_cache_size = done;
@@ -628,20 +584,12 @@ static void user_exec_task_entry(sched_task_t *task, void *arg) {
     const char *envp[USER_EXEC_MAX_ENVP + 1u];
     uint32_t i;
     int rc;
-    uint64_t t_load_begin;
-    uint64_t t_load_end;
 
     if (!task || !ctx) {
         return;
     }
     sched_task_set_kind(SCHED_TASK_KIND_USER);
     sched_task_set_exec_state(SCHED_EXEC_STATE_USER);
-
-    klog_begin(KLOG_LEVEL_INFO, "user_exec");
-    klog_puts("load start path=");
-    klog_puts(&ctx->path[0]);
-    klog_end();
-    t_load_begin = user_exec_monotonic_ns();
 
     for (i = 0u; i < ctx->argc && i < USER_EXEC_MAX_ARGV; i++) {
         argv[i] = &ctx->argv[i][0];
@@ -666,22 +614,6 @@ static void user_exec_task_entry(sched_task_t *task, void *arg) {
         }
         return;
     }
-    t_load_end = user_exec_monotonic_ns();
-
-    klog_begin(KLOG_LEVEL_INFO, "user_exec");
-    klog_puts("load done entry=");
-    klog_hex32(img.entry);
-    klog_puts(" sp=");
-    klog_hex32(img.stack_ptr);
-    klog_puts(" path=");
-    klog_puts(&ctx->path[0]);
-    klog_end();
-    klog_begin(KLOG_LEVEL_INFO, "user_exec");
-    klog_puts("load elapsed_ns=");
-    klog_hex32((uint32_t)(t_load_end - t_load_begin));
-    klog_puts(" path=");
-    klog_puts(&ctx->path[0]);
-    klog_end();
 
     user_exec_release_ctx(ctx);
     user_exec_enter_via_irq(img.entry, img.stack_ptr);

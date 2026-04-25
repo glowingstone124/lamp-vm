@@ -23,7 +23,8 @@ enum {
     SYSCALL_ABI_OFF_ARG5 = 0x20u,
     SYSCALL_ABI_OFF_RET = 0x24u,
     SYSCALL_ABI_OFF_ERRNO = 0x28u,
-    SYSCALL_ABI_OFF_TICK = 0x2Cu
+    SYSCALL_ABI_OFF_TICK = 0x2Cu,
+    SYSCALL_ABI_SIZE = 0x30u
 };
 
 enum {
@@ -90,8 +91,33 @@ enum {
 static uint32_t g_realtime_offset_neg;
 static uint64_t g_realtime_offset_mag_ns;
 
+static inline uint32_t abi_addr_range_ok(uint32_t addr) {
+    if (addr == 0u || (addr & 0x3u) != 0u || addr >= KERNEL_MEM_SIZE) {
+        return 0u;
+    }
+    return (SYSCALL_ABI_SIZE <= (KERNEL_MEM_SIZE - addr)) ? 1u : 0u;
+}
+
+static inline uint32_t abi_addr_is_caller_mailbox(uint32_t addr) {
+    if (!abi_addr_range_ok(addr)) {
+        return 0u;
+    }
+    return (*(volatile uint32_t *)(uintptr_t)addr == SYSCALL_ABI_MAGIC) ? 1u : 0u;
+}
+
+static inline uint32_t abi_base_from_regs(const syscall_regs_t *regs) {
+    if (regs && abi_addr_is_caller_mailbox(regs->abi_addr)) {
+        return regs->abi_addr;
+    }
+    return SYSCALL_ABI_ADDR;
+}
+
+static inline void abi_write32_at(uint32_t base, uint32_t off, uint32_t v) {
+    *(volatile uint32_t *)(uintptr_t)(base + off) = v;
+}
+
 static inline void abi_write32(uint32_t off, uint32_t v) {
-    *(volatile uint32_t *)(uintptr_t)(SYSCALL_ABI_ADDR + off) = v;
+    abi_write32_at(SYSCALL_ABI_ADDR, off, v);
 }
 
 static inline uint32_t abi_ptr_range_ok(uint32_t addr, uint32_t len) {
@@ -474,18 +500,19 @@ static uint32_t timeout_ms_to_ticks(int32_t timeout_ms) {
 #define SYSCALL_PUBLISH_RESULT(regs_, ret_, err_)                                \
     do {                                                                         \
         const syscall_regs_t *const __regs = (regs_);                           \
-        abi_write32(SYSCALL_ABI_OFF_MAGIC, SYSCALL_ABI_MAGIC);                  \
-        abi_write32(SYSCALL_ABI_OFF_VERSION, SYSCALL_ABI_VERSION);              \
-        abi_write32(SYSCALL_ABI_OFF_LAST_NR, __regs ? __regs->nr : 0u);         \
-        abi_write32(SYSCALL_ABI_OFF_ARG0, __regs ? __regs->arg0 : 0u);          \
-        abi_write32(SYSCALL_ABI_OFF_ARG1, __regs ? __regs->arg1 : 0u);          \
-        abi_write32(SYSCALL_ABI_OFF_ARG2, __regs ? __regs->arg2 : 0u);          \
-        abi_write32(SYSCALL_ABI_OFF_ARG3, __regs ? __regs->arg3 : 0u);          \
-        abi_write32(SYSCALL_ABI_OFF_ARG4, __regs ? __regs->arg4 : 0u);          \
-        abi_write32(SYSCALL_ABI_OFF_ARG5, __regs ? __regs->arg5 : 0u);          \
-        abi_write32(SYSCALL_ABI_OFF_RET, (ret_));                               \
-        abi_write32(SYSCALL_ABI_OFF_ERRNO, (err_));                             \
-        abi_write32(SYSCALL_ABI_OFF_TICK, sched_ticks());                       \
+        const uint32_t __abi_base = abi_base_from_regs(__regs);                 \
+        abi_write32_at(__abi_base, SYSCALL_ABI_OFF_MAGIC, SYSCALL_ABI_MAGIC);   \
+        abi_write32_at(__abi_base, SYSCALL_ABI_OFF_VERSION, SYSCALL_ABI_VERSION); \
+        abi_write32_at(__abi_base, SYSCALL_ABI_OFF_LAST_NR, __regs ? __regs->nr : 0u); \
+        abi_write32_at(__abi_base, SYSCALL_ABI_OFF_ARG0, __regs ? __regs->arg0 : 0u); \
+        abi_write32_at(__abi_base, SYSCALL_ABI_OFF_ARG1, __regs ? __regs->arg1 : 0u); \
+        abi_write32_at(__abi_base, SYSCALL_ABI_OFF_ARG2, __regs ? __regs->arg2 : 0u); \
+        abi_write32_at(__abi_base, SYSCALL_ABI_OFF_ARG3, __regs ? __regs->arg3 : 0u); \
+        abi_write32_at(__abi_base, SYSCALL_ABI_OFF_ARG4, __regs ? __regs->arg4 : 0u); \
+        abi_write32_at(__abi_base, SYSCALL_ABI_OFF_ARG5, __regs ? __regs->arg5 : 0u); \
+        abi_write32_at(__abi_base, SYSCALL_ABI_OFF_RET, (ret_));                \
+        abi_write32_at(__abi_base, SYSCALL_ABI_OFF_ERRNO, (err_));              \
+        abi_write32_at(__abi_base, SYSCALL_ABI_OFF_TICK, sched_ticks());        \
     } while (0)
 
 void syscall_init(void) {
@@ -1044,7 +1071,7 @@ uint32_t syscall_dispatch(const syscall_regs_t *regs) {
             break;
         }
         case SYS_VFORK: {
-            int rc = sched_vfork();
+            int rc = sched_vfork(regs->abi_addr);
             if (rc < 0) {
                 err = ERRNO_EAGAIN;
                 ret = (uint32_t)-1;

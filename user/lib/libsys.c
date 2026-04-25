@@ -2,12 +2,12 @@
 
 int32_t libsys_errno;
 
-static inline uint32_t abi_read32(uint32_t off) {
-    return *(volatile uint32_t *)(uintptr_t)(LAMP_SYSCALL_ABI_ADDR + off);
-}
-
 int32_t libsys_call6(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5) {
+    volatile uint32_t abi[LAMP_SYSCALL_ABI_WORDS];
+    uint32_t abi_addr = (uint32_t)(uintptr_t)&abi[0];
     uint32_t ret;
+    abi[LAMP_SYSCALL_ABI_OFF_MAGIC / 4u] = LAMP_SYSCALL_ABI_MAGIC;
+    abi[LAMP_SYSCALL_ABI_OFF_VERSION / 4u] = LAMP_SYSCALL_ABI_VERSION;
     __asm__ volatile(
         "mov r0, %0\n"
         "mov r1, %1\n"
@@ -17,14 +17,16 @@ int32_t libsys_call6(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2, uint32_
         "mov r5, %5\n"
         "mov r6, %6\n"
         "mov r7, %7\n"
+        "mov r8, %8\n"
         "int r7\n"
         :
-        : "r"(nr), "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a5), "r"(LAMP_IRQ_SYSCALL)
-        : "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "memory");
+        : "r"(nr), "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a5), "r"(LAMP_IRQ_SYSCALL),
+          "r"(abi_addr)
+        : "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "memory");
 
-    ret = abi_read32(LAMP_SYSCALL_ABI_OFF_RET);
+    ret = abi[LAMP_SYSCALL_ABI_OFF_RET / 4u];
     if ((int32_t)ret == -1) {
-        libsys_errno = (int32_t)abi_read32(LAMP_SYSCALL_ABI_OFF_ERRNO);
+        libsys_errno = (int32_t)abi[LAMP_SYSCALL_ABI_OFF_ERRNO / 4u];
     } else {
         libsys_errno = 0;
     }

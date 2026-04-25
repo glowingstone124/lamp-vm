@@ -83,6 +83,7 @@ typedef struct syscall_regs {
     uint32_t arg3;
     uint32_t arg4;
     uint32_t arg5;
+    uint32_t abi_addr;
 } syscall_regs_t;
 
 void syscall_init(void);

@@ -92,14 +92,14 @@ Current notes:
 ## Syscall ABI (Current)
 
 - interrupt vector: `IRQ_SYSCALL = 0x80`
-- input registers at trap entry: `r0=nr`, `r1..r6=arg0..arg5`
+- input registers at trap entry: `r0=nr`, `r1..r6=arg0..arg5`, optional `r8=mailbox`
 - initial syscalls: `getpid`, `yield`, `sleep_ticks`, `exit`, `waitpid`, `nanosleep`, `read`, `write`, `close`, `dup`, `dup2`, `fcntl`, `open`, `poll`, `select`, `tty_getmode`, `tty_setmode`, `clock_getres`, `clock_gettime`, `clock_settime`, `gettimeofday`, `socket/connect/bind/listen/accept/send/recv`
-- return publishing: fixed mailbox at `SYSCALL_ABI_ADDR (0x002FE000)`
+- return publishing: caller-provided mailbox, with fixed `SYSCALL_ABI_ADDR (0x002FE000)` fallback
 
 Note:
 
 - VM currently restores caller registers on `IRET`, so direct register return is not yet available.
-- The dispatcher writes `ret/errno` and the last call snapshot into the syscall mailbox.
+- The dispatcher writes `ret/errno` and the last call snapshot into the selected syscall mailbox.
 
 ## Interrupt Controller (Current)
 

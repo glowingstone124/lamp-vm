@@ -103,7 +103,7 @@ void sched_sleep_ticks(uint32_t ticks);
 int sched_current_tid(void);
 uint32_t sched_tick_period_us(void);
 int sched_waitpid(int32_t pid, uint32_t options, uint32_t *status_out);
-int sched_vfork(void);
+int sched_vfork(uint32_t abi_addr);
 void sched_vfork_release_parent(void);
 
 int sched_fd_close(int32_t fd);

@@ -17,7 +17,8 @@ enum {
     SCHED_SYSCALL_ABI_OFF_ARG5 = 0x20u,
     SCHED_SYSCALL_ABI_OFF_RET = 0x24u,
     SCHED_SYSCALL_ABI_OFF_ERRNO = 0x28u,
-    SCHED_SYSCALL_ABI_OFF_TICK = 0x2Cu
+    SCHED_SYSCALL_ABI_OFF_TICK = 0x2Cu,
+    SCHED_SYSCALL_ABI_SIZE = 0x30u
 };
 
 static uint32_t sched_task_kind_normalize(uint32_t kind) {
@@ -147,41 +148,37 @@ static int sched_stack_slot_index_for_sp(uint32_t sp, uint32_t *slot_out) {
     return -1;
 }
 
-static inline void sched_syscall_abi_write32(uint32_t off, uint32_t value) {
-    *(volatile uint32_t *)(uintptr_t)(SYSCALL_ABI_ADDR + off) = value;
+static inline uint32_t sched_syscall_abi_base(uint32_t abi_addr) {
+    if (abi_addr != 0u && (abi_addr & 0x3u) == 0u && abi_addr < KERNEL_MEM_SIZE &&
+        SCHED_SYSCALL_ABI_SIZE <= (KERNEL_MEM_SIZE - abi_addr) &&
+        *(volatile uint32_t *)(uintptr_t)abi_addr == SYSCALL_ABI_MAGIC) {
+        return abi_addr;
+    }
+    return SYSCALL_ABI_ADDR;
 }
 
-static void sched_vfork_publish_child_result(void) {
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_MAGIC, SYSCALL_ABI_MAGIC);
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_VERSION, SYSCALL_ABI_VERSION);
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_LAST_NR, SYS_VFORK);
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_ARG0, 0u);
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_ARG1, 0u);
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_ARG2, 0u);
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_ARG3, 0u);
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_ARG4, 0u);
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_ARG5, 0u);
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_RET, 0u);
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_ERRNO, 0u);
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_TICK, sched_ticks());
+static inline void sched_syscall_abi_write32_at(uint32_t base, uint32_t off, uint32_t value) {
+    *(volatile uint32_t *)(uintptr_t)(base + off) = value;
 }
 
 __attribute__((noreturn)) static void sched_vfork_resume_iret(sched_task_slot_t *slot, uint32_t ret_value) {
+    uint32_t base;
     if (!slot || !slot->used || slot->vfork_resume_valid == 0u) {
         sched_exit_code(0x7Fu);
     }
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_MAGIC, SYSCALL_ABI_MAGIC);
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_VERSION, SYSCALL_ABI_VERSION);
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_LAST_NR, SYS_VFORK);
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_ARG0, 0u);
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_ARG1, 0u);
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_ARG2, 0u);
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_ARG3, 0u);
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_ARG4, 0u);
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_ARG5, 0u);
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_RET, ret_value);
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_ERRNO, 0u);
-    sched_syscall_abi_write32(SCHED_SYSCALL_ABI_OFF_TICK, sched_ticks());
+    base = sched_syscall_abi_base(slot->syscall_abi_addr);
+    sched_syscall_abi_write32_at(base, SCHED_SYSCALL_ABI_OFF_MAGIC, SYSCALL_ABI_MAGIC);
+    sched_syscall_abi_write32_at(base, SCHED_SYSCALL_ABI_OFF_VERSION, SYSCALL_ABI_VERSION);
+    sched_syscall_abi_write32_at(base, SCHED_SYSCALL_ABI_OFF_LAST_NR, SYS_VFORK);
+    sched_syscall_abi_write32_at(base, SCHED_SYSCALL_ABI_OFF_ARG0, 0u);
+    sched_syscall_abi_write32_at(base, SCHED_SYSCALL_ABI_OFF_ARG1, 0u);
+    sched_syscall_abi_write32_at(base, SCHED_SYSCALL_ABI_OFF_ARG2, 0u);
+    sched_syscall_abi_write32_at(base, SCHED_SYSCALL_ABI_OFF_ARG3, 0u);
+    sched_syscall_abi_write32_at(base, SCHED_SYSCALL_ABI_OFF_ARG4, 0u);
+    sched_syscall_abi_write32_at(base, SCHED_SYSCALL_ABI_OFF_ARG5, 0u);
+    sched_syscall_abi_write32_at(base, SCHED_SYSCALL_ABI_OFF_RET, ret_value);
+    sched_syscall_abi_write32_at(base, SCHED_SYSCALL_ABI_OFF_ERRNO, 0u);
+    sched_syscall_abi_write32_at(base, SCHED_SYSCALL_ABI_OFF_TICK, sched_ticks());
     sched_stack_ctx_copy(&slot->stack_ctx, &slot->vfork_resume_ctx);
     slot->vfork_resume_valid = 0u;
     sched_cpu_ctx_write32(IO_CPU_CTX_CALL_BASE, slot->stack_ctx.call_base);
@@ -320,7 +317,7 @@ static int sched_vfork_prepare_parent_resume_locked(sched_task_slot_t *self,
     return 0;
 }
 
-static int sched_vfork_trampoline(void) {
+static int sched_vfork_trampoline(uint32_t abi_addr) {
     sched_stack_ctx_t live;
     sched_task_slot_t *self;
     sched_task_slot_t *child;
@@ -341,6 +338,7 @@ static int sched_vfork_trampoline(void) {
         spinlock_unlock(&g_sched_lock);
         return -1;
     }
+    self->syscall_abi_addr = abi_addr;
 
     self_slot = self->stack_ctx.pool_slot;
     sched_stack_ctx_copy(&self->stack_ctx, &live);
@@ -376,6 +374,7 @@ static int sched_vfork_trampoline(void) {
     child->pub.wake_tick = 0u;
     child->pub.run_ticks = self->pub.run_ticks;
     child->pub.arg = 0;
+    child->syscall_abi_addr = self->syscall_abi_addr;
     child->vfork_resume_valid = 0u;
     if (g_next_tid == 0u) {
         g_next_tid = 1u;
@@ -810,8 +809,8 @@ static int sched_prepare_vfork_child_ctx(const sched_task_slot_t *parent,
     return 0;
 }
 
-int sched_vfork(void) {
-    return sched_vfork_trampoline();
+int sched_vfork(uint32_t abi_addr) {
+    return sched_vfork_trampoline(abi_addr);
 }
 
 int sched_spawn(const char *name, sched_task_entry_t entry, void *arg) {
@@ -837,6 +836,7 @@ int sched_spawn(const char *name, sched_task_entry_t entry, void *arg) {
     slot->name = name;
     slot->vfork_child_start = 0u;
     slot->vfork_child_active = 0u;
+    slot->syscall_abi_addr = 0u;
     slot->waitq = 0;
     sched_waitq_init_locked(&slot->child_waitq);
     slot->quantum_used = 0u;

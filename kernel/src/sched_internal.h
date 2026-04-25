@@ -75,6 +75,7 @@ typedef struct sched_task_slot {
     sched_stack_ctx_t vfork_resume_ctx;
     uint32_t vfork_resume_ret;
     uint32_t vfork_resume_valid;
+    uint32_t syscall_abi_addr;
     spinlock_t fd_lock;
 } sched_task_slot_t;
 

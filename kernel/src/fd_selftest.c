@@ -82,6 +82,7 @@ static inline uint32_t ptr32(const void *p) {
         (__regs).arg3 = (a3_);                                                          \
         (__regs).arg4 = (a4_);                                                          \
         (__regs).arg5 = (a5_);                                                          \
+        (__regs).abi_addr = 0u;                                                         \
         (void)syscall_dispatch(&__regs);                                                \
         (ret_lval_) = abi_read32(ABI_OFF_RET);                                          \
         (err_lval_) = (((int32_t)(ret_lval_)) == -1) ? abi_read32(ABI_OFF_ERRNO) : 0u; \

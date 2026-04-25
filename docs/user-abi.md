@@ -9,10 +9,12 @@ This document defines the temporary userspace ABI used by the current kernel lau
 - Input registers on trap entry:
   - `r0 = nr`
   - `r1..r6 = arg0..arg5`
+  - `r8 = optional syscall mailbox pointer`
 - Return transport:
-  - syscall return is published in syscall mailbox at `0x002FE000`
-  - return value: `*(u32*)(0x002FE000 + 0x24)`
-  - errno: `*(u32*)(0x002FE000 + 0x28)` (valid when return is `-1`)
+  - syscall return is published in the caller-provided mailbox when `r8` points at an aligned valid 48-byte range whose first word is `SYC0`
+  - legacy fallback mailbox remains at `0x002FE000`
+  - return value: `*(u32*)(mailbox + 0x24)`
+  - errno: `*(u32*)(mailbox + 0x28)` (valid when return is `-1`)
 
 Reason: current VM interrupt model restores caller registers on `IRET`, so register return ABI is not yet available.
 

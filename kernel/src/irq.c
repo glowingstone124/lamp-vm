@@ -19,6 +19,7 @@ volatile uint32_t g_irq_stub_r3[32];
 volatile uint32_t g_irq_stub_r4[32];
 volatile uint32_t g_irq_stub_r5[32];
 volatile uint32_t g_irq_stub_r6[32];
+volatile uint32_t g_irq_stub_abi_addr[32];
 volatile uint32_t g_irq_saved_user_csp[32];
 volatile uint32_t g_irq_saved_user_dsp[32];
 static volatile trap_frame_t g_last_trap_frame;
@@ -285,6 +286,7 @@ void irq_syscall(uint32_t irq_no) {
     regs.arg3 = g_irq_stub_r4[cpu];
     regs.arg4 = g_irq_stub_r5[cpu];
     regs.arg5 = g_irq_stub_r6[cpu];
+    regs.abi_addr = g_irq_stub_abi_addr[cpu];
     (void)syscall_dispatch(&regs);
 }
 
@@ -292,6 +294,7 @@ __asm__(
     ".text\n"
     ".globl irq_stub_entry\n"
     "irq_stub_entry:\n"
+    "  mov r16, r8\n"
     "  mov r8, r0\n"
     "  mov r9, r1\n"
     "  mov r10, r2\n"
@@ -342,6 +345,9 @@ __asm__(
     "  movi r0, g_irq_stub_r6\n"
     "  add r0, r0, r7\n"
     "  store32 r14, r0, 0\n"
+    "  movi r0, g_irq_stub_abi_addr\n"
+    "  add r0, r0, r7\n"
+    "  store32 r16, r0, 0\n"
     "  call irq_common_entry_from_stub\n"
     "  iret\n"
 );
