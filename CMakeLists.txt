@@ -36,27 +36,27 @@ if(VM_PGO_GENERATE AND VM_PGO_USE)
 endif()
 
 set(SOURCES
-        vm.c
-        debug.c
-        io_devices/frame/frame.c
-        io.c
-        loadbin.c
-        panic.c
-        io_devices/disk/disk.c
-        interrupt.c
-        io_devices/frame/terminalin.c
-        memory.c
-        io_devices/vga_display/display.c
-        mmio.c
-        io_devices/vga_display/vga_mmio_register.c
-        io_devices/time/time_mmio_register.c
-        io_devices/intc/intc_mmio_register.c
-        io_devices/iommu/iommu_mmio_register.c
-        io_devices/mmu/mmu_mmio_register.c
-        io_devices/sysinfo/sysinfo_mmio_register.c
-        io_devices/time/timer.c
-        float.c
-        selftest.c
+        src/vm.c
+        src/debug.c
+        src/io_devices/frame/frame.c
+        src/io.c
+        src/loadbin.c
+        src/panic.c
+        src/io_devices/disk/disk.c
+        src/interrupt.c
+        src/io_devices/frame/terminalin.c
+        src/memory.c
+        src/io_devices/vga_display/display.c
+        src/mmio.c
+        src/io_devices/vga_display/vga_mmio_register.c
+        src/io_devices/time/time_mmio_register.c
+        src/io_devices/intc/intc_mmio_register.c
+        src/io_devices/iommu/iommu_mmio_register.c
+        src/io_devices/mmu/mmu_mmio_register.c
+        src/io_devices/sysinfo/sysinfo_mmio_register.c
+        src/io_devices/time/timer.c
+        src/float.c
+        src/selftest.c
 )
 
 add_executable(vm ${SOURCES})

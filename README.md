@@ -17,6 +17,14 @@ Assembler/toolchain project:
 - https://github.com/glowingstone124/lampvm-toolchain
 - https://github.com/glowingstone124/llvm-project (Custom LLVM backend)
 
+## Layout
+
+- `src/`: host-side VM implementation, device model, debugger, loader, and selftests
+- `kernel/`: guest kernel sources and build script
+- `bios/`: guest BIOS/bootloader sources
+- `user/`: guest userspace runtime and sample apps
+- `docs/`: architecture and ABI notes
+
 ## Build
 
 ### Requirements

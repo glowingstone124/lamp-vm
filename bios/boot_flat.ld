@@ -12,7 +12,7 @@
 OUTPUT_FORMAT(binary)
 ENTRY(_start)
 
-/* VM default program load base (see vm.h: PROGRAM_BASE). */
+  /* VM default program load base (see src/vm.h: PROGRAM_BASE). */
 TEXT_BASE = 0x0000201C;
 HDR_BASE = TEXT_BASE - 24;
 

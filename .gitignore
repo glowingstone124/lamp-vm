@@ -1,7 +1,13 @@
 .idea/
 build/
 build-release/
+build-kernel/
+build-user/
+cmake-build-debug/
 *.o
 *.ll
 .DS_Store
 /bios/bios.s
+/bios/boot.bin
+/disk.img
+/rootfs.ext4
