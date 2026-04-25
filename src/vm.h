@@ -308,6 +308,7 @@ struct VM{
     int timer_thread_started;
     pthread_t timer_worker_thread;
 
+    pthread_t vnc_server_thread;
 #ifdef VM_DEBUG
     VM_Debug *debug;
 #endif

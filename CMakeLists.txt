@@ -57,6 +57,8 @@ set(SOURCES
         src/io_devices/time/timer.c
         src/float.c
         src/selftest.c
+        src/vnc.c
+        src/vnc.h
 )
 
 add_executable(vm ${SOURCES})

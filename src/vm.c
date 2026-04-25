@@ -30,6 +30,7 @@
 #include "flags.h"
 #include "debug.h"
 #include "selftest.h"
+#include "vnc.h"
 
 const size_t MEM_SIZE = 1048576 * 64; // 64MB
 enum { EXECUTION_TIMES_FLUSH_INTERVAL = 1024 };
@@ -1720,6 +1721,8 @@ int main(int argc, char **argv) {
            MEM_SIZE,
            (void *) vm->memory);
     init_screen();
+    printf("VNC function is still in preview, use it with caution.\n");
+    vnc_run(vm);
     if (serial_stdin) {
         printf("Serial stdin mode enabled (headless).\n");
         vm_run_serial(vm);
@@ -1734,7 +1737,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < vm->smp_cores; i++) {
         total_execution_times += atomic_load_explicit(&vm->cpus[i].execution_times, memory_order_relaxed);
     }
-
+    vnc_exit();
     printf("Execution complete in %lu cycles.\n",
            (unsigned long)total_execution_times);
     vm_debug_print_stats(vm);
