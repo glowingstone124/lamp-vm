@@ -17,8 +17,6 @@
 #include "stdio.h"
 #include "sys/socket.h"
 
-static uint32_t *framebuffer = NULL;
-
 typedef struct {
     uint8_t bits_per_pixel;
     uint8_t depth;
@@ -44,22 +42,6 @@ static const VncPixelFormat default_pixel_format = {
     .green_shift = 8,
     .blue_shift = 0,
 };
-
-static void init_framebuffer(void) {
-    framebuffer = malloc((size_t) FB_WIDTH * FB_HEIGHT * sizeof(uint32_t));
-    if (framebuffer == NULL) {
-        perror("Unable to allocate framebuffer for VNC display!");
-    }
-    for (int y = 0; y < FB_HEIGHT; y++) {
-        for (int x = 0; x < FB_WIDTH; x++) {
-            uint8_t r = (uint8_t) ((x * 255) / FB_WIDTH);
-            uint8_t g = (uint8_t) ((y * 255) / FB_HEIGHT);
-            uint8_t b = 80;
-
-            framebuffer[y * FB_WIDTH + x] = ((uint32_t) r << 16) | ((uint32_t) g << 8) | ((uint32_t) b);
-        }
-    }
-}
 
 static int read_exact(int fd, void *buf, size_t len) {
     uint8_t *p = buf;
@@ -163,6 +145,19 @@ static void encode_pixel(uint8_t *out, uint32_t rgb, const VncPixelFormat *forma
     }
 }
 
+static int vnc_format_is_native(const VncPixelFormat *format) {
+    return format->bits_per_pixel == 32 &&
+           format->depth == 24 &&
+           format->big_endian == 0 &&
+           format->true_color == 1 &&
+           format->red_max == 255 &&
+           format->green_max == 255 &&
+           format->blue_max == 255 &&
+           format->red_shift == 16 &&
+           format->green_shift == 8 &&
+           format->blue_shift == 0;
+}
+
 static int send_server_init(int client_fd) {
     uint8_t msg[24];
     memset(msg, 0, sizeof(msg));
@@ -184,6 +179,7 @@ static int send_server_init(int client_fd) {
 }
 
 static int send_framebuffer_update(
+    VM *vm,
     int client_fd,
     uint16_t x,
     uint16_t y,
@@ -191,6 +187,7 @@ static int send_framebuffer_update(
     uint16_t h,
     const VncPixelFormat *format
 ) {
+    if (vm == NULL || vm->fb == NULL) return -1;
     if (x >= FB_WIDTH || y >= FB_HEIGHT) return 0;
     if (x + w > FB_WIDTH) w = FB_WIDTH - x;
     if (y + h > FB_HEIGHT) h = FB_HEIGHT - y;
@@ -230,11 +227,18 @@ static int send_framebuffer_update(
         return -1;
     }
 
+    int native_format = vnc_format_is_native(format);
     for (uint16_t row = 0; row < h; row++) {
-        uint32_t *line = &framebuffer[(y + row) * FB_WIDTH + x];
-        for (uint16_t col = 0; col < w; col++) {
-            encode_pixel(row_buffer + (size_t) col * (size_t) bytes_per_pixel, line[col], format);
+        uint32_t *line = &vm->fb[(size_t)(y + row) * FB_WIDTH + x];
+        vm_shared_lock(vm);
+        if (native_format) {
+            memcpy(row_buffer, line, row_bytes);
+        } else {
+            for (uint16_t col = 0; col < w; col++) {
+                encode_pixel(row_buffer + (size_t) col * (size_t) bytes_per_pixel, line[col], format);
+            }
         }
+        vm_shared_unlock(vm);
         if (write_exact(client_fd, row_buffer, row_bytes) < 0) {
             free(row_buffer);
             return -1;
@@ -245,7 +249,7 @@ static int send_framebuffer_update(
     return 0;
 }
 
-static int handle_client(int client_fd) {
+static int handle_client(VM *vm, int client_fd) {
     VncPixelFormat client_pixel_format = default_pixel_format;
 
     const char *version = "RFB 003.008\n"; //RFB
@@ -326,7 +330,7 @@ static int handle_client(int client_fd) {
                 w = ntohs(w);
                 h = ntohs(h);
 
-                if (send_framebuffer_update(client_fd, x, y, w, h, &client_pixel_format) < 0) return -1;
+                if (send_framebuffer_update(vm, client_fd, x, y, w, h, &client_pixel_format) < 0) return -1;
                 break;
             }
             case 4: {
@@ -373,14 +377,10 @@ static int handle_client(int client_fd) {
 }
 
 void vnc_exit(void) {
-    if (framebuffer != NULL) {
-        free(framebuffer);
-    }
 }
 
 static void *vnc_main(void *arg) {
     VM* vm = arg;
-    init_framebuffer();
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
         perror("socket");
@@ -425,7 +425,7 @@ static void *vnc_main(void *arg) {
 
         printf("Client connected\n");
 
-        handle_client(client_fd);
+        handle_client(vm, client_fd);
 
         close(client_fd);
         printf("Client disconnected\n");
