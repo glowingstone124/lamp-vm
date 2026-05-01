@@ -530,8 +530,16 @@ void vm_instruction_case(VM *vm) {
                     cpu->regs[rd] = (int32_t)cpu->isr_stack_base;
                     break;
                 }
+                if (addr == CPU_CTX_IN_INTERRUPT) {
+                    cpu->regs[rd] = cpu->in_interrupt ? 1 : 0;
+                    break;
+                }
                 vm_shared_lock(vm);
-                if (addr == KEYBOARD) {
+                if (addr == PS2_DATA) {
+                    cpu->regs[rd] = vm_ps2_read_data(vm);
+                } else if (addr == PS2_STATUS) {
+                    cpu->regs[rd] = vm_ps2_read_status(vm);
+                } else if (addr == KEYBOARD) {
                     int v = 0;
                     if (vm->serial_rx_tail != vm->serial_rx_head) {
                         v = (int)vm->serial_rx_fifo[vm->serial_rx_tail];
@@ -673,6 +681,10 @@ void vm_instruction_case(VM *vm) {
                         break;
                     }
                     cpu->isr_stack_base = v;
+                    break;
+                }
+                if (addr == CPU_CTX_IN_INTERRUPT) {
+                    cpu->in_interrupt = (cpu->regs[rd] != 0);
                     break;
                 }
                 accept_io(vm, addr, cpu->regs[rd]);
@@ -1591,6 +1603,15 @@ VM *vm_create(size_t memory_size,
     vm->start_monotonic_ns = host_monotonic_time_ns();
     vm->suspend_count = 0;
     vm->io[SCREEN_ATTRIBUTE] = SERIAL_STATUS_TX_READY;
+    vm->ps2_config = 0x03u;
+    vm->ps2_status = PS2_STATUS_SYSTEM;
+    vm->ps2_kbd_enabled = 1u;
+    vm->ps2_mouse_enabled = 1u;
+    vm->ps2_kbd_scanning = 1u;
+    vm->ps2_mouse_reporting = 1u;
+    vm->ps2_mouse_sample_rate = 100u;
+    vm->ps2_mouse_resolution = 2u;
+    vm->io[PS2_STATUS] = vm->ps2_status;
     vm_debug_init(vm);
     return vm;
 }

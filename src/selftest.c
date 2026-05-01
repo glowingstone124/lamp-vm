@@ -6,6 +6,7 @@
 #include "loadbin.h"
 #include "interrupt.h"
 #include "memory.h"
+#include "io.h"
 #include "io_devices/disk/disk.h"
 
 extern const size_t MEM_SIZE;
@@ -596,6 +597,72 @@ static int run_selftest_inti_imm_conformance(void) {
     return ok;
 }
 
+static int run_selftest_ps2_controller(void) {
+    uint64_t program[] = {
+        INST(OP_HALT, 0, 0, 0, 0),
+    };
+    VM *vm = vm_create(MEM_SIZE, program, sizeof(program) / sizeof(program[0]), NULL, 0, NULL, 1);
+    if (!vm)
+        return 0;
+    init_ivt(vm);
+
+    int ok = 1;
+    ok = ok && ((vm_ps2_read_status(vm) & PS2_STATUS_OUT_FULL) == 0u);
+
+    accept_io(vm, PS2_COMMAND, 0x20u);
+    ok = ok && ((vm_ps2_read_status(vm) & PS2_STATUS_OUT_FULL) != 0u);
+    ok = ok && (vm_ps2_read_data(vm) == 0x03u);
+
+    accept_io(vm, PS2_DATA, 0xF2u);
+    ok = ok && (vm_ps2_read_data(vm) == 0xFAu);
+    ok = ok && (vm_ps2_read_data(vm) == 0xABu);
+    ok = ok && (vm_ps2_read_data(vm) == 0x83u);
+
+    ok = ok && vm_ps2_kbd_enqueue(vm, 0x1Eu);
+    ok = ok && ((vm_ps2_read_status(vm) & PS2_STATUS_AUX_DATA) == 0u);
+    ok = ok && (vm_ps2_read_data(vm) == 0x1Eu);
+
+    accept_io(vm, PS2_COMMAND, 0xD4u);
+    accept_io(vm, PS2_DATA, 0xF4u);
+    ok = ok && ((vm_ps2_read_status(vm) & PS2_STATUS_AUX_DATA) != 0u);
+    ok = ok && (vm_ps2_read_data(vm) == 0xFAu);
+
+    ok = ok && vm_ps2_mouse_enqueue(vm, 0x08u);
+    ok = ok && ((vm_ps2_read_status(vm) & PS2_STATUS_AUX_DATA) != 0u);
+    ok = ok && (vm_ps2_read_data(vm) == 0x08u);
+
+    vm_destroy(vm);
+    return ok;
+}
+
+static int run_selftest_fb_accel(void) {
+    uint64_t program[] = {
+        INST(OP_HALT, 0, 0, 0, 0),
+    };
+    VM *vm = vm_create(MEM_SIZE, program, sizeof(program) / sizeof(program[0]), NULL, 0, NULL, 1);
+    if (!vm)
+        return 0;
+
+    int ok = 1;
+    accept_io(vm, FB_ACCEL_ARG0, 0x00112233u);
+    accept_io(vm, FB_ACCEL_CMD, FB_ACCEL_CMD_CLEAR);
+    ok = ok && (vm->fb[0] == 0x00112233u);
+    ok = ok && (vm->fb[(size_t)FB_WIDTH * (size_t)FB_HEIGHT - 1u] == 0x00112233u);
+
+    for (size_t y = 0; y < (size_t)FB_HEIGHT; y++) {
+        vm->fb[y * (size_t)FB_WIDTH] = (uint32_t)y;
+    }
+    accept_io(vm, FB_ACCEL_ARG0, 0x00ABCDEFu);
+    accept_io(vm, FB_ACCEL_CMD, FB_ACCEL_CMD_SCROLL_UP_8PX);
+    ok = ok && (vm->fb[0] == 8u);
+    ok = ok && (vm->fb[((size_t)FB_HEIGHT - 9u) * (size_t)FB_WIDTH] == (uint32_t)(FB_HEIGHT - 1u));
+    ok = ok && (vm->fb[((size_t)FB_HEIGHT - 8u) * (size_t)FB_WIDTH] == 0x00ABCDEFu);
+    ok = ok && (vm->fb[(size_t)FB_WIDTH * (size_t)FB_HEIGHT - 1u] == 0x00ABCDEFu);
+
+    vm_destroy(vm);
+    return ok;
+}
+
 int run_selftests(void) {
     int ok1 = run_selftest_startap_cpuid();
     int ok2 = run_selftest_ipi();
@@ -609,6 +676,8 @@ int run_selftests(void) {
     int ok10 = run_selftest_indexed_rw_width_conformance();
     int ok11 = run_selftest_relcond_extended_conformance();
     int ok12 = run_selftest_inti_imm_conformance();
+    int ok13 = run_selftest_ps2_controller();
+    int ok14 = run_selftest_fb_accel();
 
     printf("[selftest] startap_cpuid: %s\n", ok1 ? "PASS" : "FAIL");
     printf("[selftest] ipi: %s\n", ok2 ? "PASS" : "FAIL");
@@ -622,5 +691,7 @@ int run_selftests(void) {
     printf("[selftest] indexed_rw_width_conformance: %s\n", ok10 ? "PASS" : "FAIL");
     printf("[selftest] relcond_extended_conformance: %s\n", ok11 ? "PASS" : "FAIL");
     printf("[selftest] inti_imm_conformance: %s\n", ok12 ? "PASS" : "FAIL");
-    return (ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12) ? 0 : 1;
+    printf("[selftest] ps2_controller: %s\n", ok13 ? "PASS" : "FAIL");
+    printf("[selftest] fb_accel: %s\n", ok14 ? "PASS" : "FAIL");
+    return (ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12 && ok13 && ok14) ? 0 : 1;
 }

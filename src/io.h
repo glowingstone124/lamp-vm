@@ -7,6 +7,8 @@ void accept_io(VM *vm, int addr, int value);
 int vm_serial_rx_enqueue(VM *vm, uint8_t c);
 int vm_ps2_kbd_enqueue(VM *vm, uint8_t c);
 int vm_ps2_mouse_enqueue(VM *vm, uint8_t c);
+uint8_t vm_ps2_read_data(VM *vm);
+uint8_t vm_ps2_read_status(VM *vm);
 
 enum IO_TABLE {
     SCREEN = 0x01,
@@ -16,6 +18,11 @@ enum IO_TABLE {
     PS2_KBD_DATA = 0x05,
     PS2_MOUSE_STATUS = 0x06,
     PS2_MOUSE_DATA = 0x07,
+    FB_ACCEL_ARG0 = 0x08,
+    FB_ACCEL_CMD = 0x09,
+    PS2_DATA = 0x60,
+    PS2_STATUS = 0x64,
+    PS2_COMMAND = 0x64,
     DISK_CMD = 0x10,
     DISK_LBA = 0x11,
     DISK_MEM = 0x12,
@@ -28,6 +35,7 @@ enum IO_TABLE {
     CPU_CTX_CALL_BASE = 0xF4,
     CPU_CTX_DATA_BASE = 0xF5,
     CPU_CTX_ISR_BASE = 0xF6,
+    CPU_CTX_IN_INTERRUPT = 0xF7,
 };
 
 // SCREEN / SCREEN_ATTRIBUTE / KEYBOARD are repurposed as a basic serial device:
@@ -37,4 +45,12 @@ enum IO_TABLE {
 #define SERIAL_CTRL_RX_INT_ENABLE 0x01
 
 #define PS2_STATUS_RX_READY 0x01
+#define PS2_STATUS_OUT_FULL 0x01
+#define PS2_STATUS_IN_FULL 0x02
+#define PS2_STATUS_SYSTEM 0x04
+#define PS2_STATUS_CMD_DATA 0x08
+#define PS2_STATUS_AUX_DATA 0x20
+
+#define FB_ACCEL_CMD_SCROLL_UP_8PX 0x01
+#define FB_ACCEL_CMD_CLEAR 0x02
 #endif

@@ -264,6 +264,24 @@ struct VM{
     uint8_t ps2_mouse_fifo[256];
     uint16_t ps2_mouse_head;
     uint16_t ps2_mouse_tail;
+    uint8_t ps2_out_fifo[512];
+    uint8_t ps2_out_aux[512];
+    uint8_t ps2_out_irq[512];
+    uint16_t ps2_out_head;
+    uint16_t ps2_out_tail;
+    uint8_t ps2_config;
+    uint8_t ps2_status;
+    uint8_t ps2_pending_controller_write;
+    uint8_t ps2_next_to_mouse;
+    uint8_t ps2_kbd_enabled;
+    uint8_t ps2_mouse_enabled;
+    uint8_t ps2_kbd_scanning;
+    uint8_t ps2_mouse_reporting;
+    uint8_t ps2_kbd_expect;
+    uint8_t ps2_mouse_expect;
+    uint8_t ps2_mouse_sample_rate;
+    uint8_t ps2_mouse_resolution;
+    uint8_t ps2_mouse_scaling_2_1;
 
     Disk disk;
     IOMMU iommu;

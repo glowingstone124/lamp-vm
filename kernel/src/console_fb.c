@@ -28,6 +28,10 @@ static int g_font[FONT_GLYPHS * FONT_PIXELS] = {
 #include "console_font_8x8_data.inc"
 };
 
+static inline void fb_accel_out32(uint32_t addr, uint32_t value) {
+    __asm__ volatile("out %0, %1" :: "r"(value), "r"(addr));
+}
+
 static void clear_cell(int cx, int cy) {
     int py = cy * CELL_H;
     int px = cx * CELL_W;
@@ -75,21 +79,8 @@ static void draw_char(int ch, int cx, int cy) {
 }
 
 static void scroll_one_line(void) {
-    const int src_start = CELL_H;
-    const int h = (int)FB_HEIGHT;
-    const int w = (int)FB_WIDTH;
-    for (int y = 0; y < h - CELL_H; y++) {
-        int src_y = y + src_start;
-        for (int x = 0; x < w; x++) {
-            g_fb[y * w + x] = g_fb[src_y * w + x];
-        }
-    }
-
-    for (int y = h - CELL_H; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-            g_fb[y * w + x] = g_bg;
-        }
-    }
+    fb_accel_out32(IO_FB_ACCEL_ARG0, g_bg);
+    fb_accel_out32(IO_FB_ACCEL_CMD, FB_ACCEL_CMD_SCROLL_UP_8PX);
 }
 
 static void newline(void) {
@@ -102,11 +93,8 @@ static void newline(void) {
 }
 
 void console_fb_clear(void) {
-    for (int y = 0; y < (int)FB_HEIGHT; y++) {
-        for (int x = 0; x < (int)FB_WIDTH; x++) {
-            g_fb[y * (int)FB_WIDTH + x] = g_bg;
-        }
-    }
+    fb_accel_out32(IO_FB_ACCEL_ARG0, g_bg);
+    fb_accel_out32(IO_FB_ACCEL_CMD, FB_ACCEL_CMD_CLEAR);
     g_cursor_x = 0;
     g_cursor_y = 0;
 }

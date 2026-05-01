@@ -88,6 +88,10 @@ __attribute__((always_inline)) static inline void sched_cpu_ctx_write32(uint32_t
     __asm__ volatile("out %0, %1" :: "r"(value), "r"(io_addr));
 }
 
+static inline void sched_cpu_ctx_clear_interrupt(void) {
+    sched_cpu_ctx_write32(IO_CPU_CTX_IN_INTERRUPT, 0u);
+}
+
 static void sched_reloc_words(uint32_t base,
                               uint32_t bytes,
                               uint32_t r0_lo,
@@ -922,6 +926,7 @@ void sched_exit_code(uint32_t code) {
     }
     sched_mark_resched_all();
     spinlock_unlock(&g_sched_lock);
+    sched_cpu_ctx_clear_interrupt();
     sched_switch_current_to_scheduler();
     for (;;) {
         __asm__ volatile("pause\n" ::: "memory");

@@ -77,6 +77,48 @@ static inline void io_out32(uint32_t addr, uint32_t value) {
     __asm__ volatile ("out %0, %1" :: "r"(value), "r"(addr));
 }
 
+static int ps2_read_data_wait(uint8_t *out, uint32_t want_aux, uint32_t check_aux) {
+    for (uint32_t i = 0; i < 1024u; i++) {
+        const uint32_t status = io_in32(IO_PS2_STATUS);
+        if ((status & PS2_STATUS_OUT_FULL) == 0u) {
+            continue;
+        }
+        if (check_aux != 0u && (((status & PS2_STATUS_AUX_DATA) != 0u) ? 1u : 0u) != want_aux) {
+            return 0;
+        }
+        *out = (uint8_t)(io_in32(IO_PS2_DATA) & 0xFFu);
+        return 1;
+    }
+    return 0;
+}
+
+static void ps2_flush_output(void) {
+    for (uint32_t i = 0; i < 64u; i++) {
+        if ((io_in32(IO_PS2_STATUS) & PS2_STATUS_OUT_FULL) == 0u) {
+            return;
+        }
+        (void)io_in32(IO_PS2_DATA);
+    }
+}
+
+static void ps2_write_controller(uint8_t command) {
+    io_out32(IO_PS2_COMMAND, command);
+}
+
+static void ps2_write_data(uint8_t value) {
+    io_out32(IO_PS2_DATA, value);
+}
+
+static void ps2_write_mouse(uint8_t value) {
+    ps2_write_controller(0xD4u);
+    ps2_write_data(value);
+}
+
+static void ps2_read_ack(uint32_t aux) {
+    uint8_t value = 0u;
+    (void)ps2_read_data_wait(&value, aux, 1u);
+}
+
 static inline uint32_t irq_stub_cpu_index(void) {
     uint32_t cpu = 0u;
     __asm__ volatile("cpuid %0" : "=r"(cpu));
@@ -163,15 +205,21 @@ static void ps2_keyboard_handle_scancode(uint8_t scancode) {
 }
 
 static void ps2_keyboard_drain_rx(void) {
-    while ((io_in32(IO_PS2_KBD_STATUS) & PS2_STATUS_RX_READY) != 0u) {
-        const uint32_t v = io_in32(IO_PS2_KBD_DATA);
+    while ((io_in32(IO_PS2_STATUS) & PS2_STATUS_OUT_FULL) != 0u) {
+        if ((io_in32(IO_PS2_STATUS) & PS2_STATUS_AUX_DATA) != 0u) {
+            return;
+        }
+        const uint32_t v = io_in32(IO_PS2_DATA);
         ps2_keyboard_handle_scancode((uint8_t)(v & 0xFFu));
     }
 }
 
 static void ps2_mouse_drain_rx(void) {
-    while ((io_in32(IO_PS2_MOUSE_STATUS) & PS2_STATUS_RX_READY) != 0u) {
-        (void)io_in32(IO_PS2_MOUSE_DATA);
+    while ((io_in32(IO_PS2_STATUS) & PS2_STATUS_OUT_FULL) != 0u) {
+        if ((io_in32(IO_PS2_STATUS) & PS2_STATUS_AUX_DATA) == 0u) {
+            return;
+        }
+        (void)io_in32(IO_PS2_DATA);
     }
 }
 
@@ -194,6 +242,29 @@ void irq_common_entry_from_stub(void) {
 
 void irq_input_init(void) {
     io_out32(IO_SERIAL_STATUS, SERIAL_CTRL_RX_INT_ENABLE);
+    ps2_write_controller(0xADu);
+    ps2_write_controller(0xA7u);
+    ps2_flush_output();
+
+    ps2_write_controller(0x20u);
+    uint8_t config = 0u;
+    if (ps2_read_data_wait(&config, 0u, 0u)) {
+        config |= 0x03u;
+        config &= (uint8_t)~0x30u;
+        ps2_write_controller(0x60u);
+        ps2_write_data(config);
+    }
+
+    ps2_write_controller(0xAEu);
+    ps2_write_controller(0xA8u);
+
+    ps2_write_data(0xF4u);
+    ps2_read_ack(0u);
+
+    ps2_write_mouse(0xF6u);
+    ps2_read_ack(1u);
+    ps2_write_mouse(0xF4u);
+    ps2_read_ack(1u);
 }
 
 uint32_t irq_input_dropped(void) {

@@ -384,14 +384,16 @@ static void *vnc_main(void *arg) {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
         perror("socket");
-        panic("vnc_main: socket", vm);
+        fprintf(stderr, "vnc_main: disabled because socket creation failed\n");
+        return NULL;
     }
 
     int opt = 1;
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
         perror("setsockopt");
         close(server_fd);
-        panic("vnc_main: setsockopt", vm);
+        fprintf(stderr, "vnc_main: disabled because setsockopt failed\n");
+        return NULL;
     }
 
     struct sockaddr_in addr;
@@ -403,13 +405,15 @@ static void *vnc_main(void *arg) {
     if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         perror("bind");
         close(server_fd);
-        panic("vnc_main: bind", vm);
+        fprintf(stderr, "vnc_main: disabled because bind failed\n");
+        return NULL;
     }
 
     if (listen(server_fd, 8) < 0) {
         perror("listen");
         close(server_fd);
-        panic("vnc_main: listen", vm);
+        fprintf(stderr, "vnc_main: disabled because listen failed\n");
+        return NULL;
     }
 
     printf("vnc_main: listening for connections on port %u\n", VNC_PORT);
