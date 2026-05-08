@@ -1,6 +1,6 @@
 # BusyBox `sh` Porting Roadmap
 
-Last updated: 2026-03-07
+Last updated: 2026-05-03
 
 ## Goal
 
@@ -21,14 +21,11 @@ Already available:
 - scheduler + waitq + per-task fd table
 - `read/write/open/close/dup/dup2/fcntl/poll/select/waitpid/exit`
 - tty line discipline (`ECHO/ICANON/ISIG`) and ext4 file `open/read/write`
+- terminal compatibility ioctl subset (`TCGETS/TCSETS/TIOCGWINSZ`) for `isatty`/termios probing
 
 Major missing pieces for BusyBox `sh`:
 
-- no user process image lifecycle (`execve`)
-- no `fork/vfork` for shell child commands
-- no `pipe` syscall
-- no cwd/path metadata APIs (`chdir/getcwd/stat/getdents`)
-- no signal syscalls (`sigaction/sigprocmask/kill`) for shell control flow
+- no userspace signal handler delivery/trampoline yet
 - no libc/runtime target for user programs yet
 
 ## Architecture Decisions
@@ -118,6 +115,25 @@ Exit criteria:
 
 - userland test passes: `echo hi | cat`, multi-stage pipe chains, EOF propagation
 
+Current implementation snapshot:
+
+- syscall ID wired: `pipe=38`
+- pipe fds use shared in-kernel ring buffers with read/write endpoints
+- fd inheritance works through the existing `vfork` fd-table clone path, with pipe endpoint refcounts adjusted during clone/dup/close
+- EOF and `EPIPE` are implemented for closed peer endpoints
+- nonblocking empty reads/full writes return `EAGAIN`
+- `poll/select` readiness covers readable data/EOF and writable capacity
+- `fdtest` covers same-task pipe read/write, `poll`, `fstat`, nonblocking read, EOF, and `EPIPE`
+- userspace smoke binaries are built:
+  - `/bin/cat`
+  - `/bin/pipe_exec` for `vfork + pipe + dup2 + execve("/bin/echo") + execve("/bin/cat")`
+- init shell command `upipe [count]` runs `/bin/pipe_exec`
+
+Validation:
+
+- install user ELFs into `disk.img` with `PATH=/opt/homebrew/opt/e2fsprogs/sbin:$PATH bash user/install_m1_to_disk.sh`
+- smoke via init commands: `uvfork`, `upipe`, `fdtest`
+
 ## M3 - Filesystem APIs Needed by Shell/Core Applets
 
 Deliverables:
@@ -137,6 +153,14 @@ Exit criteria:
 
 - BusyBox applets `cd/pwd/ls/cat` work on ext4 tree
 
+Current implementation snapshot:
+
+- syscall IDs wired: `lseek=30`, `stat=32`, `fstat=33`, `getdents=34`, `access=35`, `chdir=36`, `getcwd=37`
+- cwd is tracked per task and inherited by `sched_spawn`/`vfork`
+- relative paths are resolved for `open/stat/access/execve/chdir`
+- ext4 directory fds can be opened read-only and enumerated through `getdents`
+- `fdtest` covers cwd changes, `getcwd` buffer sizing, relative `open/stat/access`, metadata, directory enumeration, and `lseek`
+
 ## M4 - Signals and TTY Minimum for Interactive `sh`
 
 Deliverables:
@@ -153,6 +177,19 @@ Kernel work:
 Exit criteria:
 
 - `Ctrl-C` interrupts foreground command without killing the shell
+
+Current implementation snapshot:
+
+- syscall ID wired: `ioctl=39`
+- tty fds support `TCGETS`, `TCSETS`, `TCSETSW`, `TCSETSF`, and `TIOCGWINSZ`
+- termios local flags map to existing console `ISIG/ICANON/ECHO`
+- non-tty fds return `ENOTTY`; closed fds return `EBADF`
+- `fdtest` covers termios get/set, fixed winsize query, and errno paths
+- syscall IDs wired: `sigaction=40`, `sigprocmask=41`, `kill=42`
+- signal dispositions and masks are tracked per task; `vfork` children inherit dispositions/mask
+- `kill(pid, sig)` implements existence checks, ignored signals, and default terminate behavior for concrete task pids
+- userspace handler delivery is not wired yet, so caught handlers are recorded but not invoked
+- `fdtest` covers ignored self-signal, invalid uncatchable actions, mask block/unblock, missing pid, and child termination
 
 ## M5 - BusyBox Integration and Rootfs Layout
 
@@ -195,13 +232,14 @@ Must-have for BusyBox `sh` v1:
 - `read`, `write`, `open`
 - `chdir`, `getcwd`
 - `stat`, `fstat`, `getdents`, `lseek`
-- `sigaction`, `sigprocmask`, `kill`
+- `sigaction`, `sigprocmask`, `kill` minimum syscall surface
+- `ioctl(TCGETS/TCSETS/TIOCGWINSZ)`
 
 Should-have next (coreutils expansion):
 
 - `rename`, `unlink`, `mkdir`, `rmdir`
 - `link`, `symlink`, `readlink`
-- `umask`, `access`, `isatty/ioctl` polish
+- `umask`, `isatty/ioctl` polish beyond the current terminal subset
 
 Later:
 

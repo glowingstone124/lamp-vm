@@ -1,10 +1,18 @@
 # Userspace Bootstrap
 
-Build static user hello ELF:
+Build static user ELFs:
 
 ```bash
 bash user/build.sh
 ```
+
+Install the current smoke set into `disk.img`:
+
+```bash
+bash user/install_m1_to_disk.sh
+```
+
+This requires `debugfs` from e2fsprogs.
 
 Output:
 

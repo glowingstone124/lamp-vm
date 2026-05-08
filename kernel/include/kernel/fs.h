@@ -21,8 +21,32 @@ enum {
     FS_BACKEND_EXT4 = 1u
 };
 
+typedef struct fs_stat {
+    uint32_t st_dev;
+    uint32_t st_ino;
+    uint32_t st_mode;
+    uint32_t st_nlink;
+    uint32_t st_uid;
+    uint32_t st_gid;
+    uint32_t st_rdev;
+    uint32_t st_size;
+    uint32_t st_blksize;
+    uint32_t st_blocks;
+} fs_stat_t;
+
+typedef struct fs_dirent {
+    uint32_t d_ino;
+    uint32_t d_off;
+    uint32_t d_reclen;
+    uint32_t d_type;
+    char d_name[256];
+} fs_dirent_t;
+
 void fs_init(void);
 int fs_open(const char *path, uint32_t flags);
+int fs_stat(const char *path, fs_stat_t *st);
+int fs_fstat(int32_t fd, fs_stat_t *st);
+int fs_getdents(int32_t fd, fs_dirent_t *dst, uint32_t len);
 int fs_read(int32_t fd, uint8_t *dst, uint32_t len);
 int fs_write(int32_t fd, const uint8_t *src, uint32_t len);
 

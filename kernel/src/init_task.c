@@ -261,6 +261,31 @@ static void init_run_uvfork(uint32_t count) {
     }
 }
 
+static void init_run_upipe(uint32_t count) {
+    static const char *const argv[] = {"/bin/pipe_exec", 0};
+    if (count == 0u) {
+        init_puts("upipe count must be >= 1\n");
+        return;
+    }
+    for (uint32_t i = 0u; i < count; i++) {
+        int32_t tid = user_exec_spawn_path("/bin/pipe_exec", argv, 0);
+        if (tid < 0) {
+            init_report_spawn_failed("upipe", tid, "/bin/pipe_exec");
+            return;
+        }
+        init_puts("upipe tid=");
+        kprint_hex32((uint32_t)tid);
+        if (count > 1u) {
+            init_puts(" run=");
+            kprint_hex32(i + 1u);
+            init_puts("/");
+            kprint_hex32(count);
+        }
+        init_puts("\n");
+        init_wait_child_and_report_tag("upipe", tid);
+    }
+}
+
 static void init_handle_cmd(char *line) {
     while (*line == ' ') {
         line++;
@@ -282,6 +307,7 @@ static void init_handle_cmd(char *line) {
         init_puts("  fdtest\n");
         init_puts("  uhello [count]\n");
         init_puts("  uvfork [count]\n");
+        init_puts("  upipe [count]\n");
         init_puts("  halt\n");
         return;
     }
@@ -325,6 +351,10 @@ static void init_handle_cmd(char *line) {
         init_run_uvfork(1u);
         return;
     }
+    if (init_streq(line, "upipe")) {
+        init_run_upipe(1u);
+        return;
+    }
     if (init_starts_with(line, "uhello ")) {
         uint32_t count = 0u;
         if (!init_parse_u32(line + 7, &count)) {
@@ -341,6 +371,15 @@ static void init_handle_cmd(char *line) {
             return;
         }
         init_run_uvfork(count);
+        return;
+    }
+    if (init_starts_with(line, "upipe ")) {
+        uint32_t count = 0u;
+        if (!init_parse_u32(line + 6, &count)) {
+            init_puts("usage: upipe [count]\n");
+            return;
+        }
+        init_run_upipe(count);
         return;
     }
     if (init_starts_with(line, "log ")) {

@@ -28,22 +28,30 @@ enum {
 };
 
 enum {
+    ERRNO_EPERM = 1u,
     ERRNO_ENOENT = 2u,
+    ERRNO_ESRCH = 3u,
     ERRNO_OK = 0u,
     ERRNO_EINTR = 4u,
     ERRNO_EIO = 5u,
     ERRNO_EBADF = 9u,
     ERRNO_ECHILD = 10u,
     ERRNO_EAGAIN = 11u,
+    ERRNO_EACCES = 13u,
     ERRNO_ENOMEM = 12u,
     ERRNO_EFAULT = 14u,
     ERRNO_EBUSY = 16u,
     ERRNO_ENOTDIR = 20u,
     ERRNO_EISDIR = 21u,
     ERRNO_EMFILE = 24u,
+    ERRNO_ENOTTY = 25u,
     ERRNO_ENOSPC = 28u,
+    ERRNO_ESPIPE = 29u,
     ERRNO_EROFS = 30u,
+    ERRNO_EPIPE = 32u,
     ERRNO_EINVAL = 22u,
+    ERRNO_ERANGE = 34u,
+    ERRNO_ENAMETOOLONG = 36u,
     ERRNO_ENOTSOCK = 88u,
     ERRNO_EOPNOTSUPP = 95u,
     ERRNO_EAFNOSUPPORT = 97u,
@@ -85,7 +93,11 @@ enum {
     SOCK_AF_INET6 = 10u,
     SOCK_NONBLOCK = 0x00000800u,
     SYSCALL_EXEC_MAX_ARGV = 16u,
-    SYSCALL_EXEC_MAX_ENVP = 16u
+    SYSCALL_EXEC_MAX_ENVP = 16u,
+    TERMIOS_CC_VINTR = 0u,
+    TERMIOS_CC_VERASE = 2u,
+    TERMIOS_CC_VKILL = 3u,
+    TERMIOS_CC_VEOF = 4u
 };
 
 static uint32_t g_realtime_offset_neg;
@@ -191,6 +203,143 @@ static inline uint32_t abi_user_read_cstr(uint32_t addr, char *dst, uint32_t cap
         }
     }
     return 0u;
+}
+
+static uint32_t kstr_len_cap(const char *s, uint32_t cap) {
+    uint32_t n = 0u;
+    if (!s) {
+        return 0u;
+    }
+    while (n < cap && s[n] != '\0') {
+        n++;
+    }
+    return n;
+}
+
+static int path_append_char(char *dst, uint32_t *len, char c) {
+    if (!dst || !len || *len + 1u >= FS_PATH_CAP) {
+        return -1;
+    }
+    dst[*len] = c;
+    *len += 1u;
+    dst[*len] = '\0';
+    return 0;
+}
+
+static int path_append_component(char *dst, uint32_t *len, const char *comp, uint32_t comp_len) {
+    if (!dst || !len || !comp) {
+        return -1;
+    }
+    if (comp_len == 0u || (comp_len == 1u && comp[0] == '.')) {
+        return 0;
+    }
+    if (comp_len == 2u && comp[0] == '.' && comp[1] == '.') {
+        if (*len > 1u) {
+            while (*len > 1u && dst[*len - 1u] != '/') {
+                *len -= 1u;
+            }
+            if (*len > 1u) {
+                *len -= 1u;
+            }
+            dst[*len] = '\0';
+        }
+        return 0;
+    }
+    if (*len > 1u && path_append_char(dst, len, '/') != 0) {
+        return -1;
+    }
+    for (uint32_t i = 0u; i < comp_len; i++) {
+        if (path_append_char(dst, len, comp[i]) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int path_normalize_absolute(const char *input, char *out) {
+    uint32_t in_len;
+    uint32_t out_len = 1u;
+    uint32_t pos = 1u;
+    if (!input || !out || input[0] != '/') {
+        return -1;
+    }
+    in_len = kstr_len_cap(input, FS_PATH_CAP);
+    if (in_len == 0u || in_len >= FS_PATH_CAP) {
+        return -1;
+    }
+    out[0] = '/';
+    out[1] = '\0';
+    while (pos <= in_len) {
+        uint32_t start;
+        uint32_t comp_len;
+        while (pos < in_len && input[pos] == '/') {
+            pos++;
+        }
+        start = pos;
+        while (pos < in_len && input[pos] != '/') {
+            pos++;
+        }
+        comp_len = pos - start;
+        if (path_append_component(out, &out_len, &input[start], comp_len) != 0) {
+            return -1;
+        }
+        if (pos >= in_len) {
+            break;
+        }
+    }
+    return 0;
+}
+
+static int syscall_resolve_path(const char *path, char *out) {
+    char combined[FS_PATH_CAP];
+    uint32_t len;
+    uint32_t i = 0u;
+    if (!path || path[0] == '\0' || !out) {
+        return -1;
+    }
+    if (path[0] == '/') {
+        return path_normalize_absolute(path, out);
+    }
+    if (sched_current_getcwd(combined, (uint32_t)sizeof(combined)) != 0) {
+        return -1;
+    }
+    len = kstr_len_cap(combined, (uint32_t)sizeof(combined));
+    if (len == 0u || len >= FS_PATH_CAP) {
+        return -1;
+    }
+    if (len > 1u && path_append_char(combined, &len, '/') != 0) {
+        return -1;
+    }
+    while (path[i] != '\0') {
+        if (path_append_char(combined, &len, path[i]) != 0) {
+            return -1;
+        }
+        i++;
+    }
+    return path_normalize_absolute(combined, out);
+}
+
+static uint32_t syscall_read_resolved_path(uint32_t path_addr, char *out, uint32_t *err_out) {
+    char raw[FS_PATH_CAP];
+    if (!abi_user_read_cstr(path_addr, raw, (uint32_t)sizeof(raw))) {
+        if (err_out) {
+            *err_out = ERRNO_EFAULT;
+        }
+        return 0u;
+    }
+    if (raw[0] == '\0') {
+        if (err_out) {
+            *err_out = ERRNO_ENOENT;
+        }
+        return 0u;
+    }
+    if (syscall_resolve_path(raw, out) != 0) {
+        if (err_out) {
+            *err_out = ERRNO_ENAMETOOLONG;
+        }
+        return 0u;
+    }
+    return 1u;
 }
 
 static inline uint32_t abi_user_read_timespec(uint32_t addr, syscall_timespec32_t *out) {
@@ -323,6 +472,9 @@ static inline uint32_t fd_read_ready(int32_t fd) {
     if (t == SCHED_FD_TYPE_REGULAR) {
         return 1u;
     }
+    if (t == SCHED_FD_TYPE_PIPE_READ) {
+        return sched_fd_pipe_read_ready(fd);
+    }
     return 0u;
 }
 
@@ -334,7 +486,55 @@ static inline uint32_t fd_write_ready(int32_t fd) {
     if (t == SCHED_FD_TYPE_SOCKET) {
         return 0u;
     }
+    if (t == SCHED_FD_TYPE_PIPE_WRITE) {
+        return sched_fd_pipe_write_ready(fd);
+    }
     return 1u;
+}
+
+static uint32_t termios_lflag_from_console(uint32_t console_lflag) {
+    uint32_t lflag = 0u;
+    if ((console_lflag & TTY_LFLAG_ISIG) != 0u) {
+        lflag |= SYS_TERMIOS_ISIG;
+    }
+    if ((console_lflag & TTY_LFLAG_ICANON) != 0u) {
+        lflag |= SYS_TERMIOS_ICANON;
+    }
+    if ((console_lflag & TTY_LFLAG_ECHO) != 0u) {
+        lflag |= SYS_TERMIOS_ECHO;
+    }
+    return lflag;
+}
+
+static uint32_t console_lflag_from_termios(uint32_t lflag) {
+    uint32_t console_lflag = 0u;
+    if ((lflag & SYS_TERMIOS_ISIG) != 0u) {
+        console_lflag |= TTY_LFLAG_ISIG;
+    }
+    if ((lflag & SYS_TERMIOS_ICANON) != 0u) {
+        console_lflag |= TTY_LFLAG_ICANON;
+    }
+    if ((lflag & SYS_TERMIOS_ECHO) != 0u) {
+        console_lflag |= TTY_LFLAG_ECHO;
+    }
+    return console_lflag;
+}
+
+static void termios_fill(syscall_termios32_t *t) {
+    if (!t) {
+        return;
+    }
+    t->c_iflag = 0u;
+    t->c_oflag = 0u;
+    t->c_cflag = 0u;
+    t->c_lflag = termios_lflag_from_console(console_tty_get_lflag());
+    for (uint32_t i = 0u; i < SYS_TERMIOS_NCCS; i++) {
+        t->c_cc[i] = 0u;
+    }
+    t->c_cc[TERMIOS_CC_VINTR] = 0x03u;
+    t->c_cc[TERMIOS_CC_VERASE] = 0x7Fu;
+    t->c_cc[TERMIOS_CC_VKILL] = 0x15u;
+    t->c_cc[TERMIOS_CC_VEOF] = 0x04u;
 }
 
 static uint32_t errno_from_sched_fd_rc(int rc) {
@@ -346,6 +546,28 @@ static uint32_t errno_from_sched_fd_rc(int rc) {
     }
     if (rc == SCHED_FD_EINVAL) {
         return ERRNO_EINVAL;
+    }
+    if (rc == SCHED_FD_ESPIPE) {
+        return ERRNO_ESPIPE;
+    }
+    if (rc == SCHED_FD_EAGAIN) {
+        return ERRNO_EAGAIN;
+    }
+    if (rc == SCHED_FD_EPIPE) {
+        return ERRNO_EPIPE;
+    }
+    return ERRNO_EINVAL;
+}
+
+static uint32_t errno_from_sched_signal_rc(int rc) {
+    if (rc == SCHED_SIGNAL_EINVAL) {
+        return ERRNO_EINVAL;
+    }
+    if (rc == SCHED_SIGNAL_ESRCH) {
+        return ERRNO_ESRCH;
+    }
+    if (rc == SCHED_SIGNAL_EPERM) {
+        return ERRNO_EPERM;
     }
     return ERRNO_EINVAL;
 }
@@ -544,6 +766,9 @@ uint32_t syscall_dispatch(const syscall_regs_t *regs) {
         case SYS_GETPID:
             ret = (uint32_t)sched_current_tid();
             break;
+        case SYS_GETPPID:
+            ret = (uint32_t)sched_current_ppid();
+            break;
         case SYS_YIELD:
             sched_yield();
             ret = 0u;
@@ -727,6 +952,51 @@ uint32_t syscall_dispatch(const syscall_regs_t *regs) {
                 ret = (uint32_t)-1;
                 break;
             }
+            if (t == SCHED_FD_TYPE_PIPE_READ) {
+                while (copied < len) {
+                    uint32_t remain = len - copied;
+                    uint32_t want = (remain > (uint32_t)sizeof(byte_buf)) ? (uint32_t)sizeof(byte_buf) : remain;
+                    int n = sched_fd_pipe_read(fd, byte_buf, want);
+                    if (n == SCHED_FD_EAGAIN) {
+                        if (copied != 0u) {
+                            ret = copied;
+                            break;
+                        }
+                        if (nonblock) {
+                            err = ERRNO_EAGAIN;
+                            ret = (uint32_t)-1;
+                            break;
+                        }
+                        sched_sleep_ticks(1u);
+                        sched_block_until_runnable();
+                        continue;
+                    }
+                    if (n < 0) {
+                        if (copied != 0u) {
+                            ret = copied;
+                        } else {
+                            err = errno_from_sched_fd_rc(n);
+                            ret = (uint32_t)-1;
+                        }
+                        break;
+                    }
+                    if (n == 0) {
+                        ret = copied;
+                        break;
+                    }
+                    if (!abi_user_write_bytes(buf_addr + copied, byte_buf, (uint32_t)n)) {
+                        err = ERRNO_EFAULT;
+                        ret = (uint32_t)-1;
+                        break;
+                    }
+                    copied += (uint32_t)n;
+                    ret = copied;
+                    if ((uint32_t)n < want) {
+                        break;
+                    }
+                }
+                break;
+            }
             if (t == SCHED_FD_TYPE_REGULAR) {
                 while (copied < len) {
                     uint32_t remain = len - copied;
@@ -834,6 +1104,50 @@ uint32_t syscall_dispatch(const syscall_regs_t *regs) {
             if (t == SCHED_FD_TYPE_SOCKET) {
                 err = ERRNO_ENOTCONN;
                 ret = (uint32_t)-1;
+                break;
+            }
+            if (t == SCHED_FD_TYPE_PIPE_WRITE) {
+                uint32_t nonblock = fd_is_nonblock(fd);
+                while (total < len) {
+                    uint32_t remain = len - total;
+                    uint32_t want = (remain > (uint32_t)sizeof(byte_buf)) ? (uint32_t)sizeof(byte_buf) : remain;
+                    int n;
+
+                    if (!abi_user_read_bytes(buf_addr + total, byte_buf, want)) {
+                        err = ERRNO_EFAULT;
+                        ret = (uint32_t)-1;
+                        break;
+                    }
+                    n = sched_fd_pipe_write(fd, byte_buf, want);
+                    if (n == SCHED_FD_EAGAIN) {
+                        if (total != 0u) {
+                            ret = total;
+                            break;
+                        }
+                        if (nonblock) {
+                            err = ERRNO_EAGAIN;
+                            ret = (uint32_t)-1;
+                            break;
+                        }
+                        sched_sleep_ticks(1u);
+                        sched_block_until_runnable();
+                        continue;
+                    }
+                    if (n < 0) {
+                        if (total != 0u) {
+                            ret = total;
+                        } else {
+                            err = errno_from_sched_fd_rc(n);
+                            ret = (uint32_t)-1;
+                        }
+                        break;
+                    }
+                    total += (uint32_t)n;
+                    ret = total;
+                    if ((uint32_t)n < want) {
+                        break;
+                    }
+                }
                 break;
             }
             if (t == SCHED_FD_TYPE_REGULAR) {
@@ -985,8 +1299,7 @@ uint32_t syscall_dispatch(const syscall_regs_t *regs) {
                 ret = (uint32_t)-1;
                 break;
             }
-            if (!abi_user_read_cstr(path_addr, path, (uint32_t)sizeof(path))) {
-                err = ERRNO_EFAULT;
+            if (!syscall_read_resolved_path(path_addr, path, &err)) {
                 ret = (uint32_t)-1;
                 break;
             }
@@ -997,6 +1310,222 @@ uint32_t syscall_dispatch(const syscall_regs_t *regs) {
                 break;
             }
             ret = (uint32_t)rc;
+            break;
+        }
+        case SYS_PIPE: {
+            uint32_t pipefd_addr = regs->arg0;
+            int rc;
+
+            if (pipefd_addr == 0u || !abi_ptr_range_ok(pipefd_addr, 8u)) {
+                err = ERRNO_EFAULT;
+                ret = (uint32_t)-1;
+                break;
+            }
+            rc = sched_fd_pipe(pipefd_addr);
+            if (rc != SCHED_FD_OK) {
+                err = errno_from_sched_fd_rc(rc);
+                ret = (uint32_t)-1;
+                break;
+            }
+            ret = 0u;
+            break;
+        }
+        case SYS_STAT: {
+            uint32_t path_addr = regs->arg0;
+            uint32_t stat_addr = regs->arg1;
+            fs_stat_t st;
+            int rc;
+            char path[FS_PATH_CAP];
+
+            if (!syscall_read_resolved_path(path_addr, path, &err)) {
+                ret = (uint32_t)-1;
+                break;
+            }
+            if (stat_addr == 0u || !abi_ptr_range_ok(stat_addr, (uint32_t)sizeof(st))) {
+                err = ERRNO_EFAULT;
+                ret = (uint32_t)-1;
+                break;
+            }
+            rc = fs_stat(path, &st);
+            if (rc != 0) {
+                err = errno_from_fs_rc(rc);
+                ret = (uint32_t)-1;
+                break;
+            }
+            if (!abi_user_write_bytes(stat_addr, (const uint8_t *)&st, (uint32_t)sizeof(st))) {
+                err = ERRNO_EFAULT;
+                ret = (uint32_t)-1;
+                break;
+            }
+            ret = 0u;
+            break;
+        }
+        case SYS_FSTAT: {
+            uint32_t stat_addr = regs->arg1;
+            fs_stat_t st;
+            int rc;
+
+            if (stat_addr == 0u || !abi_ptr_range_ok(stat_addr, (uint32_t)sizeof(st))) {
+                err = ERRNO_EFAULT;
+                ret = (uint32_t)-1;
+                break;
+            }
+            rc = fs_fstat((int32_t)regs->arg0, &st);
+            if (rc != 0) {
+                err = errno_from_fs_rc(rc);
+                ret = (uint32_t)-1;
+                break;
+            }
+            if (!abi_user_write_bytes(stat_addr, (const uint8_t *)&st, (uint32_t)sizeof(st))) {
+                err = ERRNO_EFAULT;
+                ret = (uint32_t)-1;
+                break;
+            }
+            ret = 0u;
+            break;
+        }
+        case SYS_GETDENTS: {
+            int32_t fd = (int32_t)regs->arg0;
+            uint32_t dirp_addr = regs->arg1;
+            uint32_t len = regs->arg2;
+            uint32_t total = 0u;
+            fs_dirent_t dent;
+
+            if (len == 0u) {
+                ret = 0u;
+                break;
+            }
+            if (dirp_addr == 0u || !abi_ptr_range_ok(dirp_addr, len)) {
+                err = ERRNO_EFAULT;
+                ret = (uint32_t)-1;
+                break;
+            }
+            while (total + (uint32_t)sizeof(dent) <= len) {
+                int rc = fs_getdents(fd, &dent, (uint32_t)sizeof(dent));
+                if (rc < 0) {
+                    if (total != 0u) {
+                        ret = total;
+                    } else {
+                        err = errno_from_fs_rc(rc);
+                        ret = (uint32_t)-1;
+                    }
+                    break;
+                }
+                if (rc == 0) {
+                    ret = total;
+                    break;
+                }
+                if (!abi_user_write_bytes(dirp_addr + total, (const uint8_t *)&dent, (uint32_t)rc)) {
+                    err = ERRNO_EFAULT;
+                    ret = (uint32_t)-1;
+                    break;
+                }
+                total += (uint32_t)rc;
+                ret = total;
+            }
+            if (total == 0u && len < (uint32_t)sizeof(dent) && err == ERRNO_OK) {
+                err = ERRNO_EINVAL;
+                ret = (uint32_t)-1;
+            }
+            break;
+        }
+        case SYS_ACCESS: {
+            uint32_t path_addr = regs->arg0;
+            uint32_t mode = regs->arg1;
+            fs_stat_t st;
+            int rc;
+            char path[FS_PATH_CAP];
+
+            if ((mode & ~(SYS_R_OK | SYS_W_OK | SYS_X_OK)) != 0u) {
+                err = ERRNO_EINVAL;
+                ret = (uint32_t)-1;
+                break;
+            }
+            if (!syscall_read_resolved_path(path_addr, path, &err)) {
+                ret = (uint32_t)-1;
+                break;
+            }
+            rc = fs_stat(path, &st);
+            if (rc != 0) {
+                err = errno_from_fs_rc(rc);
+                ret = (uint32_t)-1;
+                break;
+            }
+            if ((mode & SYS_R_OK) != 0u && (st.st_mode & 0444u) == 0u) {
+                err = ERRNO_EACCES;
+                ret = (uint32_t)-1;
+                break;
+            }
+            if ((mode & SYS_W_OK) != 0u && (st.st_mode & 0222u) == 0u) {
+                err = ERRNO_EACCES;
+                ret = (uint32_t)-1;
+                break;
+            }
+            if ((mode & SYS_X_OK) != 0u && (st.st_mode & 0111u) == 0u) {
+                err = ERRNO_EACCES;
+                ret = (uint32_t)-1;
+                break;
+            }
+            ret = 0u;
+            break;
+        }
+        case SYS_CHDIR: {
+            uint32_t path_addr = regs->arg0;
+            fs_stat_t st;
+            int rc;
+            char path[FS_PATH_CAP];
+
+            if (!syscall_read_resolved_path(path_addr, path, &err)) {
+                ret = (uint32_t)-1;
+                break;
+            }
+            rc = fs_stat(path, &st);
+            if (rc != 0) {
+                err = errno_from_fs_rc(rc);
+                ret = (uint32_t)-1;
+                break;
+            }
+            if ((st.st_mode & SYS_S_IFMT) != SYS_S_IFDIR) {
+                err = ERRNO_ENOTDIR;
+                ret = (uint32_t)-1;
+                break;
+            }
+            if (sched_current_setcwd(path) != 0) {
+                err = ERRNO_EINVAL;
+                ret = (uint32_t)-1;
+                break;
+            }
+            ret = 0u;
+            break;
+        }
+        case SYS_GETCWD: {
+            uint32_t buf_addr = regs->arg0;
+            uint32_t size = regs->arg1;
+            char cwd[FS_PATH_CAP];
+            uint32_t len;
+
+            if (buf_addr == 0u || size == 0u || !abi_ptr_range_ok(buf_addr, size)) {
+                err = ERRNO_EFAULT;
+                ret = (uint32_t)-1;
+                break;
+            }
+            if (sched_current_getcwd(cwd, (uint32_t)sizeof(cwd)) != 0) {
+                err = ERRNO_EINVAL;
+                ret = (uint32_t)-1;
+                break;
+            }
+            len = kstr_len_cap(cwd, (uint32_t)sizeof(cwd));
+            if (len + 1u > size) {
+                err = ERRNO_ERANGE;
+                ret = (uint32_t)-1;
+                break;
+            }
+            if (!abi_user_write_bytes(buf_addr, (const uint8_t *)cwd, len + 1u)) {
+                err = ERRNO_EFAULT;
+                ret = (uint32_t)-1;
+                break;
+            }
+            ret = buf_addr;
             break;
         }
         case SYS_SOCKET: {
@@ -1029,6 +1558,137 @@ uint32_t syscall_dispatch(const syscall_regs_t *regs) {
             ret = (uint32_t)rc;
             break;
         }
+        case SYS_IOCTL: {
+            int32_t fd = (int32_t)regs->arg0;
+            uint32_t request = regs->arg1;
+            uint32_t arg_addr = regs->arg2;
+
+            if (!sched_fd_is_open(fd)) {
+                err = ERRNO_EBADF;
+                ret = (uint32_t)-1;
+                break;
+            }
+            if (!sched_fd_is_tty(fd)) {
+                err = ERRNO_ENOTTY;
+                ret = (uint32_t)-1;
+                break;
+            }
+
+            if (request == SYS_IOCTL_TCGETS) {
+                syscall_termios32_t termios;
+                termios_fill(&termios);
+                if (!abi_user_write_bytes(arg_addr, (const uint8_t *)&termios, (uint32_t)sizeof(termios))) {
+                    err = ERRNO_EFAULT;
+                    ret = (uint32_t)-1;
+                    break;
+                }
+                ret = 0u;
+                break;
+            }
+
+            if (request == SYS_IOCTL_TCSETS ||
+                request == SYS_IOCTL_TCSETSW ||
+                request == SYS_IOCTL_TCSETSF) {
+                syscall_termios32_t termios;
+                if (!abi_user_read_bytes(arg_addr, (uint8_t *)&termios, (uint32_t)sizeof(termios))) {
+                    err = ERRNO_EFAULT;
+                    ret = (uint32_t)-1;
+                    break;
+                }
+                (void)console_tty_set_lflag(console_lflag_from_termios(termios.c_lflag));
+                ret = 0u;
+                break;
+            }
+
+            if (request == SYS_IOCTL_TIOCGWINSZ) {
+                syscall_winsize32_t ws;
+                ws.ws_row = 30u;
+                ws.ws_col = 80u;
+                ws.ws_xpixel = 640u;
+                ws.ws_ypixel = 480u;
+                if (!abi_user_write_bytes(arg_addr, (const uint8_t *)&ws, (uint32_t)sizeof(ws))) {
+                    err = ERRNO_EFAULT;
+                    ret = (uint32_t)-1;
+                    break;
+                }
+                ret = 0u;
+                break;
+            }
+
+            err = ERRNO_ENOTTY;
+            ret = (uint32_t)-1;
+            break;
+        }
+        case SYS_SIGACTION: {
+            uint32_t sig = regs->arg0;
+            uint32_t act_addr = regs->arg1;
+            uint32_t oldact_addr = regs->arg2;
+            sched_sigaction32_t act;
+            sched_sigaction32_t oldact;
+            sched_sigaction32_t *actp = 0;
+            sched_sigaction32_t *oldactp = oldact_addr ? &oldact : 0;
+            int rc;
+
+            if (act_addr != 0u) {
+                if (!abi_user_read_bytes(act_addr, (uint8_t *)&act, (uint32_t)sizeof(act))) {
+                    err = ERRNO_EFAULT;
+                    ret = (uint32_t)-1;
+                    break;
+                }
+                actp = &act;
+            }
+            rc = sched_signal_action(sig, actp, oldactp);
+            if (rc != SCHED_SIGNAL_OK) {
+                err = errno_from_sched_signal_rc(rc);
+                ret = (uint32_t)-1;
+                break;
+            }
+            if (oldact_addr != 0u &&
+                !abi_user_write_bytes(oldact_addr, (const uint8_t *)&oldact, (uint32_t)sizeof(oldact))) {
+                err = ERRNO_EFAULT;
+                ret = (uint32_t)-1;
+                break;
+            }
+            ret = 0u;
+            break;
+        }
+        case SYS_SIGPROCMASK: {
+            uint32_t how = regs->arg0;
+            uint32_t set_addr = regs->arg1;
+            uint32_t oldset_addr = regs->arg2;
+            uint32_t set = 0u;
+            uint32_t oldset = 0u;
+            int rc;
+
+            if (set_addr != 0u && !abi_user_read32(set_addr, &set)) {
+                err = ERRNO_EFAULT;
+                ret = (uint32_t)-1;
+                break;
+            }
+            rc = sched_signal_mask(set_addr ? how : SYS_SIG_BLOCK, set, oldset_addr ? &oldset : 0);
+            if (rc != SCHED_SIGNAL_OK) {
+                err = errno_from_sched_signal_rc(rc);
+                ret = (uint32_t)-1;
+                break;
+            }
+            if (oldset_addr != 0u && !abi_user_write32(oldset_addr, oldset)) {
+                err = ERRNO_EFAULT;
+                ret = (uint32_t)-1;
+                break;
+            }
+            ret = 0u;
+            break;
+        }
+        case SYS_KILL: {
+            int rc = sched_signal_kill((int32_t)regs->arg0, regs->arg1);
+            if (rc != SCHED_SIGNAL_OK) {
+                err = errno_from_sched_signal_rc(rc);
+                ret = (uint32_t)-1;
+                break;
+            }
+            ret = 0u;
+            break;
+        }
         case SYS_EXECVE: {
             uint32_t path_addr = regs->arg0;
             uint32_t argv_addr = regs->arg1;
@@ -1040,8 +1700,7 @@ uint32_t syscall_dispatch(const syscall_regs_t *regs) {
             const char *envp_vec[SYSCALL_EXEC_MAX_ENVP + 1u];
             int rc;
 
-            if (!abi_user_read_cstr(path_addr, path, (uint32_t)sizeof(path))) {
-                err = ERRNO_EFAULT;
+            if (!syscall_read_resolved_path(path_addr, path, &err)) {
                 ret = (uint32_t)-1;
                 break;
             }
@@ -1078,6 +1737,17 @@ uint32_t syscall_dispatch(const syscall_regs_t *regs) {
                 break;
             }
             ret = (uint32_t)rc;
+            break;
+        }
+        case SYS_LSEEK: {
+            uint32_t new_offset = 0u;
+            int rc = sched_fd_lseek((int32_t)regs->arg0, (int32_t)regs->arg1, regs->arg2, &new_offset);
+            if (rc != SCHED_FD_OK) {
+                err = errno_from_sched_fd_rc(rc);
+                ret = (uint32_t)-1;
+                break;
+            }
+            ret = new_offset;
             break;
         }
         case SYS_CONNECT:

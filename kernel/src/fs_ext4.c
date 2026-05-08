@@ -369,6 +369,10 @@ static inline uint16_t ext4_inode_mode(const uint8_t *inode) {
     return rd_le16(&inode[0x00u]);
 }
 
+static inline uint16_t ext4_inode_links_count(const uint8_t *inode) {
+    return rd_le16(&inode[0x1Au]);
+}
+
 static inline uint32_t ext4_inode_flags(const uint8_t *inode) {
     return rd_le32(&inode[0x20u]);
 }
@@ -1140,12 +1144,167 @@ int fs_ext4_open(const char *path, uint32_t flags) {
         return rc;
     }
     if ((mode & EXT4_S_IFMT) == EXT4_S_IFDIR) {
-        return FS_ERR_ISDIR;
+        if (accmode != SYS_O_RDONLY || (flags & SYS_O_TRUNC) != 0u) {
+            return FS_ERR_ISDIR;
+        }
+        return sched_fd_open_regular(status_flags, FS_BACKEND_EXT4, ino, size, 1u);
     }
     if ((mode & EXT4_S_IFMT) != EXT4_S_IFREG) {
         return FS_ERR_INVAL;
     }
     return sched_fd_open_regular(status_flags, FS_BACKEND_EXT4, ino, size, 0u);
+}
+
+int fs_ext4_stat(const char *path, fs_stat_t *st) {
+    uint32_t ino = 0u;
+    uint32_t size = 0u;
+    uint16_t mode = 0u;
+    uint16_t links = 1u;
+    int rc;
+
+    if (!path || path[0] != '/' || !st) {
+        return FS_ERR_INVAL;
+    }
+
+    ext4_mutex_lock();
+    rc = ext4_try_probe_locked();
+    if (rc == 0) {
+        rc = ext4_lookup_path_locked(path, &ino, &mode, &size);
+        if (rc == 0) {
+            links = ext4_inode_links_count(g_inode_buf);
+        }
+    }
+    ext4_mutex_unlock();
+    if (rc != 0) {
+        return rc;
+    }
+
+    st->st_dev = FS_BACKEND_EXT4;
+    st->st_ino = ino;
+    st->st_mode = (uint32_t)mode;
+    st->st_nlink = links ? (uint32_t)links : 1u;
+    st->st_uid = 0u;
+    st->st_gid = 0u;
+    st->st_rdev = 0u;
+    st->st_size = size;
+    st->st_blksize = g_ext4.block_size ? g_ext4.block_size : 4096u;
+    st->st_blocks = (size + 511u) / 512u;
+    return 0;
+}
+
+static uint32_t ext4_dirent_type_to_sys(uint8_t type) {
+    switch (type) {
+        case 1u:
+            return SYS_DT_REG;
+        case 2u:
+            return SYS_DT_DIR;
+        case 3u:
+            return SYS_DT_CHR;
+        case 6u:
+            return SYS_DT_SOCK;
+        default:
+            return SYS_DT_UNKNOWN;
+    }
+}
+
+int fs_ext4_getdents_fd(int32_t fd, fs_dirent_t *dst, uint32_t len) {
+    uint32_t backend = 0u;
+    uint32_t ino = 0u;
+    uint32_t size = 0u;
+    uint32_t off = 0u;
+    uint32_t is_dir = 0u;
+    uint32_t written = 0u;
+    uint32_t consumed = 0u;
+    int rc = 0;
+
+    if (!dst) {
+        return FS_ERR_INVAL;
+    }
+    if (len == 0u) {
+        return 0;
+    }
+    if (len < (uint32_t)sizeof(fs_dirent_t)) {
+        return FS_ERR_INVAL;
+    }
+    if (sched_fd_regular_get(fd, &backend, &ino, &size, &off, &is_dir) != SCHED_FD_OK) {
+        return FS_ERR_BADF;
+    }
+    if (backend != FS_BACKEND_EXT4) {
+        return FS_ERR_BADF;
+    }
+    if (is_dir == 0u) {
+        return FS_ERR_NOTDIR;
+    }
+    if (off >= size) {
+        return 0;
+    }
+
+    ext4_mutex_lock();
+    rc = ext4_try_probe_locked();
+    if (rc == 0) {
+        rc = ext4_read_inode_locked(ino, g_inode_buf);
+        if (rc == 0 && (ext4_inode_mode(g_inode_buf) & EXT4_S_IFMT) != EXT4_S_IFDIR) {
+            rc = FS_ERR_NOTDIR;
+        }
+    }
+    while (rc == 0 && off + consumed < size && written + (uint32_t)sizeof(fs_dirent_t) <= len) {
+        uint32_t cur = off + consumed;
+        uint32_t logical = cur / g_ext4.block_size;
+        uint32_t in_block = cur % g_ext4.block_size;
+        uint32_t pblock = 0u;
+        uint32_t ino_ent;
+        uint16_t rec_len;
+        uint8_t nlen;
+        uint8_t file_type;
+        fs_dirent_t *out = &dst[written / (uint32_t)sizeof(fs_dirent_t)];
+
+        if (in_block + 8u > g_ext4.block_size) {
+            consumed += g_ext4.block_size - in_block;
+            continue;
+        }
+        rc = ext4_inode_map_block_locked(g_inode_buf, logical, &pblock);
+        if (rc == FS_ERR_NOENT) {
+            consumed += g_ext4.block_size - in_block;
+            rc = 0;
+            continue;
+        }
+        if (rc != 0 || ext4_read_block_locked(pblock, g_io_block) != 0) {
+            rc = FS_ERR_IO;
+            break;
+        }
+
+        ino_ent = rd_le32(&g_io_block[in_block + 0u]);
+        rec_len = rd_le16(&g_io_block[in_block + 4u]);
+        nlen = g_io_block[in_block + 6u];
+        file_type = g_io_block[in_block + 7u];
+        if (rec_len < 8u || in_block + (uint32_t)rec_len > g_ext4.block_size) {
+            rc = FS_ERR_IO;
+            break;
+        }
+        consumed += (uint32_t)rec_len;
+        if (ino_ent == 0u || nlen == 0u) {
+            continue;
+        }
+        out->d_ino = ino_ent;
+        out->d_off = off + consumed;
+        out->d_reclen = (uint32_t)sizeof(fs_dirent_t);
+        out->d_type = ext4_dirent_type_to_sys(file_type);
+        for (uint32_t i = 0u; i < sizeof(out->d_name); i++) {
+            out->d_name[i] = '\0';
+        }
+        for (uint32_t i = 0u; i < (uint32_t)nlen; i++) {
+            out->d_name[i] = (char)g_io_block[in_block + 8u + i];
+        }
+        written += (uint32_t)sizeof(fs_dirent_t);
+    }
+    ext4_mutex_unlock();
+    if (rc != 0) {
+        return (written != 0u) ? (int)written : rc;
+    }
+    if (consumed != 0u) {
+        (void)sched_fd_regular_advance(fd, consumed, 0);
+    }
+    return (int)written;
 }
 
 int fs_ext4_read_fd(int32_t fd, uint8_t *dst, uint32_t len) {

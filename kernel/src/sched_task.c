@@ -26,6 +26,7 @@ static uint32_t sched_task_kind_normalize(uint32_t kind) {
 }
 
 static void sched_waitq_sleep_locked(sched_waitq_t *q, uint32_t timeout_ticks);
+static void sched_wake_slot(sched_task_slot_t *slot);
 
 static uint32_t sched_exec_state_normalize(uint32_t exec_state) {
     if (exec_state == SCHED_EXEC_STATE_KERNEL || exec_state == SCHED_EXEC_STATE_USER) {
@@ -46,6 +47,35 @@ static void sched_mem_set_u8(uint32_t dst_addr, uint8_t v, uint32_t len) {
     volatile uint8_t *dst = (volatile uint8_t *)(uintptr_t)dst_addr;
     for (uint32_t i = 0u; i < len; i++) {
         dst[i] = v;
+    }
+}
+
+static void sched_cwd_set_root(sched_task_slot_t *slot) {
+    if (!slot) {
+        return;
+    }
+    slot->cwd[0] = '/';
+    slot->cwd[1] = '\0';
+}
+
+static void sched_cwd_copy(char *dst, const char *src) {
+    uint32_t i = 0u;
+    if (!dst) {
+        return;
+    }
+    if (!src || src[0] == '\0') {
+        dst[0] = '/';
+        dst[1] = '\0';
+        return;
+    }
+    while (i + 1u < SCHED_CWD_CAP && src[i] != '\0') {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+    if (dst[0] != '/') {
+        dst[0] = '/';
+        dst[1] = '\0';
     }
 }
 
@@ -378,6 +408,12 @@ static int sched_vfork_trampoline(uint32_t abi_addr) {
     child->pub.wake_tick = 0u;
     child->pub.run_ticks = self->pub.run_ticks;
     child->pub.arg = 0;
+    sched_cwd_copy(child->cwd, self->cwd);
+    child->sig_mask = self->sig_mask;
+    child->sig_pending = 0u;
+    for (uint32_t sig = 0u; sig <= SCHED_SIGNAL_MAX; sig++) {
+        child->sig_action[sig] = self->sig_action[sig];
+    }
     child->syscall_abi_addr = self->syscall_abi_addr;
     child->vfork_resume_valid = 0u;
     if (g_next_tid == 0u) {
@@ -588,6 +624,63 @@ static uint32_t sched_task_is_child_of(const sched_task_slot_t *slot, int32_t pa
         return 1u;
     }
     return (slot->pub.tid == (uint32_t)pid) ? 1u : 0u;
+}
+
+static uint32_t sched_signal_valid(uint32_t sig) {
+    return (sig >= 1u && sig <= SCHED_SIGNAL_MAX) ? 1u : 0u;
+}
+
+static uint32_t sched_signal_bit(uint32_t sig) {
+    return sched_signal_valid(sig) ? (1u << (sig - 1u)) : 0u;
+}
+
+static uint32_t sched_signal_uncatchable_mask(void) {
+    return sched_signal_bit(SCHED_SIGNAL_KILL) | sched_signal_bit(SCHED_SIGNAL_STOP);
+}
+
+static uint32_t sched_signal_is_default_terminate(uint32_t sig) {
+    switch (sig) {
+        case SCHED_SIGNAL_CHLD:
+            return 0u;
+        default:
+            break;
+    }
+    return sched_signal_valid(sig);
+}
+
+static void sched_signal_wake_parent_locked(sched_task_slot_t *slot) {
+    if (!slot || slot->parent_tid < 0) {
+        return;
+    }
+    {
+        sched_task_slot_t *parent = sched_find_by_tid((uint32_t)slot->parent_tid);
+        if (!parent) {
+            return;
+        }
+        for (uint32_t i = 1u; i < SCHED_MAX_TASKS; i++) {
+            if (!waitq_test_bit(&parent->child_waitq, i)) {
+                continue;
+            }
+            sched_wake_slot(&g_tasks[i]);
+        }
+    }
+}
+
+static void sched_signal_terminate_slot_locked(sched_task_slot_t *slot, uint32_t sig) {
+    if (!slot || !slot->used || slot->is_idle || slot->pub.state == SCHED_TASK_ZOMBIE) {
+        return;
+    }
+    sched_detach_waitq(slot);
+    slot->vfork_child_active = 0u;
+    sched_slot_close_all_fds(slot);
+    slot->exit_code = 128u + (sig & 0x7Fu);
+    slot->sig_pending = 0u;
+    slot->pub.state = SCHED_TASK_ZOMBIE;
+    sched_runq_del(slot->run_cpu, sched_slot_index(slot));
+    slot->pub.wake_tick = 0u;
+    slot->quantum_used = 0u;
+    sched_signal_wake_parent_locked(slot);
+    sched_mark_resched_all();
 }
 
 static int sched_try_reap_child(int32_t parent_tid, int32_t pid, uint32_t *status_out) {
@@ -859,6 +952,11 @@ int sched_spawn(const char *name, sched_task_entry_t entry, void *arg) {
     slot->pub.wake_tick = 0u;
     slot->pub.run_ticks = 0u;
     slot->pub.arg = arg;
+    if (parent_slot) {
+        sched_cwd_copy(slot->cwd, parent_slot->cwd);
+    } else {
+        sched_cwd_set_root(slot);
+    }
     if (sched_stack_alloc_locked(&slot->stack_ctx) != 0) {
         sched_clear_task(slot);
         spinlock_unlock(&g_sched_lock);
@@ -1067,6 +1165,163 @@ uint32_t sched_task_get_exec_state(void) {
     }
     spinlock_unlock(&g_sched_lock);
     return exec_state;
+}
+
+int sched_signal_action(uint32_t sig, const sched_sigaction32_t *act, sched_sigaction32_t *oldact) {
+    sched_task_slot_t *slot;
+    if (!sched_signal_valid(sig) || sig == SCHED_SIGNAL_KILL || sig == SCHED_SIGNAL_STOP) {
+        return SCHED_SIGNAL_EINVAL;
+    }
+    spinlock_lock(&g_sched_lock);
+    slot = sched_current_slot();
+    if (!slot || !slot->used || slot->is_idle) {
+        spinlock_unlock(&g_sched_lock);
+        return SCHED_SIGNAL_ESRCH;
+    }
+    if (oldact) {
+        *oldact = slot->sig_action[sig];
+    }
+    if (act) {
+        slot->sig_action[sig] = *act;
+    }
+    spinlock_unlock(&g_sched_lock);
+    return SCHED_SIGNAL_OK;
+}
+
+int sched_signal_mask(uint32_t how, uint32_t set, uint32_t *oldset) {
+    sched_task_slot_t *slot;
+    uint32_t next;
+    set &= ~sched_signal_uncatchable_mask();
+    spinlock_lock(&g_sched_lock);
+    slot = sched_current_slot();
+    if (!slot || !slot->used || slot->is_idle) {
+        spinlock_unlock(&g_sched_lock);
+        return SCHED_SIGNAL_ESRCH;
+    }
+    if (oldset) {
+        *oldset = slot->sig_mask;
+    }
+    next = slot->sig_mask;
+    switch (how) {
+        case SCHED_SIG_BLOCK:
+            next |= set;
+            break;
+        case SCHED_SIG_UNBLOCK:
+            next &= ~set;
+            break;
+        case SCHED_SIG_SETMASK:
+            next = set;
+            break;
+        default:
+            spinlock_unlock(&g_sched_lock);
+            return SCHED_SIGNAL_EINVAL;
+    }
+    slot->sig_mask = next & ~sched_signal_uncatchable_mask();
+    spinlock_unlock(&g_sched_lock);
+    return SCHED_SIGNAL_OK;
+}
+
+int sched_signal_kill(int32_t pid, uint32_t sig) {
+    sched_task_slot_t *self;
+    sched_task_slot_t *target = 0;
+    uint32_t terminate_self = 0u;
+    uint32_t sigbit;
+
+    if (sig != 0u && !sched_signal_valid(sig)) {
+        return SCHED_SIGNAL_EINVAL;
+    }
+    if (pid <= 0) {
+        return SCHED_SIGNAL_EINVAL;
+    }
+
+    spinlock_lock(&g_sched_lock);
+    self = sched_current_slot();
+    for (uint32_t i = 1u; i < SCHED_MAX_TASKS; i++) {
+        sched_task_slot_t *slot = &g_tasks[i];
+        if (!slot->used || slot->is_idle || slot->pub.state == SCHED_TASK_ZOMBIE) {
+            continue;
+        }
+        if (slot->pub.pid == (uint32_t)pid || slot->pub.tid == (uint32_t)pid) {
+            target = slot;
+            break;
+        }
+    }
+    if (!target) {
+        spinlock_unlock(&g_sched_lock);
+        return SCHED_SIGNAL_ESRCH;
+    }
+    if (sig == 0u) {
+        spinlock_unlock(&g_sched_lock);
+        return SCHED_SIGNAL_OK;
+    }
+
+    sigbit = sched_signal_bit(sig);
+    if (sig != SCHED_SIGNAL_KILL && sig != SCHED_SIGNAL_STOP &&
+        target->sig_action[sig].handler == SCHED_SIGNAL_IGN) {
+        spinlock_unlock(&g_sched_lock);
+        return SCHED_SIGNAL_OK;
+    }
+
+    target->sig_pending |= sigbit;
+    if ((target->sig_mask & sigbit) != 0u && sig != SCHED_SIGNAL_KILL && sig != SCHED_SIGNAL_STOP) {
+        spinlock_unlock(&g_sched_lock);
+        return SCHED_SIGNAL_OK;
+    }
+
+    if (target->sig_action[sig].handler == SCHED_SIGNAL_DFL && sched_signal_is_default_terminate(sig)) {
+        if (target == self) {
+            terminate_self = 1u;
+        } else {
+            sched_signal_terminate_slot_locked(target, sig);
+        }
+    }
+
+    spinlock_unlock(&g_sched_lock);
+    if (terminate_self) {
+        sched_exit_code(128u + (sig & 0x7Fu));
+    }
+    return SCHED_SIGNAL_OK;
+}
+
+int sched_current_getcwd(char *dst, uint32_t cap) {
+    uint32_t i = 0u;
+    sched_task_slot_t *slot;
+    if (!dst || cap == 0u) {
+        return -1;
+    }
+    spinlock_lock(&g_sched_lock);
+    slot = sched_current_slot();
+    if (!slot || !slot->used) {
+        spinlock_unlock(&g_sched_lock);
+        return -1;
+    }
+    while (i + 1u < cap && slot->cwd[i] != '\0') {
+        dst[i] = slot->cwd[i];
+        i++;
+    }
+    if (slot->cwd[i] != '\0') {
+        spinlock_unlock(&g_sched_lock);
+        return -1;
+    }
+    dst[i] = '\0';
+    spinlock_unlock(&g_sched_lock);
+    return 0;
+}
+
+int sched_current_setcwd(const char *path) {
+    sched_task_slot_t *slot;
+    if (!path || path[0] != '/') {
+        return -1;
+    }
+    spinlock_lock(&g_sched_lock);
+    slot = sched_current_slot();
+    if (!slot || !slot->used) {
+        spinlock_unlock(&g_sched_lock);
+        return -1;
+    }
+    sched_cwd_copy(slot->cwd, path);
+    spinlock_unlock(&g_sched_lock);
+    return 0;
 }
 
 void sched_vfork_release_parent(void) {

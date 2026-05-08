@@ -14,6 +14,8 @@ Installs M1 userspace test binaries into ext4:
   /bin/hello
   /bin/echo
   /bin/vfork_exec
+  /bin/cat
+  /bin/pipe_exec
 
 Notes:
   - Requires the ELF files built by `bash user/build.sh`.
@@ -57,5 +59,7 @@ install_one() {
 install_one "${REPO_ROOT}/build-user/hello.elf" /bin/hello
 install_one "${REPO_ROOT}/build-user/echo.elf" /bin/echo
 install_one "${REPO_ROOT}/build-user/vfork_exec.elf" /bin/vfork_exec
+install_one "${REPO_ROOT}/build-user/cat.elf" /bin/cat
+install_one "${REPO_ROOT}/build-user/pipe_exec.elf" /bin/pipe_exec
 
-echo "installed M1 userspace set: /bin/hello /bin/echo /bin/vfork_exec"
+echo "installed M1/M2 userspace set: /bin/hello /bin/echo /bin/vfork_exec /bin/cat /bin/pipe_exec"

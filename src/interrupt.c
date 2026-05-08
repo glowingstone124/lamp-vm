@@ -10,6 +10,18 @@ extern volatile int g_vfork_trace_steps[32];
 volatile int g_vfork_irq_probe_remaining[32];
 
 #define ISR_ARG_REG 31
+#define USER_REGION_BASE_VM 0x02000000u
+#define USER_REGION_TOP_VM  0x03000000u
+#define USER_STACK_LO_VM    0x02FF0000u
+#define USER_STACK_TOP_VM   0x03000000u
+
+static int ip_is_user(vm_addr_t ip) {
+    return ip >= (vm_addr_t)USER_REGION_BASE_VM && ip < (vm_addr_t)USER_REGION_TOP_VM;
+}
+
+static int sp_is_user_stack(uint32_t sp) {
+    return sp >= USER_STACK_LO_VM && sp <= USER_STACK_TOP_VM;
+}
 
 static inline size_t irq_word_index(int core_id, uint32_t int_no) {
     return (size_t)core_id * (size_t)IRQ_BITMAP_WORDS + (size_t)(int_no >> 6);
@@ -218,13 +230,20 @@ void vm_iret(VM *vm) {
     if (!cpu->in_interrupt)
         return;
 
-    for (int i = (int)REG_COUNT - 1; i >= 0; i--) {
-        cpu->regs[i] = isr_pop_u32(vm);
+    for (;;) {
+        for (int i = (int)REG_COUNT - 1; i >= 0; i--) {
+            cpu->regs[i] = isr_pop_u32(vm);
+        }
+
+        cpu->flags = (unsigned int)isr_pop(vm);
+        cpu->ip = (size_t)(vm_addr_t)isr_pop(vm);
+
+        if (!ip_is_user((vm_addr_t)cpu->ip) ||
+            sp_is_user_stack((uint32_t)cpu->regs[30]) ||
+            cpu->isp > (ISR_STACK_SIZE - (REG_COUNT + 2))) {
+            break;
+        }
     }
-
-    cpu->flags = (unsigned int)isr_pop(vm);
-
-    cpu->ip = (size_t)(vm_addr_t)isr_pop(vm);
 
     if (traced_vfork_iret) {
         g_vfork_trace_steps[cpu->core_id] = 0;

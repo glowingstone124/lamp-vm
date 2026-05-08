@@ -52,6 +52,19 @@ Current IDs (must match kernel `include/kernel/syscall.h`):
 - `27 recv`
 - `28 execve`
 - `29 vfork`
+- `30 lseek`
+- `31 getppid`
+- `32 stat`
+- `33 fstat`
+- `34 getdents`
+- `35 access`
+- `36 chdir`
+- `37 getcwd`
+- `38 pipe`
+- `39 ioctl`
+- `40 sigaction`
+- `41 sigprocmask`
+- `42 kill`
 
 Current `vfork` note:
 
@@ -62,12 +75,15 @@ Current `vfork` note:
 
 Kernel currently uses Linux-compatible errno numbers for implemented paths:
 
+- `1 EPERM`
 - `2 ENOENT`
+- `3 ESRCH`
 - `4 EINTR`
 - `5 EIO`
 - `9 EBADF`
 - `10 ECHILD`
 - `11 EAGAIN`
+- `13 EACCES`
 - `12 ENOMEM`
 - `14 EFAULT`
 - `16 EBUSY`
@@ -75,8 +91,13 @@ Kernel currently uses Linux-compatible errno numbers for implemented paths:
 - `21 EISDIR`
 - `22 EINVAL`
 - `24 EMFILE`
+- `25 ENOTTY`
 - `28 ENOSPC`
+- `29 ESPIPE`
 - `30 EROFS`
+- `32 EPIPE`
+- `34 ERANGE`
+- `36 ENAMETOOLONG`
 - `38 ENOSYS`
 - `75 EOVERFLOW`
 - `88 ENOTSOCK`

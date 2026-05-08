@@ -600,6 +600,8 @@ void sched_init(void) {
     root->pub.wake_tick = 0u;
     root->pub.run_ticks = 0u;
     root->pub.arg = 0;
+    root->cwd[0] = '/';
+    root->cwd[1] = '\0';
     root->run_cpu = 0u;
     spinlock_init(&root->fd_lock);
     sched_fd_table_init_stdio(root);
@@ -651,6 +653,20 @@ int sched_current_tid(void) {
     tid = (int)slot->pub.tid;
     spinlock_unlock(&g_sched_lock);
     return tid;
+}
+
+int sched_current_ppid(void) {
+    int ppid;
+    sched_task_slot_t *slot;
+    spinlock_lock(&g_sched_lock);
+    slot = sched_current_slot();
+    if (!slot) {
+        spinlock_unlock(&g_sched_lock);
+        return -1;
+    }
+    ppid = slot->pub.ppid;
+    spinlock_unlock(&g_sched_lock);
+    return ppid;
 }
 
 void sched_pump_once(void) {

@@ -52,7 +52,9 @@ enum {
     SCHED_OFILE_TYPE_DEV_ZERO = SCHED_FD_TYPE_DEV_ZERO,
     SCHED_OFILE_TYPE_DEV_TTY = SCHED_FD_TYPE_DEV_TTY,
     SCHED_OFILE_TYPE_SOCKET = SCHED_FD_TYPE_SOCKET,
-    SCHED_OFILE_TYPE_REGULAR = SCHED_FD_TYPE_REGULAR
+    SCHED_OFILE_TYPE_REGULAR = SCHED_FD_TYPE_REGULAR,
+    SCHED_OFILE_TYPE_PIPE_READ = SCHED_FD_TYPE_PIPE_READ,
+    SCHED_OFILE_TYPE_PIPE_WRITE = SCHED_FD_TYPE_PIPE_WRITE
 };
 
 typedef struct sched_task_slot {
@@ -76,6 +78,10 @@ typedef struct sched_task_slot {
     uint32_t vfork_resume_ret;
     uint32_t vfork_resume_valid;
     uint32_t syscall_abi_addr;
+    char cwd[SCHED_CWD_CAP];
+    uint32_t sig_mask;
+    uint32_t sig_pending;
+    sched_sigaction32_t sig_action[SCHED_SIGNAL_MAX + 1u];
     spinlock_t fd_lock;
 } sched_task_slot_t;
 

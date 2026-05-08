@@ -8,11 +8,11 @@ It is focused on observable ABI and runtime semantics, not internal design.
 Implemented now:
 
 - syscall ABI mailbox return path
-- process/task basics: `getpid`, `yield`, `sleep_ticks`, `exit`, `waitpid`
+- process/task basics: `getpid`, `getppid`, `yield`, `sleep_ticks`, `exit`, `waitpid`, `chdir`, `getcwd`
 - basic time syscalls: `nanosleep`, `clock_getres`, `clock_gettime`, `clock_settime`, `gettimeofday`
-- fd syscalls: `read`, `write`, `close`, `dup`, `dup2`, `fcntl`
+- fd syscalls: `read`, `write`, `close`, `dup`, `dup2`, `fcntl`, `pipe`, `ioctl`, `lseek`, `stat`, `fstat`, `getdents`, `access`
 - readiness syscalls: `poll`, `select`
-- tty mode syscalls: `tty_getmode`, `tty_setmode`
+- tty mode syscalls: `tty_getmode`, `tty_setmode`, `ioctl(TCGETS/TCSETS/TIOCGWINSZ)`
 - filesystem/network surface:
   - `open` for `/dev/null`, `/dev/zero`, `/dev/tty`
   - `open/read/write` for ext4 regular files (absolute path)
@@ -23,7 +23,8 @@ Not implemented yet:
 - ext4 create/unlink/rename and directory mutation
 - sparse write and deep extent-tree growth (`depth > 0`) in write path
 - real socket transport/protocol stack
-- process groups/sessions/signals beyond tty line discipline behavior
+- userspace signal handler delivery/trampolines
+- process groups/sessions and job-control foreground groups
 
 ## Syscall ABI
 
@@ -43,12 +44,67 @@ Current fd types:
 - stdio: `stdin(0)`, `stdout(1)`, `stderr(2)`
 - special dev fds from `open`: `/dev/null`, `/dev/zero`, `/dev/tty`
 - regular file fds from ext4 `open(path, ...)`
+- pipe read/write endpoint fds from `pipe()`
 - socket fds from `socket()`
 
 `fcntl` support:
 
 - `F_GETFD`, `F_SETFD` (`FD_CLOEXEC`)
 - `F_GETFL`, `F_SETFL` (`O_NONBLOCK` only for status toggling)
+
+`lseek` support:
+
+- regular ext4 file fds support `SEEK_SET`, `SEEK_CUR`, `SEEK_END`
+- duplicated fds share one open-file offset
+- stdio/tty/socket/pipe fds return `-1/ESPIPE`
+
+`pipe` support:
+
+- `pipe(int pipefd[2])` returns read end then write end
+- fixed in-kernel ring buffer with short read/write behavior
+- empty nonblocking reads and full nonblocking writes return `-1/EAGAIN`
+- closing all writers makes reads return EOF; closing all readers makes writes return `-1/EPIPE`
+- `poll/select` observe readable data/EOF and writable capacity
+
+`ioctl` support:
+
+- tty fds (`stdin/stdout/stderr` and `/dev/tty`) support `TCGETS`, `TCSETS`, `TCSETSW`, `TCSETSF`, and `TIOCGWINSZ`
+- `TCGETS/TCSETS*` expose the current termios ABI subset: `ISIG`, `ICANON`, `ECHO`, and 32 control-char slots
+- `TIOCGWINSZ` returns the current fixed console geometry of 30 rows by 80 columns
+- closed fds return `-1/EBADF`; non-tty fds return `-1/ENOTTY`
+
+`stat/fstat` support:
+
+- path stat covers ext4 regular files/directories and `/dev/null`, `/dev/zero`, `/dev/tty`
+- fd stat covers regular files, stdio/tty/dev fds, and socket fds
+- returned fields are the current 32-bit ABI subset: dev, ino, mode, nlink, uid, gid, rdev, size, blksize, blocks
+
+`getdents` support:
+
+- ext4 directory fds opened read-only can be enumerated
+- each returned entry uses the fixed 32-bit `lamp_dirent` ABI record
+- ordinary `read()` on a directory fd still returns `-1/EISDIR`
+
+`access` support:
+
+- `F_OK`, `R_OK`, `W_OK`, `X_OK` are validated against `stat` mode bits
+- unsupported mode bits return `-1/EINVAL`
+- missing paths preserve filesystem errno such as `-1/ENOENT`
+
+cwd/path support:
+
+- each task tracks an absolute cwd, inherited by `sched_spawn` and `vfork`
+- `chdir` accepts absolute or relative paths and requires the target to be a directory
+- `getcwd` returns the current absolute path or `-1/ERANGE` when the user buffer is too small
+- path syscalls resolve relative names against cwd before reaching VFS: `open`, `stat`, `access`, `execve`, `chdir`
+
+signal support:
+
+- `sigaction(sig, act, oldact)` records per-task 32-bit dispositions and masks
+- `sigprocmask(how, set, oldset)` supports `SIG_BLOCK`, `SIG_UNBLOCK`, and `SIG_SETMASK`; `SIGKILL/SIGSTOP` are never masked
+- `kill(pid, sig)` supports concrete task pids/tids, signal `0` existence checks, ignored dispositions, and default terminate behavior
+- caught userspace handlers are stored but not delivered yet
+- process groups, sessions, and tty foreground-group delivery are not implemented yet
 
 Access mode and readiness:
 
@@ -118,7 +174,8 @@ Canonical read visibility:
 ext4 open notes:
 
 - missing path: `-1/ENOENT`
-- opening directory as file: `-1/EISDIR`
+- opening directory read-only: succeeds for `getdents`; ordinary `read` returns `-1/EISDIR`
+- opening directory writable/truncated: `-1/EISDIR`
 - `O_CREAT`: `-1/EROFS` (not implemented yet)
 - `O_TRUNC` on writable open: supported (current implementation keeps extents allocated and sets inode size to 0)
 - unsupported ext4 write shape: `-1/ENOSYS`
@@ -136,10 +193,19 @@ Socket syscall status:
 Init shell command:
 
 - `fdtest`
+- `upipe` after installing `/bin/cat` and `/bin/pipe_exec`
 
 Coverage currently includes:
 
+- `getpid/getppid` parent relationship
+- `chdir/getcwd` and relative `open/stat/access`
+- `pipe` read/write, nonblocking empty read, EOF, `EPIPE`, `poll`, and `fstat`
 - `dup/close/fcntl/read/poll/select` baseline
+- regular-file `lseek` and non-seekable fd `ESPIPE`
+- `sigaction/sigprocmask/kill` minimum default/ignored signal paths
+- `stat/fstat` file type and size behavior
+- ext4 directory `open/getdents` behavior
+- `access` existence/mode/error behavior
 - `/dev/null`, `/dev/zero`, `/dev/tty` open and I/O behavior
 - socket stub errno behavior
 - SMP waitq/poll/select stress behavior (`fdtest`)
