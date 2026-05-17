@@ -9,6 +9,7 @@ USER_ELF="${REPO_ROOT}/build-user/hello.elf"
 DEST_PATH="/bin/hello"
 ROOTFS_IMG=""
 EXT4_LBA_BASE=2048
+DEBUGFS_BIN=""
 
 usage() {
   cat <<'EOF'
@@ -58,7 +59,21 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if ! command -v debugfs >/dev/null 2>&1; then
+if command -v debugfs >/dev/null 2>&1; then
+  DEBUGFS_BIN="$(command -v debugfs)"
+else
+  for candidate in \
+    /opt/homebrew/opt/e2fsprogs/sbin/debugfs \
+    /usr/local/opt/e2fsprogs/sbin/debugfs \
+    /opt/homebrew/sbin/debugfs \
+    /usr/local/sbin/debugfs; do
+    if [[ -x "${candidate}" ]]; then
+      DEBUGFS_BIN="${candidate}"
+      break
+    fi
+  done
+fi
+if [[ -z "${DEBUGFS_BIN}" ]]; then
   echo "error: debugfs not found. Please install e2fsprogs." >&2
   exit 1
 fi
@@ -116,22 +131,20 @@ ensure_parent_dirs() {
       rest=""
     fi
     cur="${cur}/${next}"
-    if ! debugfs -R "stat ${cur}" "${FS_IMG}" >/dev/null 2>&1; then
-      debugfs -w -R "mkdir ${cur}" "${FS_IMG}" >/dev/null
+    if ! "${DEBUGFS_BIN}" -R "stat ${cur}" "${FS_IMG}" >/dev/null 2>&1; then
+      "${DEBUGFS_BIN}" -w -R "mkdir ${cur}" "${FS_IMG}" >/dev/null
     fi
   done
 }
 
 ensure_parent_dirs "${DEST_PATH}"
 
-if debugfs -R "stat ${DEST_PATH}" "${FS_IMG}" >/dev/null 2>&1; then
-  debugfs -w -R "rm ${DEST_PATH}" "${FS_IMG}" >/dev/null
-fi
-debugfs -w -R "write ${USER_ELF} ${DEST_PATH}" "${FS_IMG}" >/dev/null
+"${DEBUGFS_BIN}" -w -R "rm ${DEST_PATH}" "${FS_IMG}" >/dev/null 2>&1 || true
+"${DEBUGFS_BIN}" -w -R "write ${USER_ELF} ${DEST_PATH}" "${FS_IMG}" >/dev/null
 
 if [[ -z "${ROOTFS_IMG}" ]]; then
   dd if="${FS_IMG}" of="${DISK_IMG}" bs=512 seek="${EXT4_LBA_BASE}" conv=notrunc status=none
 fi
 
 echo "installed: ${USER_ELF} -> ${DEST_PATH}"
-debugfs -R "ls -l ${DEST_PATH%/*}" "${FS_IMG}"
+"${DEBUGFS_BIN}" -R "ls -l ${DEST_PATH%/*}" "${FS_IMG}"

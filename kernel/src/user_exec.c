@@ -16,7 +16,8 @@ enum {
     USER_EXEC_MAX_ENVP = 8u,
     USER_EXEC_ARG_STR_CAP = 64u,
     USER_EXEC_ENV_STR_CAP = 64u,
-    USER_EXEC_ELF_MAX = 512u * 1024u,
+    USER_EXEC_ELF_MAX = 589u * 1024u,
+    USER_EXEC_CACHE_MAX = 512u * 1024u,
     USER_EXIT_CODE_LOAD_FAIL = 127u
 };
 
@@ -88,7 +89,7 @@ static uint8_t g_user_exec_elf_buf[USER_EXEC_ELF_MAX];
 static volatile uint32_t g_user_exec_cache_valid;
 static uint32_t g_user_exec_cache_size;
 static char g_user_exec_cache_path[USER_EXEC_PATH_CAP];
-static uint8_t g_user_exec_cache_buf[USER_EXEC_ELF_MAX];
+static uint8_t g_user_exec_cache_buf[USER_EXEC_CACHE_MAX];
 volatile uint32_t g_user_exec_saved_sp[32];
 volatile uint32_t g_user_exec_saved_csp[32];
 static volatile uint32_t g_user_exec_enter_entry[32];
@@ -309,18 +310,6 @@ static int user_exec_read_file(const char *path, uint32_t *out_size) {
         return FS_ERR_INVAL;
     }
 
-    spinlock_lock(&g_user_exec_lock);
-    if (g_user_exec_cache_valid != 0u &&
-        g_user_exec_cache_size != 0u &&
-        g_user_exec_cache_size <= USER_EXEC_ELF_MAX &&
-        str_eq(path, &g_user_exec_cache_path[0])) {
-        mem_copy_u8(&g_user_exec_elf_buf[0], &g_user_exec_cache_buf[0], g_user_exec_cache_size);
-        *out_size = g_user_exec_cache_size;
-        spinlock_unlock(&g_user_exec_lock);
-        return 0;
-    }
-    spinlock_unlock(&g_user_exec_lock);
-
     fd = fs_open(path, SYS_O_RDONLY);
     if (fd < 0) {
         return fd;
@@ -343,22 +332,29 @@ static int user_exec_read_file(const char *path, uint32_t *out_size) {
         done += (uint32_t)n;
     }
     (void)sched_fd_close(fd);
-    spinlock_lock(&g_user_exec_lock);
-    str_copy_trunc(&g_user_exec_cache_path[0], USER_EXEC_PATH_CAP, path);
-    g_user_exec_cache_size = done;
-    mem_copy_u8(&g_user_exec_cache_buf[0], &g_user_exec_elf_buf[0], done);
-    g_user_exec_cache_valid = 1u;
-    spinlock_unlock(&g_user_exec_lock);
     *out_size = file_size;
     return 0;
 }
 
-static int user_exec_stack_push_u32(uint32_t *sp, uint32_t floor, uint32_t value) {
-    if (!sp || *sp < floor + 4u) {
+static inline __attribute__((always_inline)) int user_exec_stack_push_u32(uint32_t *sp, uint32_t floor, uint32_t value) {
+    uint32_t cur;
+    (void)floor;
+    if (!sp) {
         return -1;
     }
-    *sp -= 4u;
-    *(volatile uint32_t *)(uintptr_t)(*sp) = value;
+    cur = *sp;
+    if (cur != USER_STACK_TOP && (cur & 0xFFF80000u) != (USER_STACK_TOP - USER_STACK_RESERVE)) {
+        return -1;
+    }
+    if (cur == (USER_STACK_TOP - USER_STACK_RESERVE)) {
+        return -1;
+    }
+    cur -= 4u;
+    if ((cur & 0xFFF80000u) != (USER_STACK_TOP - USER_STACK_RESERVE)) {
+        return -1;
+    }
+    *sp = cur;
+    *(volatile uint32_t *)(uintptr_t)cur = value;
     return 0;
 }
 
@@ -387,7 +383,10 @@ static int user_exec_build_initial_stack(const user_image_t *img,
     }
 
     while (argv && argv[argc] && argc < USER_EXEC_MAX_ARGV) {
-        uint32_t n = str_len(argv[argc]) + 1u;
+        uint32_t n = 1u;
+        while (argv[argc][n - 1u] != '\0') {
+            n++;
+        }
         if (sp < floor + n) {
             return -1;
         }
@@ -400,7 +399,10 @@ static int user_exec_build_initial_stack(const user_image_t *img,
     }
 
     while (envp && envp[envc] && envc < USER_EXEC_MAX_ENVP) {
-        uint32_t n = str_len(envp[envc]) + 1u;
+        uint32_t n = 1u;
+        while (envp[envc][n - 1u] != '\0') {
+            n++;
+        }
         if (sp < floor + n) {
             return -1;
         }
@@ -600,8 +602,12 @@ static void user_exec_task_entry(sched_task_t *task, void *arg) {
     }
     envp[i] = 0;
 
+    irq_disable(IRQ_TIMER);
+    user_exec_cpu_ctx_write32(IO_CPU_CTX_IRQ_MASK, 1u);
     rc = user_exec_load_elf_from_ext4(&ctx->path[0], argv, envp, &img);
     if (rc != 0) {
+        irq_enable(IRQ_TIMER);
+        user_exec_cpu_ctx_write32(IO_CPU_CTX_IRQ_MASK, 0u);
         klog_begin(KLOG_LEVEL_ERROR, "user_exec");
         klog_puts("load failed rc=");
         klog_hex32((uint32_t)rc);
@@ -616,7 +622,16 @@ static void user_exec_task_entry(sched_task_t *task, void *arg) {
     }
 
     user_exec_release_ctx(ctx);
-    user_exec_enter_via_irq(img.entry, img.stack_ptr);
+    klog_begin(KLOG_LEVEL_WARN, "user_exec");
+    klog_puts("enter entry=");
+    klog_hex32(img.entry);
+    klog_puts(" sp=");
+    klog_hex32(img.stack_ptr);
+    klog_end();
+    irq_enable(IRQ_TIMER);
+    user_exec_cpu_ctx_write32(IO_CPU_CTX_IRQ_MASK, 0u);
+    (void)user_exec_enter(img.entry, img.stack_ptr);
+    sched_exit_code(0u);
 }
 
 int user_exec_spawn_path(const char *path, const char *const argv[], const char *const envp[]) {
@@ -700,17 +715,23 @@ int user_exec_execve_current(const char *path, const char *const argv[], const c
         return FS_ERR_INVAL;
     }
 
+    irq_disable(IRQ_TIMER);
+    user_exec_cpu_ctx_write32(IO_CPU_CTX_IRQ_MASK, 1u);
     int rc = user_exec_load_elf_from_ext4(path, argv, envp, &img);
     if (rc != 0) {
+        irq_enable(IRQ_TIMER);
+        user_exec_cpu_ctx_write32(IO_CPU_CTX_IRQ_MASK, 0u);
         return rc;
     }
-
     if (sched_fd_close_cloexec() < 0) {
+        irq_enable(IRQ_TIMER);
+        user_exec_cpu_ctx_write32(IO_CPU_CTX_IRQ_MASK, 0u);
         return FS_ERR_INVAL;
     }
 
     sched_task_set_kind(SCHED_TASK_KIND_USER);
     sched_task_set_exec_state(SCHED_EXEC_STATE_USER);
-    sched_vfork_release_parent();
+    irq_enable(IRQ_TIMER);
+    user_exec_cpu_ctx_write32(IO_CPU_CTX_IRQ_MASK, 0u);
     user_exec_enter_iret_current(img.entry, img.stack_ptr);
 }

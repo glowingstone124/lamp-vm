@@ -4,6 +4,13 @@
 #include "../include/kernel/syscall.h"
 
 static sched_stack_ctx_t g_vfork_discard_ctx[SCHED_MAX_CPUS];
+enum {
+    SCHED_VFORK_SNAPSHOT_BASE = 0x00300000u,
+    SCHED_VFORK_IMAGE_SNAPSHOT_BYTES = 0x00100000u
+};
+
+static uint32_t g_vfork_snapshot_valid;
+static uint32_t g_vfork_snapshot_child_tid;
 
 enum {
     SCHED_SYSCALL_ABI_OFF_MAGIC = 0x00u,
@@ -90,11 +97,40 @@ static void sched_stack_ctx_copy(sched_stack_ctx_t *dst, const sched_stack_ctx_t
     dst->dsp = src->dsp;
     dst->isp = src->isp;
     dst->irq_masked = src->irq_masked;
+    dst->in_interrupt = src->in_interrupt;
     dst->pool_slot = src->pool_slot;
     dst->valid = src->valid;
     for (uint32_t i = 0u; i < 32u; i++) {
         dst->regs[i] = src->regs[i];
     }
+}
+
+static void sched_vfork_snapshot_parent_user_locked(sched_task_slot_t *child) {
+    if (!child) {
+        return;
+    }
+    sched_mem_copy_u8(SCHED_VFORK_SNAPSHOT_BASE,
+                      USER_REGION_BASE,
+                      SCHED_VFORK_IMAGE_SNAPSHOT_BYTES);
+    sched_mem_copy_u8(SCHED_VFORK_SNAPSHOT_BASE + SCHED_VFORK_IMAGE_SNAPSHOT_BYTES,
+                      USER_STACK_TOP - USER_STACK_RESERVE,
+                      USER_STACK_RESERVE);
+    g_vfork_snapshot_valid = 1u;
+    g_vfork_snapshot_child_tid = child->pub.tid;
+}
+
+static void sched_vfork_restore_parent_user_locked(sched_task_slot_t *child) {
+    if (!child || g_vfork_snapshot_valid == 0u || g_vfork_snapshot_child_tid != child->pub.tid) {
+        return;
+    }
+    sched_mem_copy_u8(USER_REGION_BASE,
+                      SCHED_VFORK_SNAPSHOT_BASE,
+                      SCHED_VFORK_IMAGE_SNAPSHOT_BYTES);
+    sched_mem_copy_u8(USER_STACK_TOP - USER_STACK_RESERVE,
+                      SCHED_VFORK_SNAPSHOT_BASE + SCHED_VFORK_IMAGE_SNAPSHOT_BYTES,
+                      USER_STACK_RESERVE);
+    g_vfork_snapshot_valid = 0u;
+    g_vfork_snapshot_child_tid = 0u;
 }
 
 static inline uint32_t sched_addr_in_range(uint32_t v, uint32_t lo, uint32_t hi) {
@@ -294,6 +330,7 @@ static int sched_vfork_prepare_child_user_locked(sched_task_slot_t *child,
     child->vfork_resume_ctx.dsp = saved_dsp;
     child->vfork_resume_ctx.isp = live->isp;
     child->vfork_resume_ctx.irq_masked = live->irq_masked;
+    child->vfork_resume_ctx.in_interrupt = 0u;
     child->vfork_resume_valid = 1u;
 
     helper_idx = saved_csp - 1u;
@@ -309,6 +346,7 @@ static int sched_vfork_prepare_child_user_locked(sched_task_slot_t *child,
     child->stack_ctx.dsp = VM_DATA_STACK_ENTRIES;
     child->stack_ctx.isp = live->isp;
     child->stack_ctx.irq_masked = live->irq_masked;
+    child->stack_ctx.in_interrupt = 0u;
     child->stack_ctx.regs[30] = child->stack_ctx.call_base + VM_STACK_SLOT_BYTES;
     child->stack_ctx.regs[31] = child->stack_ctx.call_base + VM_STACK_SLOT_BYTES;
     return 0;
@@ -319,6 +357,9 @@ static int sched_vfork_prepare_parent_resume_locked(sched_task_slot_t *self,
                                                     uint32_t child_tid) {
     uint32_t saved_csp;
     uint32_t saved_dsp;
+    uint32_t call_live_bytes;
+    uint32_t data_live_bytes;
+    uint32_t isr_live_bytes;
     uint32_t helper_idx;
     uint32_t helper_addr;
     if (!self || !live || !self->stack_ctx.valid) {
@@ -330,11 +371,34 @@ static int sched_vfork_prepare_parent_resume_locked(sched_task_slot_t *self,
         live->isp > VM_ISR_STACK_ENTRIES) {
         return -1;
     }
+
+    call_live_bytes = (VM_CALL_STACK_ENTRIES - saved_csp) * 8u;
+    if (call_live_bytes != 0u) {
+        sched_mem_copy_u8(self->stack_ctx.call_base + saved_csp * 8u,
+                          live->call_base + saved_csp * 8u,
+                          call_live_bytes);
+    }
+
+    data_live_bytes = (VM_DATA_STACK_ENTRIES - saved_dsp) * 4u;
+    if (data_live_bytes != 0u) {
+        sched_mem_copy_u8(self->stack_ctx.data_base + saved_dsp * 4u,
+                          live->data_base + saved_dsp * 4u,
+                          data_live_bytes);
+    }
+
+    isr_live_bytes = (VM_ISR_STACK_ENTRIES - live->isp) * 8u;
+    if (isr_live_bytes != 0u) {
+        sched_mem_copy_u8(self->stack_ctx.isr_base + live->isp * 8u,
+                          live->isr_base + live->isp * 8u,
+                          isr_live_bytes);
+    }
+
     sched_stack_ctx_copy(&self->vfork_resume_ctx, &self->stack_ctx);
     self->vfork_resume_ctx.csp = saved_csp;
     self->vfork_resume_ctx.dsp = saved_dsp;
     self->vfork_resume_ctx.isp = live->isp;
     self->vfork_resume_ctx.irq_masked = live->irq_masked;
+    self->vfork_resume_ctx.in_interrupt = 0u;
     self->vfork_resume_ret = child_tid;
     self->vfork_resume_valid = 1u;
 
@@ -346,6 +410,7 @@ static int sched_vfork_prepare_parent_resume_locked(sched_task_slot_t *self,
     self->stack_ctx.dsp = VM_DATA_STACK_ENTRIES;
     self->stack_ctx.isp = live->isp;
     self->stack_ctx.irq_masked = live->irq_masked;
+    self->stack_ctx.in_interrupt = 0u;
     self->stack_ctx.regs[30] = self->stack_ctx.call_base + VM_STACK_SLOT_BYTES;
     self->stack_ctx.regs[31] = self->stack_ctx.call_base + VM_STACK_SLOT_BYTES;
     return 0;
@@ -369,6 +434,10 @@ static int sched_vfork_trampoline(uint32_t abi_addr) {
     spinlock_lock(&g_sched_lock);
     self = sched_current_slot();
     if (!self || self->is_idle || !self->used || !self->stack_ctx.valid) {
+        spinlock_unlock(&g_sched_lock);
+        return -1;
+    }
+    if (g_vfork_snapshot_valid != 0u) {
         spinlock_unlock(&g_sched_lock);
         return -1;
     }
@@ -409,6 +478,7 @@ static int sched_vfork_trampoline(uint32_t abi_addr) {
     child->pub.run_ticks = self->pub.run_ticks;
     child->pub.arg = 0;
     sched_cwd_copy(child->cwd, self->cwd);
+    child->file_umask = self->file_umask;
     child->sig_mask = self->sig_mask;
     child->sig_pending = 0u;
     for (uint32_t sig = 0u; sig <= SCHED_SIGNAL_MAX; sig++) {
@@ -448,6 +518,7 @@ static int sched_vfork_trampoline(uint32_t abi_addr) {
         return -1;
     }
 
+    sched_vfork_snapshot_parent_user_locked(child);
     sched_runq_add(child->run_cpu, (uint32_t)slot_idx);
     sched_waitq_sleep_locked(&self->child_waitq, 0u);
     sched_mark_resched_all();
@@ -512,6 +583,7 @@ static int sched_vfork_alloc_child_stack_locked(sched_task_slot_t *child,
         child->stack_ctx.dsp = VM_DATA_STACK_ENTRIES;
         child->stack_ctx.isp = VM_ISR_STACK_ENTRIES;
         child->stack_ctx.irq_masked = 0u;
+        child->stack_ctx.in_interrupt = 0u;
         child->stack_ctx.pool_slot = slot;
         child->stack_ctx.valid = 1u;
         child->stack_ctx.regs[30] = base + VM_STACK_SLOT_BYTES;
@@ -545,6 +617,7 @@ static int sched_stack_alloc_vfork_child_locked(sched_stack_ctx_t *ctx_out,
         ctx_out->dsp = VM_DATA_STACK_ENTRIES;
         ctx_out->isp = VM_ISR_STACK_ENTRIES;
         ctx_out->irq_masked = 0u;
+        ctx_out->in_interrupt = 0u;
         ctx_out->pool_slot = slot;
         ctx_out->valid = 1u;
         ctx_out->regs[30] = base + VM_STACK_SLOT_BYTES;
@@ -671,6 +744,7 @@ static void sched_signal_terminate_slot_locked(sched_task_slot_t *slot, uint32_t
         return;
     }
     sched_detach_waitq(slot);
+    sched_vfork_restore_parent_user_locked(slot);
     slot->vfork_child_active = 0u;
     sched_slot_close_all_fds(slot);
     slot->exit_code = 128u + (sig & 0x7Fu);
@@ -872,6 +946,7 @@ static int sched_prepare_vfork_child_ctx(const sched_task_slot_t *parent,
     child_live.dsp = parent_live_in->dsp;
     child_live.isp = parent_live_in->isp;
     child_live.irq_masked = parent_live_in->irq_masked;
+    child_live.in_interrupt = parent_live_in->in_interrupt;
     child_live.pool_slot = child->stack_ctx.pool_slot;
     child_live.valid = 1u;
     for (uint32_t i = 0u; i < 32u; i++) {
@@ -954,8 +1029,10 @@ int sched_spawn(const char *name, sched_task_entry_t entry, void *arg) {
     slot->pub.arg = arg;
     if (parent_slot) {
         sched_cwd_copy(slot->cwd, parent_slot->cwd);
+        slot->file_umask = parent_slot->file_umask;
     } else {
         sched_cwd_set_root(slot);
+        slot->file_umask = 022u;
     }
     if (sched_stack_alloc_locked(&slot->stack_ctx) != 0) {
         sched_clear_task(slot);
@@ -1004,6 +1081,7 @@ void sched_exit_code(uint32_t code) {
         return;
     }
     sched_detach_waitq(slot);
+    sched_vfork_restore_parent_user_locked(slot);
     slot->vfork_child_active = 0u;
     sched_slot_close_all_fds(slot);
     slot->exit_code = code;
@@ -1324,6 +1402,19 @@ int sched_current_setcwd(const char *path) {
     return 0;
 }
 
+uint32_t sched_current_umask(uint32_t new_mask) {
+    uint32_t old_mask = 022u;
+    sched_task_slot_t *slot;
+    spinlock_lock(&g_sched_lock);
+    slot = sched_current_slot();
+    if (slot && slot->used && !slot->is_idle) {
+        old_mask = slot->file_umask & 0777u;
+        slot->file_umask = new_mask & 0777u;
+    }
+    spinlock_unlock(&g_sched_lock);
+    return old_mask;
+}
+
 void sched_vfork_release_parent(void) {
     spinlock_lock(&g_sched_lock);
     sched_task_slot_t *slot = sched_current_slot();
@@ -1332,6 +1423,7 @@ void sched_vfork_release_parent(void) {
         return;
     }
 
+    sched_vfork_restore_parent_user_locked(slot);
     slot->vfork_child_active = 0u;
     if (slot->parent_tid >= 0) {
         sched_task_slot_t *parent = sched_find_by_tid((uint32_t)slot->parent_tid);

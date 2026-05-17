@@ -40,6 +40,10 @@ typedef struct {
     int core_id;
 } CpuThreadArg;
 
+typedef struct {
+    VM *vm;
+} SerialConsoleArg;
+
 _Thread_local VCPU *vm_tls_vcpu = NULL;
 volatile int g_vfork_trace_steps[32];
 extern volatile int g_vfork_irq_probe_remaining[32];
@@ -1164,7 +1168,7 @@ void *vm_thread(void *arg) {
 void display_loop(VM *vm) {
     vga_display_init();
     const int frame_delay = 16; // ~60FPS
-    while (!atomic_is_vm_halted(vm)) {
+    while (!atomic_is_vm_halted(vm) && !atomic_is_vm_panicked(vm)) {
         uint32_t frame_start = SDL_GetTicks();
         display_poll_events(vm);
         display_update(vm);
@@ -1176,9 +1180,61 @@ void display_loop(VM *vm) {
     display_shutdown();
 }
 
-void vm_run(VM *vm) {
+static void *serial_console_thread(void *arg) {
+    SerialConsoleArg *console_arg = (SerialConsoleArg *)arg;
+    VM *vm = console_arg ? console_arg->vm : NULL;
+    int stdin_flags = -1;
+    int stdin_restore = 0;
+    int raw_mode = 0;
+
+    free(console_arg);
+    if (!vm) {
+        return NULL;
+    }
+
+    stdin_flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    if (stdin_flags >= 0) {
+        if (fcntl(STDIN_FILENO, F_SETFL, stdin_flags | O_NONBLOCK) == 0) {
+            stdin_restore = 1;
+        }
+    }
+    if (isatty(STDIN_FILENO)) {
+        enable_raw_mode();
+        raw_mode = 1;
+    }
+
+    while (!atomic_is_vm_halted(vm) && !atomic_is_vm_panicked(vm)) {
+        vm_handle_keyboard(vm);
+        usleep(1000);
+    }
+
+    if (raw_mode) {
+        disable_raw_mode();
+    }
+    if (stdin_restore) {
+        (void)fcntl(STDIN_FILENO, F_SETFL, stdin_flags);
+    }
+    return NULL;
+}
+
+static int vm_start_serial_console(VM *vm, pthread_t *thread_out) {
+    SerialConsoleArg *arg = malloc(sizeof(SerialConsoleArg));
+    if (!arg) {
+        return -1;
+    }
+    arg->vm = vm;
+    if (pthread_create(thread_out, NULL, serial_console_thread, arg) != 0) {
+        free(arg);
+        return -1;
+    }
+    return 0;
+}
+
+void vm_run(VM *vm, int serial_console) {
     const int cores = (vm->smp_cores > 0) ? vm->smp_cores : 1;
     pthread_t *thread_ids = malloc(sizeof(pthread_t) * (size_t)cores);
+    pthread_t serial_thread;
+    int serial_thread_started = 0;
     if (!thread_ids) {
         panic("Failed to allocate CPU thread list", vm);
         return;
@@ -1203,8 +1259,19 @@ void vm_run(VM *vm) {
         created_threads++;
     }
 
+    if (serial_console) {
+        if (vm_start_serial_console(vm, &serial_thread) == 0) {
+            serial_thread_started = 1;
+        } else {
+            fprintf(stderr, "Failed to start serial console input thread.\n");
+        }
+    }
+
     display_loop(vm);
 
+    if (serial_thread_started) {
+        pthread_join(serial_thread, NULL);
+    }
     for (int i = 0; i < created_threads; i++) {
         pthread_join(thread_ids[i], NULL);
     }
@@ -1651,8 +1718,10 @@ void vm_destroy(VM *vm) {
 }
 
 static void print_usage(const char *prog) {
-    printf("Usage: %s [--bin <file>] [--smp <cores>] [--selftest] [--serial-stdin]\n", prog);
+    printf("Usage: %s [--bin <file>] [--smp <cores>] [--selftest] [--console] [--serial-stdin]\n", prog);
     printf("Defaults: --bin boot.bin --smp 1\n");
+    printf("  --console       attach terminal stdin to the guest serial console while keeping SDL/VNC enabled\n");
+    printf("  --serial-stdin  legacy headless serial stdin mode\n");
 }
 
 static int parse_positive_int(const char *s, int *out) {
@@ -1673,6 +1742,7 @@ int main(int argc, char **argv) {
     const char *filename = "boot.bin";
     int smp_cores = 1;
     int selftest = 0;
+    int serial_console = 0;
     int serial_stdin = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--bin") == 0) {
@@ -1693,6 +1763,8 @@ int main(int argc, char **argv) {
             return 0;
         } else if (strcmp(argv[i], "--selftest") == 0) {
             selftest = 1;
+        } else if (strcmp(argv[i], "--console") == 0 || strcmp(argv[i], "--serial-console") == 0) {
+            serial_console = 1;
         } else if (strcmp(argv[i], "--serial-stdin") == 0) {
             serial_stdin = 1;
         } else {
@@ -1748,7 +1820,10 @@ int main(int argc, char **argv) {
         printf("Serial stdin mode enabled (headless).\n");
         vm_run_serial(vm);
     } else {
-        vm_run(vm);
+        if (serial_console) {
+            printf("Serial console mode enabled (terminal stdin + SDL/VNC).\n");
+        }
+        vm_run(vm, serial_console);
     }
 #ifdef DBEUG
     vm_dump(vm, 1024);

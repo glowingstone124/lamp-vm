@@ -25,6 +25,7 @@ enum {
     TEST_ERRNO_EINVAL = 22u,
     TEST_ERRNO_ENOTTY = 25u,
     TEST_ERRNO_ESPIPE = 29u,
+    TEST_ERRNO_EROFS = 30u,
     TEST_ERRNO_EPIPE = 32u,
     TEST_ERRNO_ERANGE = 34u,
     TEST_ERRNO_ENOTSOCK = 88u,
@@ -107,6 +108,7 @@ static const char g_fdtest_path_dev_tty[] = "/dev/tty";
 static const char g_fdtest_path_missing[] = "/dev/missing";
 static const char g_fdtest_path_bin_hello[] = "/bin/hello";
 static const char g_fdtest_path_bin[] = "/bin";
+static const char g_fdtest_path_tmp_fdtest[] = "/tmp_fdtest";
 static volatile uint32_t g_fdstress_total_lines;
 static volatile uint32_t g_fdstress_sent_lines;
 static volatile uint32_t g_fdstress_done;
@@ -802,6 +804,53 @@ void fd_selftest_run(void) {
                 fdtest_fail("wait killed child", sig_status, (128u + SYS_SIGTERM) << 8u, &fails);
             }
         }
+    }
+
+    FDTEST_SYSCALL(SYS_UMASK, 077u, 0u, 0u, 0u, 0u, 0u, ret, err);
+    if (err != 0u || ret != 022u) {
+        fdtest_fail("umask set", ret, 022u, &fails);
+    }
+    FDTEST_SYSCALL(SYS_UMASK, 022u, 0u, 0u, 0u, 0u, 0u, ret, err);
+    if (err != 0u || ret != 077u) {
+        fdtest_fail("umask restore", ret, 077u, &fails);
+    }
+
+    FDTEST_SYSCALL(SYS_MKDIR, ptr32(g_fdtest_path_tmp_fdtest), 0777u, 0u, 0u, 0u, 0u, ret, err);
+    if ((int32_t)ret != -1 || err != TEST_ERRNO_EROFS) {
+        fdtest_fail("mkdir readonly", err, TEST_ERRNO_EROFS, &fails);
+    }
+    FDTEST_SYSCALL(SYS_UNLINK, ptr32(g_fdtest_path_bin_hello), 0u, 0u, 0u, 0u, 0u, ret, err);
+    if ((int32_t)ret != -1 || err != TEST_ERRNO_EROFS) {
+        fdtest_fail("unlink readonly", err, TEST_ERRNO_EROFS, &fails);
+    }
+    FDTEST_SYSCALL(SYS_RMDIR, ptr32(g_fdtest_path_bin), 0u, 0u, 0u, 0u, 0u, ret, err);
+    if ((int32_t)ret != -1 || err != TEST_ERRNO_EROFS) {
+        fdtest_fail("rmdir readonly", err, TEST_ERRNO_EROFS, &fails);
+    }
+    FDTEST_SYSCALL(SYS_RENAME, ptr32(g_fdtest_path_bin_hello), ptr32(g_fdtest_path_tmp_fdtest),
+                   0u, 0u, 0u, 0u, ret, err);
+    if ((int32_t)ret != -1 || err != TEST_ERRNO_EROFS) {
+        fdtest_fail("rename readonly", err, TEST_ERRNO_EROFS, &fails);
+    }
+    FDTEST_SYSCALL(SYS_LINK, ptr32(g_fdtest_path_bin_hello), ptr32(g_fdtest_path_tmp_fdtest),
+                   0u, 0u, 0u, 0u, ret, err);
+    if ((int32_t)ret != -1 || err != TEST_ERRNO_EROFS) {
+        fdtest_fail("link readonly", err, TEST_ERRNO_EROFS, &fails);
+    }
+    FDTEST_SYSCALL(SYS_SYMLINK, ptr32(g_fdtest_path_bin_hello), ptr32(g_fdtest_path_tmp_fdtest),
+                   0u, 0u, 0u, 0u, ret, err);
+    if ((int32_t)ret != -1 || err != TEST_ERRNO_EROFS) {
+        fdtest_fail("symlink readonly", err, TEST_ERRNO_EROFS, &fails);
+    }
+    FDTEST_SYSCALL(SYS_READLINK, ptr32(g_fdtest_path_bin_hello), ptr32(g_fdtest_buf),
+                   (uint32_t)sizeof(g_fdtest_buf), 0u, 0u, 0u, ret, err);
+    if ((int32_t)ret != -1 || err != TEST_ERRNO_EINVAL) {
+        fdtest_fail("readlink non-symlink", err, TEST_ERRNO_EINVAL, &fails);
+    }
+    FDTEST_SYSCALL(SYS_READLINK, ptr32(g_fdtest_path_missing), ptr32(g_fdtest_buf),
+                   (uint32_t)sizeof(g_fdtest_buf), 0u, 0u, 0u, ret, err);
+    if ((int32_t)ret != -1 || err != TEST_ERRNO_ENOENT) {
+        fdtest_fail("readlink missing", err, TEST_ERRNO_ENOENT, &fails);
     }
 
     FDTEST_SYSCALL(SYS_PIPE, ptr32(g_fdtest_pipefd), 0u, 0u, 0u, 0u, 0u, ret, err);

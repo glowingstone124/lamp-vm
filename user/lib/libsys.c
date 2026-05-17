@@ -1,3 +1,4 @@
+
 #include <lamp/libsys.h>
 
 int32_t libsys_errno;
@@ -5,6 +6,7 @@ int32_t libsys_errno;
 int32_t libsys_call6(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5) {
     volatile uint32_t abi[LAMP_SYSCALL_ABI_WORDS];
     uint32_t abi_addr = (uint32_t)(uintptr_t)&abi[0];
+    volatile uint32_t abi_addr_slot = abi_addr;
     uint32_t ret;
     abi[LAMP_SYSCALL_ABI_OFF_MAGIC / 4u] = LAMP_SYSCALL_ABI_MAGIC;
     abi[LAMP_SYSCALL_ABI_OFF_VERSION / 4u] = LAMP_SYSCALL_ABI_VERSION;
@@ -24,9 +26,9 @@ int32_t libsys_call6(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2, uint32_
           "r"(abi_addr)
         : "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "memory");
 
-    ret = abi[LAMP_SYSCALL_ABI_OFF_RET / 4u];
+    ret = ((volatile uint32_t *)(uintptr_t)abi_addr_slot)[LAMP_SYSCALL_ABI_OFF_RET / 4u];
     if ((int32_t)ret == -1) {
-        libsys_errno = (int32_t)abi[LAMP_SYSCALL_ABI_OFF_ERRNO / 4u];
+        libsys_errno = (int32_t)((volatile uint32_t *)(uintptr_t)abi_addr_slot)[LAMP_SYSCALL_ABI_OFF_ERRNO / 4u];
     } else {
         libsys_errno = 0;
     }
@@ -63,8 +65,20 @@ int32_t libsys_close(int32_t fd) {
     return libsys_call6(LAMP_SYS_CLOSE, (uint32_t)fd, 0u, 0u, 0u, 0u, 0u);
 }
 
+int32_t libsys_dup(int32_t oldfd) {
+    return libsys_call6(LAMP_SYS_DUP, (uint32_t)oldfd, 0u, 0u, 0u, 0u, 0u);
+}
+
 int32_t libsys_dup2(int32_t oldfd, int32_t newfd) {
     return libsys_call6(LAMP_SYS_DUP2, (uint32_t)oldfd, (uint32_t)newfd, 0u, 0u, 0u, 0u);
+}
+
+int32_t libsys_fcntl(int32_t fd, uint32_t cmd, uint32_t arg) {
+    return libsys_call6(LAMP_SYS_FCNTL, (uint32_t)fd, cmd, arg, 0u, 0u, 0u);
+}
+
+int32_t libsys_open(const char *path, uint32_t flags) {
+    return libsys_call6(LAMP_SYS_OPEN, (uint32_t)(uintptr_t)path, flags, 0u, 0u, 0u, 0u);
 }
 
 int32_t libsys_lseek(int32_t fd, int32_t offset, uint32_t whence) {
@@ -125,6 +139,62 @@ int32_t libsys_sigprocmask(uint32_t how, const uint32_t *set, uint32_t *oldset) 
 
 int32_t libsys_kill(int32_t pid, uint32_t sig) {
     return libsys_call6(LAMP_SYS_KILL, (uint32_t)pid, sig, 0u, 0u, 0u, 0u);
+}
+
+int32_t libsys_umask(uint32_t mask) {
+    return libsys_call6(LAMP_SYS_UMASK, mask, 0u, 0u, 0u, 0u, 0u);
+}
+
+int32_t libsys_rename(const char *oldpath, const char *newpath) {
+    return libsys_call6(LAMP_SYS_RENAME,
+                        (uint32_t)(uintptr_t)oldpath,
+                        (uint32_t)(uintptr_t)newpath,
+                        0u,
+                        0u,
+                        0u,
+                        0u);
+}
+
+int32_t libsys_unlink(const char *path) {
+    return libsys_call6(LAMP_SYS_UNLINK, (uint32_t)(uintptr_t)path, 0u, 0u, 0u, 0u, 0u);
+}
+
+int32_t libsys_mkdir(const char *path, uint32_t mode) {
+    return libsys_call6(LAMP_SYS_MKDIR, (uint32_t)(uintptr_t)path, mode, 0u, 0u, 0u, 0u);
+}
+
+int32_t libsys_rmdir(const char *path) {
+    return libsys_call6(LAMP_SYS_RMDIR, (uint32_t)(uintptr_t)path, 0u, 0u, 0u, 0u, 0u);
+}
+
+int32_t libsys_link(const char *oldpath, const char *newpath) {
+    return libsys_call6(LAMP_SYS_LINK,
+                        (uint32_t)(uintptr_t)oldpath,
+                        (uint32_t)(uintptr_t)newpath,
+                        0u,
+                        0u,
+                        0u,
+                        0u);
+}
+
+int32_t libsys_symlink(const char *target, const char *linkpath) {
+    return libsys_call6(LAMP_SYS_SYMLINK,
+                        (uint32_t)(uintptr_t)target,
+                        (uint32_t)(uintptr_t)linkpath,
+                        0u,
+                        0u,
+                        0u,
+                        0u);
+}
+
+int32_t libsys_readlink(const char *path, char *buf, uint32_t size) {
+    return libsys_call6(LAMP_SYS_READLINK,
+                        (uint32_t)(uintptr_t)path,
+                        (uint32_t)(uintptr_t)buf,
+                        size,
+                        0u,
+                        0u,
+                        0u);
 }
 
 int32_t libsys_execve(const char *path, const char *const argv[], const char *const envp[]) {

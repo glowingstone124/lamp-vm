@@ -181,6 +181,16 @@ int fs_getdents(int32_t fd, fs_dirent_t *dst, uint32_t len) {
     return FS_ERR_BADF;
 }
 
+int fs_readlink(const char *path, uint8_t *dst, uint32_t len) {
+    if (!path || path[0] == '\0' || !dst || len == 0u) {
+        return FS_ERR_INVAL;
+    }
+    if (path[0] == '/' && path[1] == 'd' && path[2] == 'e' && path[3] == 'v' && path[4] == '/') {
+        return FS_ERR_INVAL;
+    }
+    return fs_ext4_readlink(path, dst, len);
+}
+
 int fs_read(int32_t fd, uint8_t *dst, uint32_t len) {
     uint32_t t = SCHED_FD_TYPE_NONE;
     if (!dst || len == 0u) {

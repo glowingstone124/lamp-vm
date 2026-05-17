@@ -265,7 +265,6 @@ int vm_serial_rx_enqueue(VM *vm, uint8_t c) {
     const int was_empty = (head == tail);
     vm->serial_rx_fifo[head] = c;
     vm->serial_rx_head = next;
-
     if (was_empty) {
         vm->io[KEYBOARD] = (int)vm->serial_rx_fifo[tail];
         vm->io[SCREEN_ATTRIBUTE] |= SERIAL_STATUS_RX_READY;

@@ -16,10 +16,14 @@ enum {
     EXT4_EXTENTS_FL = 0x00080000u,
     EXT4_INCOMPAT_64BIT = 0x00000080u,
     EXT4_S_IFMT = 0xF000u,
+    EXT4_S_IFLNK = 0xA000u,
     EXT4_S_IFREG = 0x8000u,
     EXT4_S_IFDIR = 0x4000u,
     EXT4_ROOT_INO = 2u,
-    EXT4_MAX_NAME = 255u
+    EXT4_MAX_NAME = 255u,
+    EXT4_PATH_CAP = 256u,
+    EXT4_SYMLINK_INLINE_MAX = 60u,
+    EXT4_SYMLINK_FOLLOW_MAX = 8u
 };
 
 typedef struct ext4_state {
@@ -109,6 +113,118 @@ static inline void mem_copy_u8(uint8_t *dst, const uint8_t *src, uint32_t n) {
     for (uint32_t i = 0u; i < n; i++) {
         dst[i] = src[i];
     }
+}
+
+static uint32_t ext4_str_len_cap(const char *s, uint32_t cap) {
+    uint32_t n = 0u;
+    if (!s) {
+        return 0u;
+    }
+    while (n < cap && s[n] != '\0') {
+        n++;
+    }
+    return n;
+}
+
+static int ext4_path_append_char(char *dst, uint32_t *len, char c) {
+    if (!dst || !len || *len + 1u >= EXT4_PATH_CAP) {
+        return FS_ERR_NAMETOOLONG;
+    }
+    dst[*len] = c;
+    *len += 1u;
+    dst[*len] = '\0';
+    return 0;
+}
+
+static int ext4_path_append_component(char *dst, uint32_t *len, const char *comp, uint32_t comp_len) {
+    if (!dst || !len || !comp) {
+        return FS_ERR_INVAL;
+    }
+    if (comp_len == 0u || (comp_len == 1u && comp[0] == '.')) {
+        return 0;
+    }
+    if (comp_len == 2u && comp[0] == '.' && comp[1] == '.') {
+        if (*len > 1u) {
+            while (*len > 1u && dst[*len - 1u] != '/') {
+                *len -= 1u;
+            }
+            if (*len > 1u) {
+                *len -= 1u;
+            }
+            dst[*len] = '\0';
+        }
+        return 0;
+    }
+    if (*len > 1u) {
+        int rc = ext4_path_append_char(dst, len, '/');
+        if (rc != 0) {
+            return rc;
+        }
+    }
+    for (uint32_t i = 0u; i < comp_len; i++) {
+        int rc = ext4_path_append_char(dst, len, comp[i]);
+        if (rc != 0) {
+            return rc;
+        }
+    }
+    return 0;
+}
+
+static int ext4_path_normalize_absolute(const char *input, char *out) {
+    uint32_t in_len;
+    uint32_t out_len = 1u;
+    uint32_t pos = 1u;
+    if (!input || !out || input[0] != '/') {
+        return FS_ERR_INVAL;
+    }
+    in_len = ext4_str_len_cap(input, EXT4_PATH_CAP);
+    if (in_len == 0u || in_len >= EXT4_PATH_CAP) {
+        return FS_ERR_NAMETOOLONG;
+    }
+    out[0] = '/';
+    out[1] = '\0';
+    while (pos <= in_len) {
+        uint32_t start;
+        uint32_t comp_len;
+        while (pos < in_len && input[pos] == '/') {
+            pos++;
+        }
+        start = pos;
+        while (pos < in_len && input[pos] != '/') {
+            pos++;
+        }
+        comp_len = pos - start;
+        {
+            int rc = ext4_path_append_component(out, &out_len, &input[start], comp_len);
+            if (rc != 0) {
+                return rc;
+            }
+        }
+        if (pos >= in_len) {
+            break;
+        }
+    }
+    return 0;
+}
+
+static int ext4_path_copy_prefix(char *dst, uint32_t *len, const char *src, uint32_t end) {
+    if (!dst || !len || !src || src[0] != '/') {
+        return FS_ERR_INVAL;
+    }
+    dst[0] = '/';
+    dst[1] = '\0';
+    *len = 1u;
+    for (uint32_t i = 1u; i < end && src[i] != '\0'; i++) {
+        int rc = ext4_path_append_char(dst, len, src[i]);
+        if (rc != 0) {
+            return rc;
+        }
+    }
+    while (*len > 1u && dst[*len - 1u] == '/') {
+        *len -= 1u;
+        dst[*len] = '\0';
+    }
+    return 0;
 }
 
 static void ext4_block_cache_reset(void) {
@@ -728,6 +844,50 @@ static int ext4_read_inode_data_locked(uint32_t inode_no, uint32_t offset, uint8
     return (int)done;
 }
 
+static int ext4_read_symlink_target_locked(uint32_t inode_no, char *dst, uint32_t cap, uint32_t *out_len) {
+    uint32_t size;
+    uint16_t mode;
+    int rc;
+    if (!dst || cap == 0u) {
+        return FS_ERR_INVAL;
+    }
+    if (out_len) {
+        *out_len = 0u;
+    }
+    if (ext4_read_inode_locked(inode_no, g_inode_buf) != 0) {
+        return FS_ERR_IO;
+    }
+    mode = ext4_inode_mode(g_inode_buf) & EXT4_S_IFMT;
+    if (mode != EXT4_S_IFLNK) {
+        return FS_ERR_INVAL;
+    }
+    rc = ext4_inode_size32(g_inode_buf, &size);
+    if (rc != 0) {
+        return rc;
+    }
+    if (size >= cap) {
+        return FS_ERR_NAMETOOLONG;
+    }
+    if (size <= EXT4_SYMLINK_INLINE_MAX && (ext4_inode_flags(g_inode_buf) & EXT4_EXTENTS_FL) == 0u) {
+        for (uint32_t i = 0u; i < size; i++) {
+            dst[i] = (char)g_inode_buf[0x28u + i];
+        }
+    } else {
+        rc = ext4_read_inode_data_locked(inode_no, 0u, (uint8_t *)dst, size);
+        if (rc < 0) {
+            return rc;
+        }
+        if ((uint32_t)rc != size) {
+            return FS_ERR_IO;
+        }
+    }
+    dst[size] = '\0';
+    if (out_len) {
+        *out_len = size;
+    }
+    return 0;
+}
+
 static int ext4_write_inode_data_locked(uint32_t inode_no, uint32_t offset, const uint8_t *src, uint32_t len,
                                         uint32_t *out_new_size) {
     uint32_t size;
@@ -938,11 +1098,18 @@ static int ext4_lookup_in_dir_locked(uint32_t dir_ino, const uint8_t *name, uint
     return FS_ERR_NOENT;
 }
 
-static int ext4_lookup_path_locked(const char *path, uint32_t *out_ino, uint16_t *out_mode, uint32_t *out_size) {
+static int ext4_lookup_path_follow_locked(const char *path,
+                                          uint32_t *out_ino,
+                                          uint16_t *out_mode,
+                                          uint32_t *out_size,
+                                          uint32_t depth) {
     uint32_t cur_ino = EXT4_ROOT_INO;
     uint32_t i = 0u;
     if (!path || path[0] != '/' || !out_ino || !out_mode || !out_size) {
         return FS_ERR_INVAL;
+    }
+    if (depth > EXT4_SYMLINK_FOLLOW_MAX) {
+        return FS_ERR_LOOP;
     }
 
     while (path[i] == '/') {
@@ -964,18 +1131,22 @@ static int ext4_lookup_path_locked(const char *path, uint32_t *out_ino, uint16_t
 
     while (path[i] != '\0') {
         uint8_t comp[EXT4_MAX_NAME];
+        uint32_t comp_start;
+        uint32_t rem_pos;
         uint32_t n = 0u;
         uint32_t next_ino = 0u;
 
         while (path[i] == '/') {
             i++;
         }
+        comp_start = i;
         while (path[i] != '\0' && path[i] != '/') {
             if (n >= EXT4_MAX_NAME) {
                 return FS_ERR_INVAL;
             }
             comp[n++] = (uint8_t)path[i++];
         }
+        rem_pos = i;
         if (n == 0u) {
             break;
         }
@@ -984,6 +1155,64 @@ static int ext4_lookup_path_locked(const char *path, uint32_t *out_ino, uint16_t
             if (lrc != 0) {
                 return lrc;
             }
+        }
+        if (ext4_read_inode_locked(next_ino, g_inode_buf) != 0) {
+            return FS_ERR_IO;
+        }
+        if ((ext4_inode_mode(g_inode_buf) & EXT4_S_IFMT) == EXT4_S_IFLNK) {
+            char target[EXT4_PATH_CAP];
+            char combined[EXT4_PATH_CAP];
+            char normalized[EXT4_PATH_CAP];
+            uint32_t target_len = 0u;
+            uint32_t combined_len = 0u;
+            int rc = ext4_read_symlink_target_locked(next_ino, target, (uint32_t)sizeof(target), &target_len);
+            if (rc != 0) {
+                return rc;
+            }
+            if (target_len == 0u) {
+                return FS_ERR_NOENT;
+            }
+            if (target[0] == '/') {
+                combined[0] = '\0';
+                combined_len = 0u;
+            } else {
+                rc = ext4_path_copy_prefix(combined, &combined_len, path, comp_start);
+                if (rc != 0) {
+                    return rc;
+                }
+                if (combined_len > 1u) {
+                    rc = ext4_path_append_char(combined, &combined_len, '/');
+                    if (rc != 0) {
+                        return rc;
+                    }
+                }
+            }
+            for (uint32_t j = 0u; j < target_len; j++) {
+                rc = ext4_path_append_char(combined, &combined_len, target[j]);
+                if (rc != 0) {
+                    return rc;
+                }
+            }
+            while (path[rem_pos] == '/') {
+                rem_pos++;
+            }
+            if (path[rem_pos] != '\0') {
+                rc = ext4_path_append_char(combined, &combined_len, '/');
+                if (rc != 0) {
+                    return rc;
+                }
+                while (path[rem_pos] != '\0') {
+                    rc = ext4_path_append_char(combined, &combined_len, path[rem_pos++]);
+                    if (rc != 0) {
+                        return rc;
+                    }
+                }
+            }
+            rc = ext4_path_normalize_absolute(combined, normalized);
+            if (rc != 0) {
+                return rc;
+            }
+            return ext4_lookup_path_follow_locked(normalized, out_ino, out_mode, out_size, depth + 1u);
         }
         cur_ino = next_ino;
         while (path[i] == '/') {
@@ -1004,6 +1233,10 @@ static int ext4_lookup_path_locked(const char *path, uint32_t *out_ino, uint16_t
     *out_ino = cur_ino;
     *out_mode = ext4_inode_mode(g_inode_buf);
     return 0;
+}
+
+static int ext4_lookup_path_locked(const char *path, uint32_t *out_ino, uint16_t *out_mode, uint32_t *out_size) {
+    return ext4_lookup_path_follow_locked(path, out_ino, out_mode, out_size, 0u);
 }
 
 static int ext4_try_probe_locked(void) {
@@ -1200,6 +1433,8 @@ static uint32_t ext4_dirent_type_to_sys(uint8_t type) {
             return SYS_DT_DIR;
         case 3u:
             return SYS_DT_CHR;
+        case 7u:
+            return SYS_DT_LNK;
         case 6u:
             return SYS_DT_SOCK;
         default:
@@ -1305,6 +1540,136 @@ int fs_ext4_getdents_fd(int32_t fd, fs_dirent_t *dst, uint32_t len) {
         (void)sched_fd_regular_advance(fd, consumed, 0);
     }
     return (int)written;
+}
+
+int fs_ext4_readlink(const char *path, uint8_t *dst, uint32_t len) {
+    uint32_t parent_ino = EXT4_ROOT_INO;
+    uint32_t i = 0u;
+    uint32_t link_ino = 0u;
+    char target[EXT4_PATH_CAP];
+    uint32_t target_len = 0u;
+    int rc;
+
+    if (!path || path[0] != '/' || !dst || len == 0u) {
+        return FS_ERR_INVAL;
+    }
+
+    ext4_mutex_lock();
+    rc = ext4_try_probe_locked();
+    while (rc == 0 && path[i] == '/') {
+        i++;
+    }
+    if (rc == 0 && path[i] == '\0') {
+        rc = FS_ERR_INVAL;
+    }
+    while (rc == 0 && path[i] != '\0') {
+        uint8_t comp[EXT4_MAX_NAME];
+        uint32_t comp_start;
+        uint32_t n = 0u;
+        uint32_t next_ino = 0u;
+        while (path[i] == '/') {
+            i++;
+        }
+        comp_start = i;
+        while (path[i] != '\0' && path[i] != '/') {
+            if (n >= EXT4_MAX_NAME) {
+                rc = FS_ERR_INVAL;
+                break;
+            }
+            comp[n++] = (uint8_t)path[i++];
+        }
+        if (rc != 0 || n == 0u) {
+            break;
+        }
+        rc = ext4_lookup_in_dir_locked(parent_ino, comp, n, &next_ino);
+        if (rc != 0) {
+            break;
+        }
+        while (path[i] == '/') {
+            i++;
+        }
+        if (path[i] == '\0') {
+            link_ino = next_ino;
+            break;
+        }
+        if (ext4_read_inode_locked(next_ino, g_inode_buf) != 0) {
+            rc = FS_ERR_IO;
+            break;
+        }
+        if ((ext4_inode_mode(g_inode_buf) & EXT4_S_IFMT) == EXT4_S_IFLNK) {
+            uint32_t size = 0u;
+            uint16_t smode = 0u;
+            char combined[EXT4_PATH_CAP];
+            uint32_t combined_len = 0u;
+            char normalized[EXT4_PATH_CAP];
+            rc = ext4_read_symlink_target_locked(next_ino, target, (uint32_t)sizeof(target), &target_len);
+            if (rc != 0) {
+                break;
+            }
+            if (target[0] == '/') {
+                combined[0] = '\0';
+                combined_len = 0u;
+            } else {
+                rc = ext4_path_copy_prefix(combined, &combined_len, path, comp_start);
+                if (rc != 0) {
+                    break;
+                }
+                if (combined_len > 1u) {
+                    rc = ext4_path_append_char(combined, &combined_len, '/');
+                    if (rc != 0) {
+                        break;
+                    }
+                }
+            }
+            for (uint32_t j = 0u; j < target_len; j++) {
+                rc = ext4_path_append_char(combined, &combined_len, target[j]);
+                if (rc != 0) {
+                    break;
+                }
+            }
+            if (rc != 0) {
+                break;
+            }
+            if (path[i] != '\0') {
+                rc = ext4_path_append_char(combined, &combined_len, '/');
+                if (rc != 0) {
+                    break;
+                }
+                while (path[i] != '\0') {
+                    rc = ext4_path_append_char(combined, &combined_len, path[i++]);
+                    if (rc != 0) {
+                        break;
+                    }
+                }
+            }
+            if (rc != 0) {
+                break;
+            }
+            rc = ext4_path_normalize_absolute(combined, normalized);
+            if (rc == 0) {
+                rc = ext4_lookup_path_locked(normalized, &link_ino, &smode, &size);
+            }
+            (void)size;
+            (void)smode;
+            break;
+        }
+        parent_ino = next_ino;
+    }
+    if (rc == 0) {
+        rc = ext4_read_symlink_target_locked(link_ino, target, (uint32_t)sizeof(target), &target_len);
+    }
+    ext4_mutex_unlock();
+
+    if (rc != 0) {
+        return rc;
+    }
+    if (target_len > len) {
+        target_len = len;
+    }
+    for (uint32_t i_copy = 0u; i_copy < target_len; i_copy++) {
+        dst[i_copy] = (uint8_t)target[i_copy];
+    }
+    return (int)target_len;
 }
 
 int fs_ext4_read_fd(int32_t fd, uint8_t *dst, uint32_t len) {

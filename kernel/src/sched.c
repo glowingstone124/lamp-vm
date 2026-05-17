@@ -24,40 +24,41 @@ sched_stack_ctx_t g_sched_ctx[SCHED_MAX_CPUS];
 #define SCHED_CTX_OFF_DSP 16
 #define SCHED_CTX_OFF_ISP 20
 #define SCHED_CTX_OFF_IRQ_MASK 24
-#define SCHED_CTX_OFF_POOL_SLOT 28
-#define SCHED_CTX_OFF_VALID 32
-#define SCHED_CTX_OFF_REG0 36
-#define SCHED_CTX_OFF_REG1 40
-#define SCHED_CTX_OFF_REG2 44
-#define SCHED_CTX_OFF_REG3 48
-#define SCHED_CTX_OFF_REG4 52
-#define SCHED_CTX_OFF_REG5 56
-#define SCHED_CTX_OFF_REG6 60
-#define SCHED_CTX_OFF_REG7 64
-#define SCHED_CTX_OFF_REG8 68
-#define SCHED_CTX_OFF_REG9 72
-#define SCHED_CTX_OFF_REG10 76
-#define SCHED_CTX_OFF_REG11 80
-#define SCHED_CTX_OFF_REG12 84
-#define SCHED_CTX_OFF_REG13 88
-#define SCHED_CTX_OFF_REG14 92
-#define SCHED_CTX_OFF_REG15 96
-#define SCHED_CTX_OFF_REG16 100
-#define SCHED_CTX_OFF_REG17 104
-#define SCHED_CTX_OFF_REG18 108
-#define SCHED_CTX_OFF_REG19 112
-#define SCHED_CTX_OFF_REG20 116
-#define SCHED_CTX_OFF_REG21 120
-#define SCHED_CTX_OFF_REG22 124
-#define SCHED_CTX_OFF_REG23 128
-#define SCHED_CTX_OFF_REG24 132
-#define SCHED_CTX_OFF_REG25 136
-#define SCHED_CTX_OFF_REG26 140
-#define SCHED_CTX_OFF_REG27 144
-#define SCHED_CTX_OFF_REG28 148
-#define SCHED_CTX_OFF_REG29 152
-#define SCHED_CTX_OFF_REG30 156
-#define SCHED_CTX_OFF_REG31 160
+#define SCHED_CTX_OFF_IN_INTERRUPT 28
+#define SCHED_CTX_OFF_POOL_SLOT 32
+#define SCHED_CTX_OFF_VALID 36
+#define SCHED_CTX_OFF_REG0 40
+#define SCHED_CTX_OFF_REG1 44
+#define SCHED_CTX_OFF_REG2 48
+#define SCHED_CTX_OFF_REG3 52
+#define SCHED_CTX_OFF_REG4 56
+#define SCHED_CTX_OFF_REG5 60
+#define SCHED_CTX_OFF_REG6 64
+#define SCHED_CTX_OFF_REG7 68
+#define SCHED_CTX_OFF_REG8 72
+#define SCHED_CTX_OFF_REG9 76
+#define SCHED_CTX_OFF_REG10 80
+#define SCHED_CTX_OFF_REG11 84
+#define SCHED_CTX_OFF_REG12 88
+#define SCHED_CTX_OFF_REG13 92
+#define SCHED_CTX_OFF_REG14 96
+#define SCHED_CTX_OFF_REG15 100
+#define SCHED_CTX_OFF_REG16 104
+#define SCHED_CTX_OFF_REG17 108
+#define SCHED_CTX_OFF_REG18 112
+#define SCHED_CTX_OFF_REG19 116
+#define SCHED_CTX_OFF_REG20 120
+#define SCHED_CTX_OFF_REG21 124
+#define SCHED_CTX_OFF_REG22 128
+#define SCHED_CTX_OFF_REG23 132
+#define SCHED_CTX_OFF_REG24 136
+#define SCHED_CTX_OFF_REG25 140
+#define SCHED_CTX_OFF_REG26 144
+#define SCHED_CTX_OFF_REG27 148
+#define SCHED_CTX_OFF_REG28 152
+#define SCHED_CTX_OFF_REG29 156
+#define SCHED_CTX_OFF_REG30 160
+#define SCHED_CTX_OFF_REG31 164
 
 #define SCHED_IO_CALL_BASE 0xF4
 #define SCHED_IO_DATA_BASE 0xF5
@@ -66,6 +67,7 @@ sched_stack_ctx_t g_sched_ctx[SCHED_MAX_CPUS];
 #define SCHED_IO_DSP 0xF1
 #define SCHED_IO_ISP 0xF3
 #define SCHED_IO_IRQ_MASK 0xF2
+#define SCHED_IO_IN_INTERRUPT 0xF7
 
 #define SCHED_STR1(x) #x
 #define SCHED_STR(x) SCHED_STR1(x)
@@ -74,6 +76,10 @@ extern void sched_ctx_swap(sched_stack_ctx_t *from, const sched_stack_ctx_t *to)
 extern void sched_ctx_capture(sched_stack_ctx_t *out);
 
 static void sched_task_bootstrap(void);
+
+static inline void sched_cpu_ctx_write32(uint32_t io_addr, uint32_t value) {
+    __asm__ volatile("out %0, %1" :: "r"(value), "r"(io_addr));
+}
 
 __asm__(
     ".text\n"
@@ -84,7 +90,11 @@ __asm__(
     "  movi r5, " SCHED_STR(SCHED_IO_IRQ_MASK) "\n"
     "  in r4, r5\n"
     "  store32 r4, r2, " SCHED_STR(SCHED_CTX_OFF_IRQ_MASK) "\n"
+    "  movi r5, " SCHED_STR(SCHED_IO_IN_INTERRUPT) "\n"
+    "  in r4, r5\n"
+    "  store32 r4, r2, " SCHED_STR(SCHED_CTX_OFF_IN_INTERRUPT) "\n"
     "  movi r4, 1\n"
+    "  movi r5, " SCHED_STR(SCHED_IO_IRQ_MASK) "\n"
     "  out r4, r5\n"
     "  movi r5, " SCHED_STR(SCHED_IO_CALL_BASE) "\n"
     "  in r4, r5\n"
@@ -137,6 +147,9 @@ __asm__(
     "  movi r5, " SCHED_STR(SCHED_IO_ISR_BASE) "\n"
     "  load32 r4, r3, " SCHED_STR(SCHED_CTX_OFF_ISR_BASE) "\n"
     "  out r4, r5\n"
+    "  movi r5, " SCHED_STR(SCHED_IO_IN_INTERRUPT) "\n"
+    "  load32 r4, r3, " SCHED_STR(SCHED_CTX_OFF_IN_INTERRUPT) "\n"
+    "  out r4, r5\n"
     "  movi r5, " SCHED_STR(SCHED_IO_CSP) "\n"
     "  load32 r4, r3, " SCHED_STR(SCHED_CTX_OFF_CSP) "\n"
     "  out r4, r5\n"
@@ -184,6 +197,9 @@ __asm__(
     "  movi r5, " SCHED_STR(SCHED_IO_IRQ_MASK) "\n"
     "  in r4, r5\n"
     "  store32 r4, r2, " SCHED_STR(SCHED_CTX_OFF_IRQ_MASK) "\n"
+    "  movi r5, " SCHED_STR(SCHED_IO_IN_INTERRUPT) "\n"
+    "  in r4, r5\n"
+    "  store32 r4, r2, " SCHED_STR(SCHED_CTX_OFF_IN_INTERRUPT) "\n"
     "  movi r5, " SCHED_STR(SCHED_IO_CALL_BASE) "\n"
     "  in r4, r5\n"
     "  store32 r4, r2, " SCHED_STR(SCHED_CTX_OFF_CALL_BASE) "\n"
@@ -272,6 +288,7 @@ int sched_stack_alloc_locked(sched_stack_ctx_t *ctx_out) {
         ctx_out->dsp = VM_DATA_STACK_ENTRIES;
         ctx_out->isp = VM_ISR_STACK_ENTRIES;
         ctx_out->irq_masked = 0u;
+        ctx_out->in_interrupt = 0u;
         ctx_out->pool_slot = slot;
         ctx_out->valid = 1u;
         ctx_out->regs[30] = base + VM_STACK_SLOT_BYTES;
@@ -517,6 +534,8 @@ void sched_switch_current_to_scheduler(void) {
     if (!slot->used || slot->is_idle || !slot->stack_ctx.valid) {
         return;
     }
+    g_sched_ctx[cpu_id].irq_masked = 0u;
+    g_sched_ctx[cpu_id].in_interrupt = 0u;
     sched_ctx_swap(&slot->stack_ctx, &g_sched_ctx[cpu_id]);
 }
 
@@ -602,6 +621,7 @@ void sched_init(void) {
     root->pub.arg = 0;
     root->cwd[0] = '/';
     root->cwd[1] = '\0';
+    root->file_umask = 022u;
     root->run_cpu = 0u;
     spinlock_init(&root->fd_lock);
     sched_fd_table_init_stdio(root);
@@ -726,6 +746,10 @@ void sched_run(void) {
         *idx_ptr = next;
         slot->run_cpu = cpu_id;
         sched_runq_del(cpu_id, next);
+        if (slot->pub.kind == SCHED_TASK_KIND_KERNEL &&
+            slot->stack_ctx.csp == VM_CALL_STACK_ENTRIES) {
+            sched_stack_prepare_bootstrap_locked(slot);
+        }
         slot->pub.state = SCHED_TASK_RUNNING;
         slot->pub.run_ticks++;
         spinlock_unlock(&g_sched_lock);

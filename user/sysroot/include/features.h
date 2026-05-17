@@ -1,0 +1,4 @@
+#ifndef LAMP_LIBC_FEATURES_H
+#define LAMP_LIBC_FEATURES_H
+
+#endif

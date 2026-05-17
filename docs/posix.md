@@ -11,6 +11,7 @@ Implemented now:
 - process/task basics: `getpid`, `getppid`, `yield`, `sleep_ticks`, `exit`, `waitpid`, `chdir`, `getcwd`
 - basic time syscalls: `nanosleep`, `clock_getres`, `clock_gettime`, `clock_settime`, `gettimeofday`
 - fd syscalls: `read`, `write`, `close`, `dup`, `dup2`, `fcntl`, `pipe`, `ioctl`, `lseek`, `stat`, `fstat`, `getdents`, `access`
+- filesystem compatibility syscalls: `umask`, `rename`, `unlink`, `mkdir`, `rmdir`, `link`, `symlink`, `readlink`
 - readiness syscalls: `poll`, `select`
 - tty mode syscalls: `tty_getmode`, `tty_setmode`, `ioctl(TCGETS/TCSETS/TIOCGWINSZ)`
 - filesystem/network surface:
@@ -97,6 +98,15 @@ cwd/path support:
 - `chdir` accepts absolute or relative paths and requires the target to be a directory
 - `getcwd` returns the current absolute path or `-1/ERANGE` when the user buffer is too small
 - path syscalls resolve relative names against cwd before reaching VFS: `open`, `stat`, `access`, `execve`, `chdir`
+- `umask(mask)` stores `mask & 0777`, returns the old mask, and is inherited by `sched_spawn` and `vfork`
+
+filesystem mutation/link surface:
+
+- `rename`, `unlink`, `mkdir`, `rmdir`, `link`, and `symlink` are wired for ABI compatibility but return `-1/EROFS` for valid mutation inputs until ext4 mutation support lands
+- `rename`/`link` validate the source exists before returning read-only status
+- `unlink`/`rmdir` validate the target exists and preserve basic type errors before returning read-only status
+- ext4 path lookup follows symlinks for path-based syscalls such as `open`, `stat`, `access`, `execve`, and `chdir`
+- `readlink` returns ext4 symlink targets without appending a NUL; existing non-symlink paths return `-1/EINVAL`, and missing paths preserve filesystem errno such as `-1/ENOENT`
 
 signal support:
 
@@ -194,6 +204,7 @@ Init shell command:
 
 - `fdtest`
 - `upipe` after installing `/bin/cat` and `/bin/pipe_exec`
+- `upwd` and `uls [path]` after installing `/bin/pwd` and `/bin/ls`
 
 Coverage currently includes:
 

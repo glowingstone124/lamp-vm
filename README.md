@@ -55,6 +55,8 @@ Arguments:
 - `--bin <file>`: program binary path (default: `boot.bin`)
 - `--smp <cores>`: CPU worker thread count in `[1, 64]` (default: `1`)
 - `--selftest`: run built-in SMP tests and exit
+- `--console`: attach the host terminal to the guest serial console while keeping SDL and VNC enabled
+- `--serial-stdin`: legacy headless serial stdin mode
 
 Run selftests:
 

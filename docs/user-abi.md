@@ -65,6 +65,14 @@ Current IDs (must match kernel `include/kernel/syscall.h`):
 - `40 sigaction`
 - `41 sigprocmask`
 - `42 kill`
+- `43 umask`
+- `44 rename`
+- `45 unlink`
+- `46 mkdir`
+- `47 rmdir`
+- `48 link`
+- `49 symlink`
+- `50 readlink`
 
 Current `vfork` note:
 
@@ -99,6 +107,7 @@ Kernel currently uses Linux-compatible errno numbers for implemented paths:
 - `34 ERANGE`
 - `36 ENAMETOOLONG`
 - `38 ENOSYS`
+- `40 ELOOP`
 - `75 EOVERFLOW`
 - `88 ENOTSOCK`
 - `95 EOPNOTSUPP`

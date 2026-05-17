@@ -195,6 +195,33 @@ static void init_wait_child_and_report(int32_t tid) {
     init_wait_child_and_report_tag("uhello", tid);
 }
 
+static void init_wait_child_and_report_tag_forever(const char *tag, int32_t tid) {
+    uint32_t status = 0u;
+    for (;;) {
+        int rc = sched_waitpid(tid, SCHED_WAITPID_WNOHANG, &status);
+        if (rc == 0) {
+            sched_sleep_ticks(1u);
+            continue;
+        }
+        if (rc <= 0) {
+            if (tag) {
+                init_puts(tag);
+                init_puts(" ");
+            }
+            init_puts("waitpid failed\n");
+            return;
+        }
+        if (tag) {
+            init_puts(tag);
+            init_puts(" ");
+        }
+        init_puts("exit status=");
+        kprint_hex32((status >> 8u) & 0xFFu);
+        init_puts("\n");
+        return;
+    }
+}
+
 static void init_report_spawn_failed(const char *tag, int32_t rc, const char *path) {
     if (tag) {
         init_puts(tag);
@@ -286,6 +313,51 @@ static void init_run_upipe(uint32_t count) {
     }
 }
 
+static void init_run_upwd(void) {
+    static const char *const argv[] = {"/bin/pwd", 0};
+    int32_t tid = user_exec_spawn_path("/bin/pwd", argv, 0);
+    if (tid < 0) {
+        init_report_spawn_failed("upwd", tid, "/bin/pwd");
+        return;
+    }
+    init_puts("upwd tid=");
+    kprint_hex32((uint32_t)tid);
+    init_puts("\n");
+    init_wait_child_and_report_tag("upwd", tid);
+}
+
+static void init_run_uls(const char *path) {
+    static const char *const argv_default[] = {"/bin/ls", 0};
+    const char *argv_path[] = {"/bin/ls", path, 0};
+    const char *const *argv = path && path[0] != '\0' ? argv_path : argv_default;
+    int32_t tid = user_exec_spawn_path("/bin/ls", argv, 0);
+    if (tid < 0) {
+        init_report_spawn_failed("uls", tid, "/bin/ls");
+        return;
+    }
+    init_puts("uls tid=");
+    kprint_hex32((uint32_t)tid);
+    init_puts("\n");
+    init_wait_child_and_report_tag("uls", tid);
+}
+
+static void init_run_ush(void) {
+    static const char *const argv[] = {"-/bin/sh", 0};
+    int32_t tid = user_exec_spawn_path("/bin/sh", argv, 0);
+    if (tid < 0) {
+        init_report_spawn_failed("ush", tid, "/bin/sh");
+        return;
+    }
+    init_puts("ush tid=");
+    kprint_hex32((uint32_t)tid);
+    init_puts("\n");
+    init_wait_child_and_report_tag_forever("ush", tid);
+}
+
+static void init_run_uexec() {
+
+}
+
 static void init_handle_cmd(char *line) {
     while (*line == ' ') {
         line++;
@@ -308,7 +380,11 @@ static void init_handle_cmd(char *line) {
         init_puts("  uhello [count]\n");
         init_puts("  uvfork [count]\n");
         init_puts("  upipe [count]\n");
+        init_puts("  upwd\n");
+        init_puts("  uls [path]\n");
+        init_puts("  ush\n");
         init_puts("  halt\n");
+        init_puts("  uexec [path]\n");
         return;
     }
     if (init_streq(line, "halt")) {
@@ -355,6 +431,18 @@ static void init_handle_cmd(char *line) {
         init_run_upipe(1u);
         return;
     }
+    if (init_streq(line, "upwd")) {
+        init_run_upwd();
+        return;
+    }
+    if (init_streq(line, "uls")) {
+        init_run_uls(0);
+        return;
+    }
+    if (init_streq(line, "ush")) {
+        init_run_ush();
+        return;
+    }
     if (init_starts_with(line, "uhello ")) {
         uint32_t count = 0u;
         if (!init_parse_u32(line + 7, &count)) {
@@ -380,6 +468,14 @@ static void init_handle_cmd(char *line) {
             return;
         }
         init_run_upipe(count);
+        return;
+    }
+    if (init_starts_with(line, "uexec ")) {
+        init_run_uexec();
+        return;
+    }
+    if (init_starts_with(line, "uls ")) {
+        init_run_uls(line + 4);
         return;
     }
     if (init_starts_with(line, "log ")) {

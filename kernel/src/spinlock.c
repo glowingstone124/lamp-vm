@@ -1,7 +1,7 @@
 #include "../include/kernel/spinlock.h"
 #include "../include/kernel/platform.h"
 
-static inline uint32_t spin_try_acquire(volatile uint32_t *ptr) {
+static inline __attribute__((always_inline)) uint32_t spin_try_acquire(volatile uint32_t *ptr) {
     uint32_t expected = 0u;
     const uint32_t desired = 1u;
     uint32_t old = expected;
@@ -14,7 +14,7 @@ static inline uint32_t spin_try_acquire(volatile uint32_t *ptr) {
     return (old == expected) ? 1u : 0u;
 }
 
-static inline uint32_t spin_load_acquire(volatile uint32_t *ptr) {
+static inline __attribute__((always_inline)) uint32_t spin_load_acquire(volatile uint32_t *ptr) {
     uint32_t v = 0u;
     __asm__ volatile (
         "ldar %0, %1, 0\n"
@@ -25,7 +25,7 @@ static inline uint32_t spin_load_acquire(volatile uint32_t *ptr) {
     return v;
 }
 
-static inline uint32_t spin_irq_mask_read(void) {
+static inline __attribute__((always_inline)) uint32_t spin_irq_mask_read(void) {
     uint32_t v = 0u;
     __asm__ volatile (
         "in %0, %1\n"
@@ -35,7 +35,7 @@ static inline uint32_t spin_irq_mask_read(void) {
     return v & 1u;
 }
 
-static inline void spin_irq_mask_write(uint32_t masked) {
+static inline __attribute__((always_inline)) void spin_irq_mask_write(uint32_t masked) {
     const uint32_t v = masked ? 1u : 0u;
     __asm__ volatile (
         "out %0, %1\n"

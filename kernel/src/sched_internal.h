@@ -20,6 +20,7 @@ typedef struct sched_stack_ctx {
     uint32_t dsp;
     uint32_t isp;
     uint32_t irq_masked;
+    uint32_t in_interrupt;
     uint32_t pool_slot;
     uint32_t valid;
     uint32_t regs[32];
@@ -79,6 +80,7 @@ typedef struct sched_task_slot {
     uint32_t vfork_resume_valid;
     uint32_t syscall_abi_addr;
     char cwd[SCHED_CWD_CAP];
+    uint32_t file_umask;
     uint32_t sig_mask;
     uint32_t sig_pending;
     sched_sigaction32_t sig_action[SCHED_SIGNAL_MAX + 1u];

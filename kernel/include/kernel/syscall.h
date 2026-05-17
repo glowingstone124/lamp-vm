@@ -46,11 +46,20 @@ enum {
     SYS_IOCTL = 39u,
     SYS_SIGACTION = 40u,
     SYS_SIGPROCMASK = 41u,
-    SYS_KILL = 42u
+    SYS_KILL = 42u,
+    SYS_UMASK = 43u,
+    SYS_RENAME = 44u,
+    SYS_UNLINK = 45u,
+    SYS_MKDIR = 46u,
+    SYS_RMDIR = 47u,
+    SYS_LINK = 48u,
+    SYS_SYMLINK = 49u,
+    SYS_READLINK = 50u
 };
 
 enum {
     SYS_WAITPID_WNOHANG = 1u,
+    SYS_WAITPID_WUNTRACED = 2u,
     SYS_IO_NONBLOCK = 1u /* deprecated: use fcntl(F_SETFL, O_NONBLOCK) */
 };
 
@@ -68,10 +77,12 @@ enum {
 };
 
 enum {
+    SYS_FCNTL_F_DUPFD = 0u,
     SYS_FCNTL_F_GETFD = 1u,
     SYS_FCNTL_F_SETFD = 2u,
     SYS_FCNTL_F_GETFL = 3u,
-    SYS_FCNTL_F_SETFL = 4u
+    SYS_FCNTL_F_SETFL = 4u,
+    SYS_FCNTL_F_DUPFD_CLOEXEC = 5u
 };
 
 enum {
@@ -81,7 +92,8 @@ enum {
     SYS_O_RDWR = 0x00000002u,
     SYS_O_CREAT = 0x00000040u,
     SYS_O_TRUNC = 0x00000200u,
-    SYS_O_NONBLOCK = 0x00000800u
+    SYS_O_NONBLOCK = 0x00000800u,
+    SYS_O_CLOEXEC = 0x00080000u
 };
 
 enum {
@@ -97,6 +109,7 @@ enum {
 enum {
     SYS_S_IFMT = 0xF000u,
     SYS_S_IFSOCK = 0xC000u,
+    SYS_S_IFLNK = 0xA000u,
     SYS_S_IFREG = 0x8000u,
     SYS_S_IFDIR = 0x4000u,
     SYS_S_IFCHR = 0x2000u,
@@ -108,6 +121,7 @@ enum {
     SYS_DT_REG = 8u,
     SYS_DT_DIR = 4u,
     SYS_DT_CHR = 2u,
+    SYS_DT_LNK = 10u,
     SYS_DT_SOCK = 12u
 };
 

@@ -1,5 +1,6 @@
 #include "../include/kernel/console.h"
 #include "../include/kernel/console_fb.h"
+#include "../include/kernel/irq.h"
 #include "../include/kernel/platform.h"
 #include "../include/kernel/printk.h"
 #include "../include/kernel/sched.h"
@@ -23,6 +24,7 @@ static volatile uint32_t g_rx_dropped;
 static volatile uint32_t g_rx_lines;
 static volatile uint32_t g_rx_eofs;
 static volatile uint32_t g_tty_lflag;
+static volatile uint32_t g_console_read_wait_count;
 static uint8_t g_rx_buf[CONSOLE_RX_CAP];
 static sched_waitq_t g_rx_waitq;
 static spinlock_t g_rx_lock;
@@ -111,6 +113,7 @@ void console_init(void) {
     g_rx_dropped = 0u;
     g_rx_lines = 0u;
     g_rx_eofs = 0u;
+    g_console_read_wait_count = 0u;
     g_tty_lflag = TTY_LFLAG_ECHO | TTY_LFLAG_ICANON | TTY_LFLAG_ISIG;
     spinlock_init(&g_rx_lock);
     sched_waitq_init(&g_rx_waitq);
@@ -218,6 +221,7 @@ uint32_t console_rx_lines(void) {
 
 uint32_t console_can_read(void) {
     uint32_t ready;
+    irq_serial_drain_rx();
     spinlock_lock(&g_rx_lock);
     ready = console_can_read_locked();
     spinlock_unlock(&g_rx_lock);
@@ -226,6 +230,7 @@ uint32_t console_can_read(void) {
 
 int console_wait_readable(uint32_t timeout_ticks, uint32_t nonblock) {
     uint32_t ready;
+    irq_serial_drain_rx();
     spinlock_lock(&g_rx_lock);
     ready = console_can_read_locked();
     if (ready) {
@@ -236,7 +241,7 @@ int console_wait_readable(uint32_t timeout_ticks, uint32_t nonblock) {
         spinlock_unlock(&g_rx_lock);
         return 0;
     }
-    sched_waitq_sleep(&g_rx_waitq, timeout_ticks);
+    sched_waitq_sleep(&g_rx_waitq, timeout_ticks ? timeout_ticks : 1u);
     spinlock_unlock(&g_rx_lock);
     return CONSOLE_IO_BLOCKED;
 }
@@ -266,6 +271,7 @@ int console_read(uint8_t *dst, uint32_t len, uint32_t nonblock) {
         return 0;
     }
 
+    irq_serial_drain_rx();
     spinlock_lock(&g_rx_lock);
     canonical = (g_tty_lflag & TTY_LFLAG_ICANON) ? 1u : 0u;
     if (canonical && g_rx_lines == 0u && g_rx_eofs == 0u) {
@@ -273,7 +279,18 @@ int console_read(uint8_t *dst, uint32_t len, uint32_t nonblock) {
             spinlock_unlock(&g_rx_lock);
             return 0;
         }
-        sched_waitq_sleep(&g_rx_waitq, 0u);
+        g_console_read_wait_count++;
+        if ((g_console_read_wait_count & 0x3Fu) == 1u) {
+            klog_begin(KLOG_LEVEL_DEBUG, "console");
+            klog_puts("read wait head=");
+            klog_hex32(g_rx_head);
+            klog_puts(" tail=");
+            klog_hex32(g_rx_tail);
+            klog_puts(" lines=");
+            klog_hex32(g_rx_lines);
+            klog_end();
+        }
+        sched_waitq_sleep(&g_rx_waitq, 1u);
         spinlock_unlock(&g_rx_lock);
         return CONSOLE_IO_BLOCKED;
     }
@@ -317,7 +334,7 @@ int console_read(uint8_t *dst, uint32_t len, uint32_t nonblock) {
         return 0;
     }
 
-    sched_waitq_sleep(&g_rx_waitq, 0u);
+    sched_waitq_sleep(&g_rx_waitq, 1u);
     return CONSOLE_IO_BLOCKED;
 }
 

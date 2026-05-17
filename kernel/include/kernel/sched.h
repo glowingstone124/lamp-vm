@@ -143,6 +143,7 @@ int sched_current_tid(void);
 int sched_current_ppid(void);
 int sched_current_getcwd(char *dst, uint32_t cap);
 int sched_current_setcwd(const char *path);
+uint32_t sched_current_umask(uint32_t new_mask);
 uint32_t sched_tick_period_us(void);
 int sched_waitpid(int32_t pid, uint32_t options, uint32_t *status_out);
 int sched_vfork(uint32_t abi_addr);
@@ -150,6 +151,7 @@ void sched_vfork_release_parent(void);
 
 int sched_fd_close(int32_t fd);
 int sched_fd_dup(int32_t oldfd);
+int sched_fd_dup_min(int32_t oldfd, int32_t minfd, uint32_t fd_flags);
 int sched_fd_dup2(int32_t oldfd, int32_t newfd);
 int sched_fd_fcntl_getfd(int32_t fd, uint32_t *out_flags);
 int sched_fd_fcntl_setfd(int32_t fd, uint32_t flags);

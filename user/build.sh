@@ -16,6 +16,10 @@ mkdir -p build-user
 
 "$LAMP_CLANG" --target=lamp-unknown-unknown \
   -ffreestanding -fno-builtin -fno-stack-protector -O0 \
+  -Iuser/sysroot/include -Iuser/include -c user/lib/libc_compat.c -o build-user/libc_compat.o
+
+"$LAMP_CLANG" --target=lamp-unknown-unknown \
+  -ffreestanding -fno-builtin -fno-stack-protector -O0 \
   -Iuser/include -c user/apps/hello.c -o build-user/hello.o
 
 "$LAMP_CLANG" --target=lamp-unknown-unknown \
@@ -33,6 +37,14 @@ mkdir -p build-user
 "$LAMP_CLANG" --target=lamp-unknown-unknown \
   -ffreestanding -fno-builtin -fno-stack-protector -O0 \
   -Iuser/include -c user/apps/pipe_exec.c -o build-user/pipe_exec.o
+
+"$LAMP_CLANG" --target=lamp-unknown-unknown \
+  -ffreestanding -fno-builtin -fno-stack-protector -O0 \
+  -Iuser/include -c user/apps/pwd.c -o build-user/pwd.o
+
+"$LAMP_CLANG" --target=lamp-unknown-unknown \
+  -ffreestanding -fno-builtin -fno-stack-protector -O0 \
+  -Iuser/include -c user/apps/ls.c -o build-user/ls.o
 
 "$LAMP_LD" -T user/linker.ld -e _start \
   build-user/start.o build-user/libsys.o build-user/hello.o \
@@ -54,8 +66,19 @@ mkdir -p build-user
   build-user/start.o build-user/libsys.o build-user/pipe_exec.o \
   -o build-user/pipe_exec.elf
 
+"$LAMP_LD" -T user/linker.ld -e _start \
+  build-user/start.o build-user/libsys.o build-user/pwd.o \
+  -o build-user/pwd.elf
+
+"$LAMP_LD" -T user/linker.ld -e _start \
+  build-user/start.o build-user/libsys.o build-user/ls.o \
+  -o build-user/ls.elf
+
 echo "built: build-user/hello.elf"
 echo "built: build-user/echo.elf"
 echo "built: build-user/vfork_exec.elf"
 echo "built: build-user/cat.elf"
 echo "built: build-user/pipe_exec.elf"
+echo "built: build-user/pwd.elf"
+echo "built: build-user/ls.elf"
+echo "built: build-user/libc_compat.o"

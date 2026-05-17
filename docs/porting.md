@@ -160,6 +160,13 @@ Current implementation snapshot:
 - relative paths are resolved for `open/stat/access/execve/chdir`
 - ext4 directory fds can be opened read-only and enumerated through `getdents`
 - `fdtest` covers cwd changes, `getcwd` buffer sizing, relative `open/stat/access`, metadata, directory enumeration, and `lseek`
+- userspace M3 smoke binaries are built:
+  - `/bin/pwd`
+  - `/bin/ls`
+  - `/bin/cat` also accepts path arguments for ext4 regular-file reads
+- init shell smoke commands:
+  - `upwd`
+  - `uls [path]`
 
 ## M4 - Signals and TTY Minimum for Interactive `sh`
 
@@ -190,6 +197,8 @@ Current implementation snapshot:
 - `kill(pid, sig)` implements existence checks, ignored signals, and default terminate behavior for concrete task pids
 - userspace handler delivery is not wired yet, so caught handlers are recorded but not invoked
 - `fdtest` covers ignored self-signal, invalid uncatchable actions, mask block/unblock, missing pid, and child termination
+- syscall IDs wired for the next POSIX filesystem surface: `umask=43`, `rename=44`, `unlink=45`, `mkdir=46`, `rmdir=47`, `link=48`, `symlink=49`, `readlink=50`
+- `umask` is tracked per task and inherited by `sched_spawn`/`vfork`; mutation/link syscalls currently validate user pointers/paths and return stable read-only or non-symlink errno until ext4 mutation support lands
 
 ## M5 - BusyBox Integration and Rootfs Layout
 
@@ -201,6 +210,13 @@ Deliverables:
   - `/bin/sh -> /bin/busybox`
   - `/etc/profile` and simple init script
 - kernel userspace launcher runs `/bin/sh`
+
+Current implementation snapshot:
+
+- ext4 path lookup follows symlinks, including fast symlinks such as `/bin/sh -> /bin/busybox`
+- `readlink` returns ext4 symlink targets without a trailing NUL
+- install helper: `user/install_busybox_to_disk.sh --input <busybox-elf>`
+- init shell command `ush` launches `/bin/sh`
 
 Recommended initial BusyBox config:
 

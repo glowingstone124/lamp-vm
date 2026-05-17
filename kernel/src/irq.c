@@ -3,6 +3,7 @@
 #include "../include/kernel/irq.h"
 #include "../include/kernel/panic.h"
 #include "../include/kernel/platform.h"
+#include "../include/kernel/printk.h"
 #include "../include/kernel/sched.h"
 #include "../include/kernel/syscall.h"
 #include "../include/kernel/trap.h"
@@ -20,6 +21,7 @@ volatile uint32_t g_irq_stub_r4[32];
 volatile uint32_t g_irq_stub_r5[32];
 volatile uint32_t g_irq_stub_r6[32];
 volatile uint32_t g_irq_stub_abi_addr[32];
+volatile uint32_t g_irq_stub_from_user[32];
 volatile uint32_t g_irq_saved_user_csp[32];
 volatile uint32_t g_irq_saved_user_dsp[32];
 static volatile trap_frame_t g_last_trap_frame;
@@ -128,9 +130,13 @@ static inline uint32_t irq_stub_cpu_index(void) {
     return cpu;
 }
 
-static void serial_drain_rx(void) {
+void irq_serial_drain_rx(void) {
     while ((io_in32(IO_SERIAL_STATUS) & SERIAL_STATUS_RX_READY) != 0u) {
         uint32_t v = io_in32(IO_SERIAL_RX);
+        klog_begin(KLOG_LEVEL_DEBUG, "serial");
+        klog_puts("rx=");
+        klog_hex32(v & 0xFFu);
+        klog_end();
         console_rx_feed((uint8_t)(v & 0xFFu));
     }
 }
@@ -316,7 +322,7 @@ void irq_serial(uint32_t irq_no) {
     if (irq_no < KERNEL_IVT_SIZE) {
         g_irq_counts[irq_no]++;
     }
-    serial_drain_rx();
+    irq_serial_drain_rx();
 }
 
 void irq_keyboard(uint32_t irq_no) {
@@ -388,10 +394,41 @@ __asm__(
     "  movi r1, " STR(IO_CPU_CTX_DSP) "\n"
     "  in r3, r1\n"
     "  store32 r3, r0, 0\n"
+    "  movi r0, " STR(VM_CALL_STACK_ENTRIES) "\n"
+    "  movi r1, " STR(IO_CPU_CTX_CSP) "\n"
+    "  out r0, r1\n"
+    "  movi r0, " STR(VM_DATA_STACK_ENTRIES) "\n"
+    "  movi r1, " STR(IO_CPU_CTX_DSP) "\n"
+    "  out r0, r1\n"
+    "  movi r0, " STR(IO_CPU_CTX_ISR_BASE) "\n"
+    "  in r3, r0\n"
+    "  movi r0, " STR((VM_ISR_STACK_ENTRIES - 1u) * 8u) "\n"
+    "  add r3, r3, r0\n"
+    "  load32 r0, r3, 0\n"
+    "  shri r0, r0, 24\n"
+    "  subi r0, r0, 2\n"
+    "  movi r1, 0\n"
+    "  sub r1, r1, r0\n"
+    "  or r0, r0, r1\n"
+    "  shri r0, r0, 31\n"
+    "  xori r0, r0, 1\n"
+    "  subi r0, r0, 0\n"
+    "  movi r1, g_irq_stub_from_user\n"
+    "  add r1, r1, r7\n"
+    "  store32 r0, r1, 0\n"
+    "  rjnz r0, .Lirq_user_stack\n"
     "  shli r15, r15, " STR(KERNEL_IRQ_STACK_SHIFT) "\n"
     "  movi r30, " STR(KERNEL_IRQ_STACK_TOP) "\n"
     "  sub r30, r30, r15\n"
     "  mov r31, r30\n"
+    "  rjmp .Lirq_call_ready\n"
+    ".Lirq_user_stack:\n"
+    "  movi r0, " STR(IO_CPU_CTX_CALL_BASE) "\n"
+    "  in r30, r0\n"
+    "  movi r0, " STR(VM_STACK_SLOT_BYTES) "\n"
+    "  add r30, r30, r0\n"
+    "  mov r31, r30\n"
+    ".Lirq_call_ready:\n"
     "  movi r0, g_irq_stub_no\n"
     "  add r0, r0, r7\n"
     "  store32 r2, r0, 0\n"
@@ -420,5 +457,18 @@ __asm__(
     "  add r0, r0, r7\n"
     "  store32 r16, r0, 0\n"
     "  call irq_common_entry_from_stub\n"
+    "  cpuid r7\n"
+    "  add r7, r7, r7\n"
+    "  add r7, r7, r7\n"
+    "  movi r0, g_irq_saved_user_csp\n"
+    "  add r0, r0, r7\n"
+    "  load32 r3, r0, 0\n"
+    "  movi r1, " STR(IO_CPU_CTX_CSP) "\n"
+    "  out r3, r1\n"
+    "  movi r0, g_irq_saved_user_dsp\n"
+    "  add r0, r0, r7\n"
+    "  load32 r3, r0, 0\n"
+    "  movi r1, " STR(IO_CPU_CTX_DSP) "\n"
+    "  out r3, r1\n"
     "  iret\n"
 );

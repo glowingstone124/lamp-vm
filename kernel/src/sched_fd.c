@@ -307,6 +307,10 @@ int sched_fd_close(int32_t fd) {
 }
 
 int sched_fd_dup(int32_t oldfd) {
+    return sched_fd_dup_min(oldfd, 0, 0u);
+}
+
+int sched_fd_dup_min(int32_t oldfd, int32_t minfd, uint32_t fd_flags) {
     int newfd;
     sched_fdent_t *oldfdent;
     sched_ofile_t *of;
@@ -314,19 +318,27 @@ int sched_fd_dup(int32_t oldfd) {
     if (!slot) {
         return SCHED_FD_EBADF;
     }
+    if (minfd < 0) {
+        spinlock_unlock(&slot->fd_lock);
+        return SCHED_FD_EINVAL;
+    }
+    if ((uint32_t)minfd >= SCHED_MAX_FDS) {
+        spinlock_unlock(&slot->fd_lock);
+        return SCHED_FD_EBADF;
+    }
     of = sched_slot_ofile_by_fd(slot, oldfd, &oldfdent);
     if (!of) {
         spinlock_unlock(&slot->fd_lock);
         return SCHED_FD_EBADF;
     }
-    newfd = sched_slot_find_free_fd(slot, 0u);
+    newfd = sched_slot_find_free_fd(slot, (uint32_t)minfd);
     if (newfd < 0) {
         spinlock_unlock(&slot->fd_lock);
         return SCHED_FD_EMFILE;
     }
     slot->fdtab[(uint32_t)newfd].used = 1u;
     slot->fdtab[(uint32_t)newfd].ofile_idx = oldfdent->ofile_idx;
-    slot->fdtab[(uint32_t)newfd].fd_flags = 0u;
+    slot->fdtab[(uint32_t)newfd].fd_flags = fd_flags & SCHED_FD_CLOEXEC;
     of->refs++;
     sched_pipe_endpoint_inc(of->type, of->fs_backend);
     spinlock_unlock(&slot->fd_lock);

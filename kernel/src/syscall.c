@@ -2,6 +2,7 @@
 #include "../include/kernel/console.h"
 #include "../include/kernel/fs.h"
 #include "../include/kernel/platform.h"
+#include "../include/kernel/printk.h"
 #include "../include/kernel/sched.h"
 #include "../include/kernel/syscall.h"
 #include "../include/kernel/user_exec.h"
@@ -778,6 +779,10 @@ uint32_t syscall_dispatch(const syscall_regs_t *regs) {
             ret = 0u;
             break;
         case SYS_EXIT:
+            klog_begin(KLOG_LEVEL_WARN, "syscall");
+            klog_puts("exit code=");
+            klog_hex32(regs->arg0);
+            klog_end();
             sched_exit_code(regs->arg0);
             ret = 0u;
             break;
@@ -1081,6 +1086,14 @@ uint32_t syscall_dispatch(const syscall_regs_t *regs) {
             uint8_t byte_buf[128];
             uint32_t total = 0u;
             uint32_t t = fd_type(fd);
+            klog_begin(KLOG_LEVEL_WARN, "syscall");
+            klog_puts("write fd=");
+            klog_hex32((uint32_t)fd);
+            klog_puts(" buf=");
+            klog_hex32(buf_addr);
+            klog_puts(" len=");
+            klog_hex32(len);
+            klog_end();
 
             if (!fd_supports_write(fd)) {
                 err = ERRNO_EBADF;
@@ -1235,6 +1248,19 @@ uint32_t syscall_dispatch(const syscall_regs_t *regs) {
             uint32_t arg = regs->arg2;
             int rc;
             switch (cmd) {
+                case SYS_FCNTL_F_DUPFD:
+                case SYS_FCNTL_F_DUPFD_CLOEXEC: {
+                    int32_t minfd = (int32_t)arg;
+                    uint32_t cloexec = (cmd == SYS_FCNTL_F_DUPFD_CLOEXEC) ? SCHED_FD_CLOEXEC : 0u;
+                    int newfd = sched_fd_dup_min(fd, minfd, cloexec);
+                    if (newfd < 0) {
+                        err = errno_from_sched_fd_rc(newfd);
+                        ret = (uint32_t)-1;
+                        break;
+                    }
+                    ret = (uint32_t)newfd;
+                    break;
+                }
                 case SYS_FCNTL_F_GETFD: {
                     uint32_t flags = 0u;
                     rc = sched_fd_fcntl_getfd(fd, &flags);
