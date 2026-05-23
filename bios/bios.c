@@ -221,12 +221,26 @@ static uint32_t elf_file_size(const Elf32_Ehdr *eh) {
     return max_end;
 }
 
+static void bios_debug_hex32(uint32_t v) {
+    static const char hx[] = "0123456789ABCDEF";
+    out_io(0x01, hx[(v>>28)&0xF]); out_io(0x01, hx[(v>>24)&0xF]);
+    out_io(0x01, hx[(v>>20)&0xF]); out_io(0x01, hx[(v>>16)&0xF]);
+    out_io(0x01, hx[(v>>12)&0xF]); out_io(0x01, hx[(v>> 8)&0xF]);
+    out_io(0x01, hx[(v>> 4)&0xF]); out_io(0x01, hx[v&0xF]);
+}
+
 static void elf_load_and_jump(void) {
     // Read initial 4KB for headers
     disk_read_sectors(KERNEL_LBA, 8, KERNEL_ELF_BUF);
 
     Elf32_Ehdr *eh = (Elf32_Ehdr *)(uintptr_t)KERNEL_ELF_BUF;
+    // Early debug: show raw e_entry from first 4KB read
+    out_io(0x01, 'H'); out_io(0x01, '=');
+    bios_debug_hex32(eh->e_entry);
+    out_io(0x01, '\n');
     if (!elf_validate(eh)) {
+        out_io(0x01, 'B'); out_io(0x01, 'A'); out_io(0x01, 'D');
+        out_io(0x01, 'E'); out_io(0x01, 'L'); out_io(0x01, 'F'); out_io(0x01, '\n');
         halt();
     }
 
@@ -237,6 +251,11 @@ static void elf_load_and_jump(void) {
 
     uint32_t total_sectors = (file_size + 511u) / 512u;
     disk_read_sectors(KERNEL_LBA, total_sectors, KERNEL_ELF_BUF);
+
+    // Save entry point BEFORE loading segments — BSS zeroing may
+    // overwrite the ELF buffer (KERNEL_ELF_BUF) if the kernel BSS
+    // extends past 0x00300000.
+    uint32_t saved_entry = eh->e_entry;
 
     // Load segments
     const Elf32_Phdr *ph = (const Elf32_Phdr *)((const uint8_t *)eh + eh->e_phoff);
@@ -253,15 +272,34 @@ static void elf_load_and_jump(void) {
         }
     }
 
-    // Jump to kernel entry
-    void (*entry)(void) = (void (*)(void))(uintptr_t)eh->e_entry;
+    // Publish boot info AFTER loading segments — BSS clearing may
+    // have overwritten a previous write to BOOTINFO_ADDR.
+    bios_publish_boot_info();
+
+    // Jump to kernel entry (use saved value, eh buffer may be zeroed)
+    void (*entry)(void) = (void (*)(void))(uintptr_t)saved_entry;
+    // Debug: write entry point to serial port 0x01 before jumping
+    {
+        static const char hex[] = "0123456789ABCDEF";
+        uint32_t ep = (uint32_t)(uintptr_t)entry;
+        out_io(0x01, 'E'); out_io(0x01, '=');
+        out_io(0x01, hex[(ep >> 28) & 0xF]);
+        out_io(0x01, hex[(ep >> 24) & 0xF]);
+        out_io(0x01, hex[(ep >> 20) & 0xF]);
+        out_io(0x01, hex[(ep >> 16) & 0xF]);
+        out_io(0x01, hex[(ep >> 12) & 0xF]);
+        out_io(0x01, hex[(ep >>  8) & 0xF]);
+        out_io(0x01, hex[(ep >>  4) & 0xF]);
+        out_io(0x01, hex[ep & 0xF]);
+        out_io(0x01, '\n');
+    }
     entry();
 }
 
 void bios_main(void) {
     bios_intc_init();
     register_isr(INT_DISK_COMPLETE, isr_disk_complete);
-    bios_publish_boot_info();
+    /* boot info is published inside elf_load_and_jump after BSS clear */
     elf_load_and_jump();
     halt();
 }

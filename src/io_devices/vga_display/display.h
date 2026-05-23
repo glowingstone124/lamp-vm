@@ -20,6 +20,7 @@ typedef struct {
     SDL_Texture *texture;
 } display;
 int vga_display_init(void);
+void display_set_serial_console_mode(int enabled);
 void display_poll_events(VM *vm);
 void display_update(VM *vm);
 void display_shutdown(void);

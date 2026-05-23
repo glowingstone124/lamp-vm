@@ -40,9 +40,9 @@ typedef struct VM_Debug VM_Debug;
 #define IRQ_BITMAP_WORDS (IVT_SIZE / 64)
 #define IRQ_BITMAP_WORDS32 (IVT_SIZE / 32)
 #define IVT_ENTRY_SIZE 8
-#define CALL_STACK_SIZE 256
-#define DATA_STACK_SIZE 256
-#define ISR_STACK_SIZE 256
+#define CALL_STACK_SIZE 2048
+#define DATA_STACK_SIZE 2048
+#define ISR_STACK_SIZE 2048
 #define VM_TASK_C_STACK_BYTES 4096u
 #define VM_STACK_POOL_SLOTS 64u
 
@@ -51,7 +51,7 @@ typedef struct VM_Debug VM_Debug;
 #define TIME_BOOTTIME_OFFSET   16
 
 #define IVT_BASE 0x0000
-#define CALL_STACK_BASE (IVT_BASE + IVT_SIZE * IVT_ENTRY_SIZE)
+#define CALL_STACK_BASE 0x00008000u
 #define DATA_STACK_BASE (CALL_STACK_BASE + CALL_STACK_SIZE * 8)
 #define ISR_STACK_BASE (DATA_STACK_BASE + DATA_STACK_SIZE * 8)
 #define TIME_BASE (ISR_STACK_BASE + ISR_STACK_SIZE * 8)
@@ -228,6 +228,7 @@ struct VCPU {
     int csp;
     int isp;
     int in_interrupt;
+    uint32_t active_interrupt_no;
     int irq_masked;
     int core_id;
     vm_addr_t call_stack_base;

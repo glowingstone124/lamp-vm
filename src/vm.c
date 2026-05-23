@@ -549,6 +549,11 @@ void vm_instruction_case(VM *vm) {
                         v = (int)vm->serial_rx_fifo[vm->serial_rx_tail];
                         vm->serial_rx_tail = (uint16_t)((vm->serial_rx_tail + 1u) & 0xFFu);
                     }
+                    if (getenv("LAMP_CONSOLE_TRACE")) {
+                        fprintf(stderr, "[serial read] v=0x%02x head=%u tail=%u\n",
+                                (unsigned)(v & 0xFF), (unsigned)vm->serial_rx_head,
+                                (unsigned)vm->serial_rx_tail);
+                    }
                     cpu->regs[rd] = v;
                     if (vm->serial_rx_tail != vm->serial_rx_head) {
                         vm->io[KEYBOARD] = (int)vm->serial_rx_fifo[vm->serial_rx_tail];
@@ -624,7 +629,23 @@ void vm_instruction_case(VM *vm) {
                 if (addr == CPU_CTX_CSP) {
                     const int v = cpu->regs[rd];
                     if (v >= 0 && v <= CALL_STACK_SIZE) {
+                        if (getenv("LAMP_CTX_TRACE") &&
+                            (cpu->last_ip >= (size_t)0x00100000u || cpu->in_interrupt)) {
+                            fprintf(stderr,
+                                    "[ctx-csp-out] core=%d last_ip=0x%08zx v=0x%08x old=0x%08x call_base=0x%08x r0=0x%08x r7=0x%08x r31=0x%08x in_interrupt=%d\n",
+                                    cpu->core_id,
+                                    cpu->last_ip,
+                                    (uint32_t)v,
+                                    (uint32_t)cpu->csp,
+                                    (uint32_t)cpu->call_stack_base,
+                                    (uint32_t)cpu->regs[0],
+                                    (uint32_t)cpu->regs[7],
+                                    (uint32_t)cpu->regs[31],
+                                    cpu->in_interrupt ? 1 : 0);
+                        }
                         cpu->csp = v;
+                    } else {
+                        panic(panic_format("OUT invalid csp %d (limit %u)", v, (unsigned)CALL_STACK_SIZE), vm);
                     }
                     break;
                 }
@@ -632,6 +653,8 @@ void vm_instruction_case(VM *vm) {
                     const int v = cpu->regs[rd];
                     if (v >= 0 && v <= DATA_STACK_SIZE) {
                         cpu->dsp = v;
+                    } else {
+                        panic(panic_format("OUT invalid dsp %d (limit %u)", v, (unsigned)DATA_STACK_SIZE), vm);
                     }
                     break;
                 }
@@ -643,6 +666,8 @@ void vm_instruction_case(VM *vm) {
                     const int v = cpu->regs[rd];
                     if (v >= 0 && v <= ISR_STACK_SIZE) {
                         cpu->isp = v;
+                    } else {
+                        panic(panic_format("OUT invalid isp %d (limit %u)", v, (unsigned)ISR_STACK_SIZE), vm);
                     }
                     break;
                 }
@@ -1165,8 +1190,9 @@ void *vm_thread(void *arg) {
     return NULL;
 }
 
-void display_loop(VM *vm) {
+void display_loop(VM *vm, int serial_console) {
     vga_display_init();
+    display_set_serial_console_mode(serial_console);
     const int frame_delay = 16; // ~60FPS
     while (!atomic_is_vm_halted(vm) && !atomic_is_vm_panicked(vm)) {
         uint32_t frame_start = SDL_GetTicks();
@@ -1267,7 +1293,7 @@ void vm_run(VM *vm, int serial_console) {
         }
     }
 
-    display_loop(vm);
+    display_loop(vm, serial_console);
 
     if (serial_thread_started) {
         pthread_join(serial_thread, NULL);
@@ -1648,22 +1674,40 @@ VM *vm_create(size_t memory_size,
     }
 
     for (int i = 0; i < vm->smp_cores; i++) {
-        vm_addr_t core_stack_base = (vm->smp_cores == 1)
+        /* BSP always uses the traditional boot stack at CALL_STACK_BASE.
+         * AP cores get per-core stacks from the pool once the kernel
+         * explicitly starts them via STARTAP. */
+        vm_addr_t core_stack_base = (i == 0)
             ? CALL_STACK_BASE
-            : vm->stack_pool_base + (vm_addr_t)(stack_slot_bytes * (size_t)i);
+            : vm->stack_pool_base + (vm_addr_t)(stack_slot_bytes * (size_t)(i - 1));
         atomic_init(&vm->cpus[i].execution_times, 0);
         vm->cpus[i].core_id = i;
         vm->cpus[i].is_bsp = (i == 0) ? 1 : 0;
-        vm->cpus[i].ip = text_base;
-        vm->cpus[i].last_ip = text_base;
+        /* Only BSP starts from the BIOS entry point.  AP cores are
+         * halted until the kernel explicitly sets their IP and calls
+         * STARTAP. */
+        vm->cpus[i].ip = (i == 0) ? text_base : 0;
+        vm->cpus[i].last_ip = vm->cpus[i].ip;
         vm->cpus[i].call_stack_base = core_stack_base;
         vm->cpus[i].data_stack_base = core_stack_base + (vm_addr_t)call_stack_bytes;
         vm->cpus[i].isr_stack_base = core_stack_base + (vm_addr_t)call_stack_bytes + (vm_addr_t)data_stack_bytes;
         vm->cpus[i].csp = CALL_STACK_SIZE;
         vm->cpus[i].dsp = DATA_STACK_SIZE;
         vm->cpus[i].isp = ISR_STACK_SIZE;
+        vm->cpus[i].active_interrupt_no = IVT_SIZE;
         vm->cpus[i].irq_masked = 0;
         atomic_init(&vm->core_released[i], (i == 0));
+        fprintf(stderr, "[cpu%u] start ip=0x%08x csp=%u dsp=%u isp=%u r30=0x%08x r31=0x%08x call_base=0x%08x\n",
+                (unsigned)i,
+                (unsigned)vm->cpus[i].ip,
+                (unsigned)vm->cpus[i].csp,
+                (unsigned)vm->cpus[i].dsp,
+                (unsigned)vm->cpus[i].isp,
+                (unsigned)vm->cpus[i].regs[30],
+                (unsigned)vm->cpus[i].regs[31],
+                (unsigned)vm->cpus[i].call_stack_base);
+        /* For APs that weren't explicitly started, gate at the
+         * instruction loop so they never fetch from IP=0. */
     }
 
     vm->start_realtime_ns = host_unix_time_ns();
@@ -1775,6 +1819,11 @@ int main(int argc, char **argv) {
     }
     if (selftest) {
         return run_selftests();
+    }
+    if (serial_console && smp_cores > 1) {
+        printf("Serial console mode uses BSP-only execution; ignoring --smp %d for console stability.\n",
+               smp_cores);
+        smp_cores = 1;
     }
 
     size_t program_size = 0;

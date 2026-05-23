@@ -3,6 +3,7 @@
 #include "interrupt.h"
 #include "memory.h"
 #include "panic.h"
+#include <stdlib.h>
 
 // Created by Max Wang on 2025/12/30.
 
@@ -184,6 +185,25 @@ void vm_enter_interrupt(VM *vm, uint32_t int_no) {
     if (isr_ip == UINT64_MAX)
         return;
 
+    if (getenv("LAMP_SYSCALL_TRACE") && int_no == 0x80u) {
+        fprintf(stderr,
+                "[syscall-enter] core=%d ip=0x%08zx last_ip=0x%08zx r0=0x%08x r1=0x%08x r2=0x%08x r3=0x%08x r8=0x%08x call_base=0x%08x csp=0x%08x dsp=0x%08x isp=0x%08x in_interrupt=%d irq_masked=%d\n",
+                cpu->core_id,
+                cpu->ip,
+                cpu->last_ip,
+                (uint32_t)cpu->regs[0],
+                (uint32_t)cpu->regs[1],
+                (uint32_t)cpu->regs[2],
+                (uint32_t)cpu->regs[3],
+                (uint32_t)cpu->regs[8],
+                (uint32_t)cpu->call_stack_base,
+                (uint32_t)cpu->csp,
+                (uint32_t)cpu->dsp,
+                (uint32_t)cpu->isp,
+                cpu->in_interrupt ? 1 : 0,
+                cpu->irq_masked ? 1 : 0);
+    }
+
     if (cpu->core_id >= 0 && cpu->core_id < 32 && g_vfork_irq_probe_remaining[cpu->core_id] > 0) {
         fprintf(stderr,
                 "[irqprobe-enter] core=%d int=0x%08x ip=0x%08zx last_ip=0x%08zx flags=0x%08x r31=0x%08x call_base=0x%08x csp=0x%08x dsp=0x%08x isp=0x%08x in_interrupt=%d irq_masked=%d\n",
@@ -217,6 +237,7 @@ void vm_enter_interrupt(VM *vm, uint32_t int_no) {
 
     cpu->ip = (size_t)(vm_addr_t)isr_ip;
     cpu->in_interrupt = 1;
+    cpu->active_interrupt_no = int_no;
 }
 
 void vm_iret(VM *vm) {
@@ -278,6 +299,7 @@ void vm_iret(VM *vm) {
     }
 
     cpu->in_interrupt = 0;
+    cpu->active_interrupt_no = IVT_SIZE;
 }
 
 void vm_handle_interrupts(VM *vm) {
@@ -353,6 +375,7 @@ void init_ivt(VM *vm) {
     }
     for (int c = 0; c < vm->smp_cores; c++) {
         vm->cpus[c].in_interrupt = 0;
+        vm->cpus[c].active_interrupt_no = IVT_SIZE;
     }
 }
 

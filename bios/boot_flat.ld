@@ -27,10 +27,10 @@ SECTIONS {
 
   .flat_header : {
     LONG(TEXT_BASE);
-    LONG(SIZEOF(.text_payload));
-    LONG(TEXT_BASE + SIZEOF(.text_payload));
+    LONG(ALIGN(SIZEOF(.text_payload), 8));
+    LONG(TEXT_BASE + ALIGN(SIZEOF(.text_payload), 8));
     LONG(SIZEOF(.data_payload));
-    LONG(TEXT_BASE + SIZEOF(.text_payload) + SIZEOF(.data_payload));
+    LONG(TEXT_BASE + ALIGN(SIZEOF(.text_payload), 8) + SIZEOF(.data_payload));
     LONG(SIZEOF(.bss_payload));
   }
 
@@ -39,6 +39,7 @@ SECTIONS {
     *(.text .text.*)
     *(.rodata .rodata.*)
     *(.srodata .srodata.*)
+    . = ALIGN(8);
   }
 
   .data_payload : {

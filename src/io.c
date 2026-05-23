@@ -2,6 +2,8 @@
 #include "io.h"
 #include "io_devices/disk/disk.h"
 #include "interrupt.h"
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -20,6 +22,16 @@
 #define PS2_EXPECT_KBD_SCAN_SET 4u
 #define PS2_EXPECT_MOUSE_RESOLUTION 5u
 #define PS2_EXPECT_MOUSE_SAMPLE_RATE 6u
+
+static int console_trace_enabled(void) {
+    static int initialized;
+    static int enabled;
+    if (!initialized) {
+        enabled = getenv("LAMP_CONSOLE_TRACE") ? 1 : 0;
+        initialized = 1;
+    }
+    return enabled;
+}
 
 static void ps2_update_status_locked(VM *vm) {
     uint8_t status = PS2_STATUS_SYSTEM;
@@ -265,6 +277,10 @@ int vm_serial_rx_enqueue(VM *vm, uint8_t c) {
     const int was_empty = (head == tail);
     vm->serial_rx_fifo[head] = c;
     vm->serial_rx_head = next;
+    if (console_trace_enabled()) {
+        fprintf(stderr, "[serial enqueue] c=0x%02x empty=%d head=%u tail=%u\n",
+                (unsigned)c, was_empty, (unsigned)vm->serial_rx_head, (unsigned)tail);
+    }
     if (was_empty) {
         vm->io[KEYBOARD] = (int)vm->serial_rx_fifo[tail];
         vm->io[SCREEN_ATTRIBUTE] |= SERIAL_STATUS_RX_READY;

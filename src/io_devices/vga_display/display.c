@@ -1,5 +1,7 @@
 #include <SDL2/SDL.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include "display.h"
 #include "../../io.h"
 #include "../../interrupt.h"
@@ -9,6 +11,17 @@ static SDL_Window *window = NULL;
 static SDL_Renderer *renderer = NULL;
 static SDL_Texture *texture = NULL;
 static uint8_t g_mouse_buttons;
+static int g_serial_console_mode;
+
+static int console_trace_enabled(void) {
+    static int initialized;
+    static int enabled;
+    if (!initialized) {
+        enabled = getenv("LAMP_CONSOLE_TRACE") ? 1 : 0;
+        initialized = 1;
+    }
+    return enabled;
+}
 
 int vga_display_init(void) {
     if (SDL_Init(SDL_INIT_VIDEO) != 0)
@@ -21,6 +34,58 @@ int vga_display_init(void) {
     texture = SDL_CreateTexture(
         renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, FB_WIDTH, FB_HEIGHT);
 
+    return 0;
+}
+
+void display_set_serial_console_mode(int enabled) {
+    g_serial_console_mode = enabled ? 1 : 0;
+}
+
+static void serial_console_push(VM *vm, uint8_t c) {
+    if (c == (uint8_t)'\r') {
+        c = (uint8_t)'\n';
+    }
+    if (console_trace_enabled()) {
+        fprintf(stderr, "[console sdl] rx=0x%02x\n", (unsigned)c);
+    }
+    (void)vm_serial_rx_enqueue(vm, c);
+}
+
+static int sdl_keycode_to_serial_ascii(SDL_Keycode sym, SDL_Keymod mod, uint8_t *out) {
+    const int shift = ((mod & KMOD_SHIFT) != 0) ? 1 : 0;
+    const int caps = ((mod & KMOD_CAPS) != 0) ? 1 : 0;
+    if (!out) {
+        return 0;
+    }
+    if (sym >= SDLK_a && sym <= SDLK_z) {
+        uint8_t c = (uint8_t)('a' + (sym - SDLK_a));
+        if ((shift ^ caps) != 0) {
+            c = (uint8_t)(c - 'a' + 'A');
+        }
+        *out = c;
+        return 1;
+    }
+    if (sym >= SDLK_0 && sym <= SDLK_9) {
+        static const uint8_t shifted_digits[] = {')', '!', '@', '#', '$', '%', '^', '&', '*', '('};
+        uint32_t idx = (uint32_t)(sym - SDLK_0);
+        *out = shift ? shifted_digits[idx] : (uint8_t)('0' + idx);
+        return 1;
+    }
+    switch (sym) {
+        case SDLK_SPACE: *out = (uint8_t)' '; return 1;
+        case SDLK_MINUS: *out = shift ? (uint8_t)'_' : (uint8_t)'-'; return 1;
+        case SDLK_EQUALS: *out = shift ? (uint8_t)'+' : (uint8_t)'='; return 1;
+        case SDLK_LEFTBRACKET: *out = shift ? (uint8_t)'{' : (uint8_t)'['; return 1;
+        case SDLK_RIGHTBRACKET: *out = shift ? (uint8_t)'}' : (uint8_t)']'; return 1;
+        case SDLK_BACKSLASH: *out = shift ? (uint8_t)'|' : (uint8_t)'\\'; return 1;
+        case SDLK_SEMICOLON: *out = shift ? (uint8_t)':' : (uint8_t)';'; return 1;
+        case SDLK_QUOTE: *out = shift ? (uint8_t)'"' : (uint8_t)'\''; return 1;
+        case SDLK_BACKQUOTE: *out = shift ? (uint8_t)'~' : (uint8_t)'`'; return 1;
+        case SDLK_COMMA: *out = shift ? (uint8_t)'<' : (uint8_t)','; return 1;
+        case SDLK_PERIOD: *out = shift ? (uint8_t)'>' : (uint8_t)'.'; return 1;
+        case SDLK_SLASH: *out = shift ? (uint8_t)'?' : (uint8_t)'/'; return 1;
+        default: break;
+    }
     return 0;
 }
 
@@ -174,9 +239,47 @@ void display_poll_events(VM *vm) {
                 atomic_set_vm_halt(vm, 1);;
                 break;
             case SDL_KEYDOWN:
+                if (g_serial_console_mode) {
+                    uint8_t ascii;
+                    if (e.key.repeat) {
+                        break;
+                    }
+                    if ((e.key.keysym.mod & KMOD_CTRL) != 0 &&
+                        e.key.keysym.sym >= SDLK_a && e.key.keysym.sym <= SDLK_z) {
+                        serial_console_push(vm, (uint8_t)(e.key.keysym.sym - SDLK_a + 1));
+                        break;
+                    }
+                    switch (e.key.keysym.sym) {
+                        case SDLK_RETURN:
+                        case SDLK_KP_ENTER:
+                            serial_console_push(vm, (uint8_t)'\n');
+                            break;
+                        case SDLK_BACKSPACE:
+                        case SDLK_DELETE:
+                            serial_console_push(vm, (uint8_t)0x7Fu);
+                            break;
+                        case SDLK_TAB:
+                            serial_console_push(vm, (uint8_t)'\t');
+                            break;
+                        case SDLK_ESCAPE:
+                            serial_console_push(vm, (uint8_t)0x1Bu);
+                            break;
+                        default:
+                            if (sdl_keycode_to_serial_ascii(e.key.keysym.sym,
+                                                            (SDL_Keymod)e.key.keysym.mod,
+                                                            &ascii)) {
+                                serial_console_push(vm, ascii);
+                            }
+                            break;
+                    }
+                    break;
+                }
                 ps2_kbd_send_key(vm, e.key.keysym.scancode, 0);
                 break;
             case SDL_KEYUP:
+                if (g_serial_console_mode) {
+                    break;
+                }
                 ps2_kbd_send_key(vm, e.key.keysym.scancode, 1);
                 break;
             case SDL_MOUSEMOTION:
