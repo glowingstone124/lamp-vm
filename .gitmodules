@@ -1,0 +1,6 @@
+[submodule "kernel"]
+	path = kernel
+	url = https://github.com/glowingstone124/Octans
+[submodule "user"]
+	path = user
+	url = https://github.com/glowingstone124/lamp-userspace
