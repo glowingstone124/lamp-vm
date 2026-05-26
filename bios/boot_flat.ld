@@ -40,6 +40,8 @@ SECTIONS {
     *(.rodata .rodata.*)
     *(.srodata .srodata.*)
     . = ALIGN(8);
+    BYTE(0);
+    . = ALIGN(8);
   }
 
   .data_payload : {

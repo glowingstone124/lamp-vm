@@ -7,6 +7,7 @@ This document describes the current kernel scaffold and bring-up flow, aligned w
 POSIX-facing syscall/fd/tty semantics are documented in `docs/posix.md`.
 BusyBox shell porting roadmap is documented in `docs/porting.md`.
 Current userspace ABI contract is documented in `docs/user-abi.md`.
+Networking/NAT bring-up notes are documented in `docs/networking.md`.
 
 ## Goal
 
@@ -160,11 +161,11 @@ Note:
 
 - `poll` ABI: `arg0=pollfd*`, `arg1=nfds`, `arg2=timeout_ms`
 - `select` ABI: `arg0=nfds`, `arg1=read_mask*`, `arg2=write_mask*`, `arg3=except_mask*`, `arg4=timeout_ms`
-- fd model (current): stdio + `/dev/*` + ext4 regular files + socket stub fds
+- fd model (current): stdio + `/dev/*` + ext4 regular files + TCP socket fds
 - `tty_getmode(fd)` and `tty_setmode(fd, lflag)` expose tty local mode bits
 - `close/dup/dup2` and `fcntl(F_GETFD/F_SETFD/F_GETFL/F_SETFL)` are wired to per-task fd tables
 - `open` maps `/dev/null`, `/dev/zero`, `/dev/tty` and absolute ext4 paths
-- network syscalls are wired to stable stub errno paths (`EAFNOSUPPORT` / `ENOTSOCK` / `EOPNOTSUPP` / `ENOTCONN`) while transport stack is not implemented yet
+- network syscalls support the current IPv4 client path; server-side socket behavior is still limited
 - `fdtest` command in init shell runs fd regression checks (`dup`, `fcntl`, `read/poll/select`)
 - `fdtest` uses `waitpid(child_pid, WNOHANG)` for post-reap `ECHILD` assertion to avoid ambient-child interference
 - `poll` follows POSIX rule for ignored entries: `pollfd.fd < 0` yields `revents=0` and does not count as ready
@@ -185,12 +186,14 @@ Note:
   - superblock + group descriptor + inode table reads
   - directory traversal for absolute paths
   - regular-file `open/read`
+  - regular-file creation with `O_CREAT`
+  - minimal `unlink` for regular files
   - regular-file `write` for:
     - existing extent overwrite
     - EOF append with block bitmap allocation + inode size update
 - current ext4 write limitations:
-  - `O_CREAT` returns `EROFS`
   - `O_TRUNC` is supported by inode-size update (blocks are currently kept allocated)
+  - `unlink` clears the directory entry/inode metadata but does not reclaim blocks/inodes yet
   - sparse/non-EOF hole write is not supported (`ENOSYS`)
   - deep extent tree growth (`depth > 0`) is not supported (`ENOSYS`)
 

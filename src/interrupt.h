@@ -30,6 +30,7 @@ typedef enum InterruptNo {
     INT_SERIAL          = 0x03,
     INT_TIMER           = 0x04,
     INT_MOUSE           = 0x05,
+    INT_ETHER           = 0x06,
 } InterruptNo;
 
 #endif // VM_INTERRUPT_H

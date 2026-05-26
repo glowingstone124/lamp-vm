@@ -77,6 +77,7 @@ typedef struct VM_Debug VM_Debug;
 #define SYSINFO_FEATURE_INTC_MMIO (1u << 5)
 #define SYSINFO_FEATURE_IOMMU_MMIO (1u << 6)
 #define SYSINFO_FEATURE_MMU_PAGING (1u << 7)
+#define SYSINFO_FEATURE_ETHER (1u << 8)
 #define SYSINFO_REG_MAGIC 0x00u
 #define SYSINFO_REG_VENDOR0 0x04u
 #define SYSINFO_REG_MEM_BYTES_LO 0x14u
@@ -328,6 +329,10 @@ struct VM{
     pthread_t timer_worker_thread;
 
     pthread_t vnc_server_thread;
+
+    /* Ethernet NIC state (opaque, managed by io_devices/ether/ether.c) */
+    void *ether;
+
 #ifdef VM_DEBUG
     VM_Debug *debug;
 #endif

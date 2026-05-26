@@ -54,6 +54,10 @@ set(SOURCES
         src/io_devices/iommu/iommu_mmio_register.c
         src/io_devices/mmu/mmu_mmio_register.c
         src/io_devices/sysinfo/sysinfo_mmio_register.c
+        src/io_devices/ether/ether.c
+        src/io_devices/ether/ether_null.c
+        src/io_devices/ether/ether_udp.c
+        src/io_devices/ether/ether_nat.c
         src/io_devices/time/timer.c
         src/float.c
         src/selftest.c

@@ -25,6 +25,8 @@ Assembler/toolchain project:
 - `user/`: guest userspace runtime and sample apps
 - `docs/`: architecture and ABI notes
 
+Networking bring-up and BusyBox `wget` notes are in `docs/networking.md`.
+
 ## Build
 
 ### Requirements

@@ -18,6 +18,8 @@
 #include "interrupt.h"
 #include "memory.h"
 #include "io_devices/disk/disk.h"
+#include "io_devices/ether/ether.h"
+#include "io_devices/ether/ether_backend.h"
 #include "io_devices/frame/frame.h"
 #include "io_devices/sysinfo/sysinfo_mmio_register.h"
 #include "io_devices/intc/intc_mmio_register.h"
@@ -1184,6 +1186,7 @@ void *vm_thread(void *arg) {
         }
         if (core_id == 0) {
             disk_tick(vm);
+            ether_poll(vm);
         }
     }
     vm_flush_execution_times(vm_tls_vcpu, &local_cycles);
@@ -1762,10 +1765,11 @@ void vm_destroy(VM *vm) {
 }
 
 static void print_usage(const char *prog) {
-    printf("Usage: %s [--bin <file>] [--smp <cores>] [--selftest] [--console] [--serial-stdin]\n", prog);
+    printf("Usage: %s [--bin <file>] [--smp <cores>] [--selftest] [--console] [--serial-stdin] [--net <mode>]\n", prog);
     printf("Defaults: --bin boot.bin --smp 1\n");
     printf("  --console       attach terminal stdin to the guest serial console while keeping SDL/VNC enabled\n");
     printf("  --serial-stdin  legacy headless serial stdin mode\n");
+    printf("  --net <mode>    ethernet backend: null, nat, or udp:<bind-port>:<peer-port>\n");
 }
 
 static int parse_positive_int(const char *s, int *out) {
@@ -1788,6 +1792,7 @@ int main(int argc, char **argv) {
     int selftest = 0;
     int serial_console = 0;
     int serial_stdin = 0;
+    const char *net_mode = "nat";
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--bin") == 0) {
             if (i + 1 >= argc) {
@@ -1811,6 +1816,12 @@ int main(int argc, char **argv) {
             serial_console = 1;
         } else if (strcmp(argv[i], "--serial-stdin") == 0) {
             serial_stdin = 1;
+        } else if (strcmp(argv[i], "--net") == 0) {
+            if (i + 1 >= argc) {
+                print_usage(argv[0]);
+                return 1;
+            }
+            net_mode = argv[++i];
         } else {
             printf("Unknown argument: %s\n", argv[i]);
             print_usage(argv[0]);
@@ -1852,6 +1863,28 @@ int main(int argc, char **argv) {
         return 1;
     }
     disk_init(vm, "./disk.img");
+
+    /* Init ethernet NIC */
+    {
+        ether_backend_t backend;
+        int backend_ok = 0;
+        if (strcmp(net_mode, "nat") == 0) {
+            backend_ok = (ether_backend_nat_create(&backend) == 0);
+        } else if (strncmp(net_mode, "udp:", 4) == 0) {
+            int bind_p = 9000, peer_p = 9001;
+            if (sscanf(net_mode + 4, "%d:%d", &bind_p, &peer_p) == 2 &&
+                bind_p > 0 && bind_p <= 65535 && peer_p > 0 && peer_p <= 65535) {
+                backend_ok = (ether_backend_udp_create(&backend, (uint16_t)bind_p, (uint16_t)peer_p) == 0);
+            } else {
+                fprintf(stderr, "Invalid --net udp mode, expected udp:<bind-port>:<peer-port>\n");
+            }
+        }
+        if (!backend_ok) {
+            ether_backend_null_create(&backend);
+        }
+        ether_init(vm, &backend);
+    }
+
     init_ivt(vm);
     if (smp_cores > 1) {
         printf("SMP mode enabled: %d cores (per-core architectural state, shared memory).\n", smp_cores);
@@ -1883,6 +1916,7 @@ int main(int argc, char **argv) {
         total_execution_times += atomic_load_explicit(&vm->cpus[i].execution_times, memory_order_relaxed);
     }
     vnc_exit();
+    ether_shutdown(vm);
     printf("Execution complete in %lu cycles.\n",
            (unsigned long)total_execution_times);
     vm_debug_print_stats(vm);

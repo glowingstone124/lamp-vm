@@ -27,6 +27,7 @@
 #define DISK_STATUS 0x14
 
 #define DISK_CMD_READ 1
+#define DISK_STATUS_BUSY 1
 
 #define INT_DISK_COMPLETE 0x02
 #define INTC_WORD_COUNT 8u
@@ -44,7 +45,7 @@
 // Kernel storage
 #define KERNEL_LBA 1u
 #define KERNEL_ELF_BUF 0x00300000u
-#define KERNEL_ELF_MAX (512u * 1024u)
+#define KERNEL_ELF_MAX (1024u * 1024u)
 
 // Simple IO asm helpers
 static inline void out_io(uint32_t addr, uint32_t val) {
@@ -77,13 +78,44 @@ static inline uint32_t read_u32(uint32_t addr) {
 static inline void *memcpy8(void *dst, const void *src, uint32_t n) {
     uint8_t *d = (uint8_t *)dst;
     const uint8_t *s = (const uint8_t *)src;
-    for (uint32_t i = 0; i < n; i++) d[i] = s[i];
+    while ((((uint32_t)(uintptr_t)d | (uint32_t)(uintptr_t)s) & 3u) != 0u && n != 0u) {
+        *d++ = *s++;
+        n--;
+    }
+    uint32_t *dw = (uint32_t *)(void *)d;
+    const uint32_t *sw = (const uint32_t *)(const void *)s;
+    while (n >= 4u) {
+        *dw++ = *sw++;
+        n -= 4u;
+    }
+    d = (uint8_t *)(void *)dw;
+    s = (const uint8_t *)(const void *)sw;
+    while (n != 0u) {
+        *d++ = *s++;
+        n--;
+    }
     return dst;
 }
 
 static inline void *memset8(void *dst, uint8_t v, uint32_t n) {
     uint8_t *d = (uint8_t *)dst;
-    for (uint32_t i = 0; i < n; i++) d[i] = v;
+    while (((uint32_t)(uintptr_t)d & 3u) != 0u && n != 0u) {
+        *d++ = v;
+        n--;
+    }
+    uint32_t vv = (uint32_t)v;
+    vv |= vv << 8;
+    vv |= vv << 16;
+    uint32_t *dw = (uint32_t *)(void *)d;
+    while (n >= 4u) {
+        *dw++ = vv;
+        n -= 4u;
+    }
+    d = (uint8_t *)(void *)dw;
+    while (n != 0u) {
+        *d++ = v;
+        n--;
+    }
     return dst;
 }
 
@@ -185,6 +217,9 @@ static void register_isr(uint32_t int_no, void (*handler)(void)) {
 }
 
 static void disk_read_sectors(uint32_t lba, uint32_t count, uint32_t mem_addr) {
+    while (in_io(DISK_STATUS) == DISK_STATUS_BUSY) {
+    }
+
     disk_done = 0;
     out_io(DISK_LBA, lba);
     out_io(DISK_MEM, mem_addr);
@@ -192,8 +227,7 @@ static void disk_read_sectors(uint32_t lba, uint32_t count, uint32_t mem_addr) {
     out_io(DISK_CMD, DISK_CMD_READ);
 
     // Wait for interrupt
-    while (!disk_done) {
-        // optional: spin
+    while (!disk_done && in_io(DISK_STATUS) == DISK_STATUS_BUSY) {
     }
 }
 
@@ -234,10 +268,6 @@ static void elf_load_and_jump(void) {
     disk_read_sectors(KERNEL_LBA, 8, KERNEL_ELF_BUF);
 
     Elf32_Ehdr *eh = (Elf32_Ehdr *)(uintptr_t)KERNEL_ELF_BUF;
-    // Early debug: show raw e_entry from first 4KB read
-    out_io(0x01, 'H'); out_io(0x01, '=');
-    bios_debug_hex32(eh->e_entry);
-    out_io(0x01, '\n');
     if (!elf_validate(eh)) {
         out_io(0x01, 'B'); out_io(0x01, 'A'); out_io(0x01, 'D');
         out_io(0x01, 'E'); out_io(0x01, 'L'); out_io(0x01, 'F'); out_io(0x01, '\n');
@@ -278,21 +308,6 @@ static void elf_load_and_jump(void) {
 
     // Jump to kernel entry (use saved value, eh buffer may be zeroed)
     void (*entry)(void) = (void (*)(void))(uintptr_t)saved_entry;
-    // Debug: write entry point to serial port 0x01 before jumping
-    {
-        static const char hex[] = "0123456789ABCDEF";
-        uint32_t ep = (uint32_t)(uintptr_t)entry;
-        out_io(0x01, 'E'); out_io(0x01, '=');
-        out_io(0x01, hex[(ep >> 28) & 0xF]);
-        out_io(0x01, hex[(ep >> 24) & 0xF]);
-        out_io(0x01, hex[(ep >> 20) & 0xF]);
-        out_io(0x01, hex[(ep >> 16) & 0xF]);
-        out_io(0x01, hex[(ep >> 12) & 0xF]);
-        out_io(0x01, hex[(ep >>  8) & 0xF]);
-        out_io(0x01, hex[(ep >>  4) & 0xF]);
-        out_io(0x01, hex[ep & 0xF]);
-        out_io(0x01, '\n');
-    }
     entry();
 }
 
@@ -308,7 +323,7 @@ __asm__(
     ".text\n"
     ".globl _start\n"
     "_start:\n"
-    "  movi r30, 4194304\n"
+    "  movi r30, 8388608\n"
     "  call bios_main\n"
     "  halt\n"
 );

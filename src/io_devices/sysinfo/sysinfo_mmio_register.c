@@ -26,6 +26,9 @@ static uint32_t sysinfo_feature_bits(const VM *vm) {
     if (vm->smp_cores > 1) {
         bits |= SYSINFO_FEATURE_SMP;
     }
+    if (vm->ether) {
+        bits |= SYSINFO_FEATURE_ETHER;
+    }
     return bits;
 }
 

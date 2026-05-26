@@ -16,14 +16,14 @@ Implemented now:
 - tty mode syscalls: `tty_getmode`, `tty_setmode`, `ioctl(TCGETS/TCSETS/TIOCGWINSZ)`
 - filesystem/network surface:
   - `open` for `/dev/null`, `/dev/zero`, `/dev/tty`
-  - `open/read/write` for ext4 regular files (absolute path)
-  - `socket/connect/bind/listen/accept/send/recv` with stable stub errno behavior
+  - `open/read/write/unlink` for ext4 regular files
+  - `socket/connect/send/recv` for the current IPv4 TCP path
 
 Not implemented yet:
 
-- ext4 create/unlink/rename and directory mutation
+- full ext4 directory mutation (`mkdir/rmdir/rename/link/symlink`) and block/inode reclamation on unlink
 - sparse write and deep extent-tree growth (`depth > 0`) in write path
-- real socket transport/protocol stack
+- complete TCP behavior beyond the current client-oriented NAT path
 - userspace signal handler delivery/trampolines
 - process groups/sessions and job-control foreground groups
 
@@ -102,9 +102,10 @@ cwd/path support:
 
 filesystem mutation/link surface:
 
-- `rename`, `unlink`, `mkdir`, `rmdir`, `link`, and `symlink` are wired for ABI compatibility but return `-1/EROFS` for valid mutation inputs until ext4 mutation support lands
+- `unlink` removes regular-file directory entries and clears inode mode/link count; it does not reclaim data blocks or inode bitmap entries yet
+- `rename`, `mkdir`, `rmdir`, `link`, and `symlink` are wired for ABI compatibility but return `-1/EROFS` for valid mutation inputs until ext4 mutation support lands
 - `rename`/`link` validate the source exists before returning read-only status
-- `unlink`/`rmdir` validate the target exists and preserve basic type errors before returning read-only status
+- `rmdir` validates the target exists and preserves basic type errors before returning read-only status
 - ext4 path lookup follows symlinks for path-based syscalls such as `open`, `stat`, `access`, `execve`, and `chdir`
 - `readlink` returns ext4 symlink targets without appending a NUL; existing non-symlink paths return `-1/EINVAL`, and missing paths preserve filesystem errno such as `-1/ENOENT`
 
@@ -136,14 +137,14 @@ By fd type:
 - `/dev/null` read: returns `0`
 - `/dev/zero` read: fills user buffer with zero bytes
 - regular file read: offset-based ext4 inode read, EOF returns `0`
-- socket read (stub): `-1/ENOTCONN`
+- TCP socket read: current client-oriented IPv4 path, short reads allowed, EOF returns `0`
 
 `write` by fd type:
 
 - stdio and `/dev/tty`: console output path
 - `/dev/null` and `/dev/zero`: accepted, returns requested length
 - regular file write: supports in-extent overwrite and EOF append with inode size update
-- socket write (stub): `-1/ENOTCONN`
+- TCP socket write: current client-oriented IPv4 path
 
 ## TTY Line Discipline
 
@@ -186,7 +187,7 @@ ext4 open notes:
 - missing path: `-1/ENOENT`
 - opening directory read-only: succeeds for `getdents`; ordinary `read` returns `-1/EISDIR`
 - opening directory writable/truncated: `-1/EISDIR`
-- `O_CREAT`: `-1/EROFS` (not implemented yet)
+- `O_CREAT`: creates regular files in existing directories
 - `O_TRUNC` on writable open: supported (current implementation keeps extents allocated and sets inode size to 0)
 - unsupported ext4 write shape: `-1/ENOSYS`
 
@@ -195,8 +196,8 @@ Socket syscall status:
 - `socket(domain, type, protocol)` allocates socket fd for supported domains
 - unsupported domain: `-1/EAFNOSUPPORT`
 - non-socket fd passed to socket operations: `-1/ENOTSOCK`
-- `connect/bind/listen/accept` on socket fd: `-1/EOPNOTSUPP` (stub)
-- `send/recv` on unconnected socket fd: `-1/ENOTCONN` (stub)
+- `connect/send/recv/read/write` support the current IPv4 TCP client path
+- `bind/listen/accept` remain limited/stubbed for server-side behavior
 
 ## Regression
 
@@ -218,7 +219,7 @@ Coverage currently includes:
 - ext4 directory `open/getdents` behavior
 - `access` existence/mode/error behavior
 - `/dev/null`, `/dev/zero`, `/dev/tty` open and I/O behavior
-- socket stub errno behavior
+- TCP socket client smoke behavior
 - SMP waitq/poll/select stress behavior (`fdtest`)
 
 Typical boot test flow:
