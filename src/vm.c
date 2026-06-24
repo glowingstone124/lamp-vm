@@ -36,6 +36,7 @@
 
 const size_t MEM_SIZE = 1048576 * 64; // 64MB
 enum { EXECUTION_TIMES_FLUSH_INTERVAL = 1024 };
+enum { DEVICE_POLL_INTERVAL = 256 };
 
 typedef struct {
     VM *vm;
@@ -1166,6 +1167,7 @@ void *vm_thread(void *arg) {
     free(thread_arg);
     vm_tls_vcpu = &vm->cpus[core_id];
     uint64_t local_cycles = 0;
+    uint32_t device_poll_cycles = 0;
 
     while (1) {
         if (atomic_is_vm_halted(vm)|| atomic_is_vm_panicked(vm)) {
@@ -1181,13 +1183,21 @@ void *vm_thread(void *arg) {
         vm_handle_interrupts(vm);
         vm_instruction_case(vm);
         local_cycles++;
+        if (core_id == 0) {
+            device_poll_cycles++;
+        }
         if (local_cycles >= EXECUTION_TIMES_FLUSH_INTERVAL) {
             vm_flush_execution_times(vm_tls_vcpu, &local_cycles);
         }
-        if (core_id == 0) {
+        if (core_id == 0 && device_poll_cycles >= DEVICE_POLL_INTERVAL) {
             disk_tick(vm);
             ether_poll(vm);
+            device_poll_cycles = 0;
         }
+    }
+    if (core_id == 0 && device_poll_cycles > 0) {
+        disk_tick(vm);
+        ether_poll(vm);
     }
     vm_flush_execution_times(vm_tls_vcpu, &local_cycles);
     return NULL;
@@ -1764,12 +1774,53 @@ void vm_destroy(VM *vm) {
     free(vm);
 }
 
+typedef enum {
+    VM_CLI_RUN,
+    VM_CLI_SELFTEST,
+    VM_CLI_HELP
+} VmCliCommand;
+
+typedef struct {
+    VmCliCommand command;
+    const char *program_path;
+    const char *net_mode;
+    int smp_cores;
+    int serial_console;
+    int serial_stdin;
+} VmCliOptions;
+
+static void vm_cli_options_init(VmCliOptions *options) {
+    options->command = VM_CLI_RUN;
+    options->program_path = "boot.bin";
+    options->net_mode = "nat";
+    options->smp_cores = 1;
+    options->serial_console = 0;
+    options->serial_stdin = 0;
+}
+
 static void print_usage(const char *prog) {
-    printf("Usage: %s [--bin <file>] [--smp <cores>] [--selftest] [--console] [--serial-stdin] [--net <mode>]\n", prog);
-    printf("Defaults: --bin boot.bin --smp 1\n");
-    printf("  --console       attach terminal stdin to the guest serial console while keeping SDL/VNC enabled\n");
-    printf("  --serial-stdin  legacy headless serial stdin mode\n");
-    printf("  --net <mode>    ethernet backend: null, nat, or udp:<bind-port>:<peer-port>\n");
+    printf("Lamp VM\n");
+    printf("\n");
+    printf("Usage:\n");
+    printf("  %s run [program.bin] [options]\n", prog);
+    printf("  %s test\n", prog);
+    printf("  %s help\n", prog);
+    printf("\n");
+    printf("Common examples:\n");
+    printf("  %s run bios/boot.bin\n", prog);
+    printf("  %s run bios/boot.bin --cores 2\n", prog);
+    printf("  %s run bios/boot.bin --console\n", prog);
+    printf("  %s test\n", prog);
+    printf("\n");
+    printf("Run options:\n");
+    printf("  program.bin              guest program image (default: boot.bin)\n");
+    printf("  --bin <file>             legacy spelling for program.bin\n");
+    printf("  --cores, --smp <n>       CPU worker thread count in [1, 64] (default: 1)\n");
+    printf("  --console                attach terminal stdin while keeping SDL/VNC enabled\n");
+    printf("  --headless               use legacy serial stdin mode without SDL display\n");
+    printf("  --net <mode>             ethernet backend: null, nat, or udp:<bind-port>:<peer-port>\n");
+    printf("\n");
+    printf("Compatibility aliases: --selftest, --serial-stdin, --serial-console\n");
 }
 
 static int parse_positive_int(const char *s, int *out) {
@@ -1782,60 +1833,128 @@ static int parse_positive_int(const char *s, int *out) {
     return 1;
 }
 
+static int parse_cli_options(int argc, char **argv, VmCliOptions *options) {
+    int argi = 1;
+    int program_path_set = 0;
+
+    vm_cli_options_init(options);
+    if (argc <= 1) {
+        return 1;
+    }
+
+    if (strcmp(argv[argi], "run") == 0) {
+        argi++;
+    } else if (strcmp(argv[argi], "test") == 0 || strcmp(argv[argi], "selftest") == 0) {
+        options->command = VM_CLI_SELFTEST;
+        argi++;
+    } else if (strcmp(argv[argi], "help") == 0 ||
+               strcmp(argv[argi], "--help") == 0 ||
+               strcmp(argv[argi], "-h") == 0) {
+        options->command = VM_CLI_HELP;
+        return 1;
+    }
+
+    for (int i = argi; i < argc; i++) {
+        if (strcmp(argv[i], "--bin") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "Missing value for --bin.\n");
+                return 0;
+            }
+            options->program_path = argv[++i];
+            program_path_set = 1;
+        } else if (strcmp(argv[i], "--smp") == 0 || strcmp(argv[i], "--cores") == 0) {
+            if (i + 1 >= argc || !parse_positive_int(argv[i + 1], &options->smp_cores)) {
+                fprintf(stderr, "Invalid core count. Expected integer in [1, 64].\n");
+                return 0;
+            }
+            i++;
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            options->command = VM_CLI_HELP;
+            return 1;
+        } else if (strcmp(argv[i], "--selftest") == 0) {
+            options->command = VM_CLI_SELFTEST;
+        } else if (strcmp(argv[i], "--console") == 0 || strcmp(argv[i], "--serial-console") == 0) {
+            options->serial_console = 1;
+        } else if (strcmp(argv[i], "--headless") == 0 || strcmp(argv[i], "--serial-stdin") == 0) {
+            options->serial_stdin = 1;
+        } else if (strcmp(argv[i], "--net") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "Missing value for --net.\n");
+                return 0;
+            }
+            options->net_mode = argv[++i];
+        } else if (argv[i][0] != '-' && !program_path_set && options->command == VM_CLI_RUN) {
+            options->program_path = argv[i];
+            program_path_set = 1;
+        } else {
+            fprintf(stderr, "Unknown argument: %s\n", argv[i]);
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static void print_launch_summary(const VmCliOptions *options) {
+    printf("Launching Lamp VM\n");
+    printf("  program: %s\n", options->program_path);
+    printf("  cores:   %d\n", options->smp_cores);
+    printf("  console: %s\n",
+           options->serial_stdin ? "headless serial stdin" :
+           (options->serial_console ? "terminal + SDL/VNC" : "SDL/VNC"));
+    printf("  network: %s\n", options->net_mode);
+}
+
+static void init_ethernet_backend_from_cli(VM *vm, const char *net_mode) {
+    ether_backend_t backend;
+    int backend_ok = 0;
+
+    if (strcmp(net_mode, "nat") == 0) {
+        backend_ok = (ether_backend_nat_create(&backend) == 0);
+    } else if (strcmp(net_mode, "null") == 0) {
+        backend_ok = (ether_backend_null_create(&backend) == 0);
+    } else if (strncmp(net_mode, "udp:", 4) == 0) {
+        int bind_p = 9000;
+        int peer_p = 9001;
+        if (sscanf(net_mode + 4, "%d:%d", &bind_p, &peer_p) == 2 &&
+            bind_p > 0 && bind_p <= 65535 && peer_p > 0 && peer_p <= 65535) {
+            backend_ok = (ether_backend_udp_create(&backend, (uint16_t)bind_p, (uint16_t)peer_p) == 0);
+        } else {
+            fprintf(stderr, "Invalid --net udp mode, expected udp:<bind-port>:<peer-port>\n");
+        }
+    } else {
+        fprintf(stderr, "Unknown --net mode '%s'; falling back to null backend.\n", net_mode);
+    }
+
+    if (!backend_ok) {
+        ether_backend_null_create(&backend);
+    }
+    ether_init(vm, &backend);
+}
+
 int main(int argc, char **argv) {
     printf("Lamp VM version 1.0.0-rc1 \n");
 #ifdef DEBUG_BUILD
     printf("This copy was built with debug flag. It may causing huge performance impact. \n");
 #endif
-    const char *filename = "boot.bin";
-    int smp_cores = 1;
-    int selftest = 0;
-    int serial_console = 0;
-    int serial_stdin = 0;
-    const char *net_mode = "nat";
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--bin") == 0) {
-            if (i + 1 >= argc) {
-                print_usage(argv[0]);
-                return 1;
-            }
-            filename = argv[++i];
-        } else if (strcmp(argv[i], "--smp") == 0) {
-            if (i + 1 >= argc || !parse_positive_int(argv[i + 1], &smp_cores)) {
-                printf("Invalid --smp value. Expected integer in [1, 64].\n");
-                print_usage(argv[0]);
-                return 1;
-            }
-            i++;
-        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            print_usage(argv[0]);
-            return 0;
-        } else if (strcmp(argv[i], "--selftest") == 0) {
-            selftest = 1;
-        } else if (strcmp(argv[i], "--console") == 0 || strcmp(argv[i], "--serial-console") == 0) {
-            serial_console = 1;
-        } else if (strcmp(argv[i], "--serial-stdin") == 0) {
-            serial_stdin = 1;
-        } else if (strcmp(argv[i], "--net") == 0) {
-            if (i + 1 >= argc) {
-                print_usage(argv[0]);
-                return 1;
-            }
-            net_mode = argv[++i];
-        } else {
-            printf("Unknown argument: %s\n", argv[i]);
-            print_usage(argv[0]);
-            return 1;
-        }
+    VmCliOptions options;
+    if (!parse_cli_options(argc, argv, &options)) {
+        print_usage(argv[0]);
+        return 1;
     }
-    if (selftest) {
+    if (options.command == VM_CLI_HELP) {
+        print_usage(argv[0]);
+        return 0;
+    }
+    if (options.command == VM_CLI_SELFTEST) {
         return run_selftests();
     }
-    if (serial_console && smp_cores > 1) {
+    if (options.serial_console && options.smp_cores > 1) {
         printf("Serial console mode uses BSP-only execution; ignoring --smp %d for console stability.\n",
-               smp_cores);
-        smp_cores = 1;
+               options.smp_cores);
+        options.smp_cores = 1;
     }
+    print_launch_summary(&options);
 
     size_t program_size = 0;
     size_t data_size = 0;
@@ -1843,19 +1962,19 @@ int main(int argc, char **argv) {
     uint8_t *data = NULL;
     ProgramLayout layout;
 
-    if (!load_program_single(filename, &program, &program_size, &data, &data_size, &layout)) {
-        printf("Failed to load program from %s\n", filename);
+    if (!load_program_single(options.program_path, &program, &program_size, &data, &data_size, &layout)) {
+        printf("Failed to load program from %s\n", options.program_path);
         return 1;
     }
 
-    printf("Loaded program from %s, %zu instructions.\n", filename, program_size);
+    printf("Loaded program from %s, %zu instructions.\n", options.program_path, program_size);
     printf("Loaded data: %zu bytes.\n", data_size);
     printf("Layout: TEXT_BASE=0x%08X TEXT_SIZE=%u DATA_BASE=0x%08X DATA_SIZE=%u BSS_BASE=0x%08X BSS_SIZE=%u\n",
            layout.text_base, layout.text_size,
            layout.data_base, layout.data_size,
            layout.bss_base, layout.bss_size);
 
-    VM *vm = vm_create(MEM_SIZE, program, program_size, data, data_size, &layout, smp_cores);
+    VM *vm = vm_create(MEM_SIZE, program, program_size, data, data_size, &layout, options.smp_cores);
     if (!vm) {
         printf("Failed to create VM.\n");
         free(program);
@@ -1864,30 +1983,11 @@ int main(int argc, char **argv) {
     }
     disk_init(vm, "./disk.img");
 
-    /* Init ethernet NIC */
-    {
-        ether_backend_t backend;
-        int backend_ok = 0;
-        if (strcmp(net_mode, "nat") == 0) {
-            backend_ok = (ether_backend_nat_create(&backend) == 0);
-        } else if (strncmp(net_mode, "udp:", 4) == 0) {
-            int bind_p = 9000, peer_p = 9001;
-            if (sscanf(net_mode + 4, "%d:%d", &bind_p, &peer_p) == 2 &&
-                bind_p > 0 && bind_p <= 65535 && peer_p > 0 && peer_p <= 65535) {
-                backend_ok = (ether_backend_udp_create(&backend, (uint16_t)bind_p, (uint16_t)peer_p) == 0);
-            } else {
-                fprintf(stderr, "Invalid --net udp mode, expected udp:<bind-port>:<peer-port>\n");
-            }
-        }
-        if (!backend_ok) {
-            ether_backend_null_create(&backend);
-        }
-        ether_init(vm, &backend);
-    }
+    init_ethernet_backend_from_cli(vm, options.net_mode);
 
     init_ivt(vm);
-    if (smp_cores > 1) {
-        printf("SMP mode enabled: %d cores (per-core architectural state, shared memory).\n", smp_cores);
+    if (options.smp_cores > 1) {
+        printf("SMP mode enabled: %d cores (per-core architectural state, shared memory).\n", options.smp_cores);
     }
     printf("Loaded VM. \n Call Stack size: %d\n Data Stack size: %d \n Memory Size: %lu\n Memory "
            "Head: %p\n",
@@ -1898,14 +1998,14 @@ int main(int argc, char **argv) {
     init_screen();
     printf("VNC function is still in preview, use it with caution.\n");
     vnc_run(vm);
-    if (serial_stdin) {
+    if (options.serial_stdin) {
         printf("Serial stdin mode enabled (headless).\n");
         vm_run_serial(vm);
     } else {
-        if (serial_console) {
+        if (options.serial_console) {
             printf("Serial console mode enabled (terminal stdin + SDL/VNC).\n");
         }
-        vm_run(vm, serial_console);
+        vm_run(vm, options.serial_console);
     }
 #ifdef DBEUG
     vm_dump(vm, 1024);

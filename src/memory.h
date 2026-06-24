@@ -58,6 +58,22 @@ static inline void store_le32(void *p, uint32_t v) {
 #endif
     memcpy(p, &v, sizeof(v));
 }
+
+static inline uint64_t load_le64(const void *p) {
+    uint64_t v;
+    memcpy(&v, p, sizeof(v));
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    v = __builtin_bswap64(v);
+#endif
+    return v;
+}
+
+static inline void store_le64(void *p, uint64_t v) {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    v = __builtin_bswap64(v);
+#endif
+    memcpy(p, &v, sizeof(v));
+}
 void vm_write8(VM *vm, vm_addr_t addr, uint8_t value);
 void vm_write32(VM *vm, vm_addr_t addr, uint32_t value);
 void vm_write64(VM *vm, vm_addr_t addr, uint64_t value);

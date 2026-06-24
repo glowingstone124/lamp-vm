@@ -109,14 +109,17 @@ Note:
 - `trap_init()` resets and reprograms IRQ routing/priorities after BIOS handoff
 - disk completion IRQ wakes block waiters via `blk_irq_complete()`
 
-## IOMMU (Current VM v1)
+## IOMMU (Current VM v2)
 
 - VM exposes IOMMU MMIO at `0x0074E000` and advertises `IOMMU_MMIO` in BootInfo/SYSINFO features.
-- Disk DMA path now goes through VM-side IOMMU translation API.
+- Disk and Ethernet DMA paths now go through VM-side IOMMU translation API.
 - Default compatibility behavior:
   - global IOMMU disabled => DMA address is identity-mapped (legacy behavior)
   - enabled but device entry disabled => identity-mapped
   - enabled + device entry enabled => `iova_base/iova_size/pa_base` window translation is enforced
+- Device entries can also enable `DEV_CTRL_PAGED`, which switches translation to a 2-level 4KB IOVA page table.
+- Kernel DMA now programs paged IOMMU mode for the `0x01000000 + pa` IOVA window on disk and Ethernet device entries.
+- Paged IOMMU translations currently require the requested DMA span to resolve to contiguous physical memory because the disk backend consumes one physical address per request.
 - fault registers record last rejected translation (`dev/iova/len/reason`).
 
 ## MMU Paging (Current v2)
@@ -186,7 +189,7 @@ Note:
   - superblock + group descriptor + inode table reads
   - directory traversal for absolute paths
   - regular-file `open/read`
-  - regular-file creation with `O_CREAT`
+  - regular-file creation with `O_CREAT`, including `O_CREAT|O_EXCL` returning `EEXIST` for existing paths
   - minimal `unlink` for regular files
   - regular-file `write` for:
     - existing extent overwrite

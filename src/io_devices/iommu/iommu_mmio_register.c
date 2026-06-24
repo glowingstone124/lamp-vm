@@ -18,6 +18,23 @@ static inline uint64_t set_hi32_u64(uint64_t oldv, uint32_t hi) {
     return (oldv & 0x00000000FFFFFFFFull) | ((uint64_t)hi << 32);
 }
 
+static inline uint32_t rd_le32_raw(const uint8_t *p) {
+    return ((uint32_t)p[0]) |
+           ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+static inline int iommu_phys_range_ok(const VM *vm, uint64_t pa, uint64_t len) {
+    if (!vm || len == 0u) {
+        return 0;
+    }
+    if (pa >= (uint64_t)vm->memory_size) {
+        return 0;
+    }
+    return (len <= ((uint64_t)vm->memory_size - pa)) ? 1 : 0;
+}
+
 static inline void iommu_set_fault_locked(VM *vm, uint32_t dev_id, uint64_t iova, uint32_t len, uint32_t reason) {
     vm->iommu.fault_status = IOMMU_FAULT_VALID | (reason << IOMMU_FAULT_REASON_SHIFT);
     vm->iommu.fault_dev = dev_id;
@@ -31,6 +48,97 @@ static inline uint32_t iommu_selected_dev(const VM *vm) {
         return IOMMU_MAX_DEVICES;
     }
     return sel;
+}
+
+static int iommu_page_translate_locked(VM *vm,
+                                       uint32_t dev_id,
+                                       uint64_t iova,
+                                       uint64_t len,
+                                       uint64_t *pa_out,
+                                       uint32_t *reason_out) {
+    uint32_t root;
+    uint64_t first_pa = 0u;
+    uint64_t done = 0u;
+
+    if (!vm || !pa_out || !reason_out) {
+        return 0;
+    }
+    if ((vm->iommu.devices[dev_id].root & 0xFFFu) != 0u) {
+        *reason_out = IOMMU_FAULT_REASON_BAD_ROOT;
+        return 0;
+    }
+    root = (uint32_t)vm->iommu.devices[dev_id].root;
+    if (!iommu_phys_range_ok(vm, root, 4096u)) {
+        *reason_out = IOMMU_FAULT_REASON_BAD_ROOT;
+        return 0;
+    }
+
+    while (done < len) {
+        uint64_t cur_iova64 = iova + done;
+        uint32_t cur_iova;
+        uint32_t page_off;
+        uint32_t chunk;
+        uint32_t pde_pa;
+        uint32_t pde;
+        uint32_t pte_table;
+        uint32_t pte_pa;
+        uint32_t pte;
+        uint64_t cur_pa;
+
+        if (cur_iova64 > 0xFFFFFFFFull) {
+            *reason_out = IOMMU_FAULT_REASON_BOUNDS;
+            return 0;
+        }
+        cur_iova = (uint32_t)cur_iova64;
+        page_off = cur_iova & 0xFFFu;
+        chunk = 4096u - page_off;
+        if ((uint64_t)chunk > (len - done)) {
+            chunk = (uint32_t)(len - done);
+        }
+
+        pde_pa = root + (((cur_iova >> 22) & 0x3FFu) * 4u);
+        if (!iommu_phys_range_ok(vm, pde_pa, 4u)) {
+            *reason_out = IOMMU_FAULT_REASON_PTABLE_OOB;
+            return 0;
+        }
+        pde = rd_le32_raw(&vm->memory[pde_pa]);
+        if ((pde & IOMMU_PTE_P) == 0u) {
+            *reason_out = IOMMU_FAULT_REASON_UNMAPPED;
+            return 0;
+        }
+
+        pte_table = pde & 0xFFFFF000u;
+        if (!iommu_phys_range_ok(vm, pte_table, 4096u)) {
+            *reason_out = IOMMU_FAULT_REASON_PTABLE_OOB;
+            return 0;
+        }
+        pte_pa = pte_table + (((cur_iova >> 12) & 0x3FFu) * 4u);
+        if (!iommu_phys_range_ok(vm, pte_pa, 4u)) {
+            *reason_out = IOMMU_FAULT_REASON_PTABLE_OOB;
+            return 0;
+        }
+        pte = rd_le32_raw(&vm->memory[pte_pa]);
+        if ((pte & IOMMU_PTE_P) == 0u) {
+            *reason_out = IOMMU_FAULT_REASON_UNMAPPED;
+            return 0;
+        }
+
+        cur_pa = (uint64_t)(pte & 0xFFFFF000u) + page_off;
+        if (!iommu_phys_range_ok(vm, cur_pa, chunk)) {
+            *reason_out = IOMMU_FAULT_REASON_PA_RANGE;
+            return 0;
+        }
+        if (done == 0u) {
+            first_pa = cur_pa;
+        } else if (cur_pa != first_pa + done) {
+            *reason_out = IOMMU_FAULT_REASON_NONCONTIG;
+            return 0;
+        }
+        done += chunk;
+    }
+
+    *pa_out = first_pa;
+    return 1;
 }
 
 static uint32_t iommu_read32(VM *vm, uint32_t addr) {
@@ -66,6 +174,10 @@ static uint32_t iommu_read32(VM *vm, uint32_t addr) {
             return hi32_u64(vm->iommu.fault_iova);
         case IOMMU_REG_FAULT_LEN:
             return vm->iommu.fault_len;
+        case IOMMU_REG_ROOT_LO:
+            return (dev < IOMMU_MAX_DEVICES) ? lo32_u64(vm->iommu.devices[dev].root) : 0u;
+        case IOMMU_REG_ROOT_HI:
+            return (dev < IOMMU_MAX_DEVICES) ? hi32_u64(vm->iommu.devices[dev].root) : 0u;
         default:
             fprintf(stderr, "Unknown IOMMU MMIO register offset: 0x%08x\n", offset);
             return 0u;
@@ -85,7 +197,7 @@ static void iommu_write32(VM *vm, uint32_t addr, uint32_t value) {
             return;
         case IOMMU_REG_DEV_CTRL:
             if (dev < IOMMU_MAX_DEVICES) {
-                vm->iommu.devices[dev].ctrl = value & IOMMU_DEV_CTRL_ENABLE;
+                vm->iommu.devices[dev].ctrl = value & (IOMMU_DEV_CTRL_ENABLE | IOMMU_DEV_CTRL_PAGED);
             }
             return;
         case IOMMU_REG_IOVA_BASE_LO:
@@ -121,6 +233,16 @@ static void iommu_write32(VM *vm, uint32_t addr, uint32_t value) {
                 vm->iommu.fault_len = 0u;
             }
             return;
+        case IOMMU_REG_ROOT_LO:
+            if (dev < IOMMU_MAX_DEVICES) {
+                vm->iommu.devices[dev].root = set_lo32_u64(vm->iommu.devices[dev].root, value);
+            }
+            return;
+        case IOMMU_REG_ROOT_HI:
+            if (dev < IOMMU_MAX_DEVICES) {
+                vm->iommu.devices[dev].root = set_hi32_u64(vm->iommu.devices[dev].root, value);
+            }
+            return;
         default:
             fprintf(stderr, "Unknown IOMMU MMIO register offset: 0x%08x\n", offset);
             atomic_set_vm_halt(vm, 1);;
@@ -143,24 +265,34 @@ int vm_iommu_translate_dma(VM *vm, uint32_t dev_id, uint64_t iova, uint64_t len,
             ok = 0;
             reason = IOMMU_FAULT_REASON_DEV_INVALID;
         } else if ((vm->iommu.devices[dev_id].ctrl & IOMMU_DEV_CTRL_ENABLE) != 0u) {
-            uint64_t base = vm->iommu.devices[dev_id].iova_base;
-            uint64_t size = (uint64_t)vm->iommu.devices[dev_id].iova_size;
-            uint64_t off = 0u;
-
-            if (size == 0u || iova < base) {
-                ok = 0;
-                reason = IOMMU_FAULT_REASON_UNMAPPED;
+            if ((vm->iommu.devices[dev_id].ctrl & IOMMU_DEV_CTRL_PAGED) != 0u) {
+                ok = iommu_page_translate_locked(vm, dev_id, iova, len, &pa, &reason);
             } else {
-                off = iova - base;
-                if (off > size || len > size || off > (size - len)) {
+                uint64_t base = vm->iommu.devices[dev_id].iova_base;
+                uint64_t size = (uint64_t)vm->iommu.devices[dev_id].iova_size;
+                uint64_t off = 0u;
+
+                if (size == 0u || iova < base) {
                     ok = 0;
-                    reason = IOMMU_FAULT_REASON_BOUNDS;
+                    reason = IOMMU_FAULT_REASON_UNMAPPED;
                 } else {
-                    pa = vm->iommu.devices[dev_id].pa_base + off;
-                    if (pa >= (uint64_t)vm->memory_size || len > ((uint64_t)vm->memory_size - pa)) {
+                    off = iova - base;
+                    if (off > size || len > size || off > (size - len)) {
                         ok = 0;
-                        reason = IOMMU_FAULT_REASON_PA_RANGE;
+                        reason = IOMMU_FAULT_REASON_BOUNDS;
+                    } else {
+                        pa = vm->iommu.devices[dev_id].pa_base + off;
+                        if (pa >= (uint64_t)vm->memory_size || len > ((uint64_t)vm->memory_size - pa)) {
+                            ok = 0;
+                            reason = IOMMU_FAULT_REASON_PA_RANGE;
+                        }
                     }
+                }
+            }
+            if (ok && ((iova + len - 1u) > 0xFFFFFFFFull || (pa + len - 1u) > 0xFFFFFFFFull)) {
+                ok = 0;
+                if (reason == 0u) {
+                    reason = IOMMU_FAULT_REASON_BOUNDS;
                 }
             }
         }

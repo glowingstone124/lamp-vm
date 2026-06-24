@@ -10,6 +10,40 @@
 #include "panic.h"
 #include "vm.h"
 
+static inline void vm_decode_inst_cached(VCPU *cpu,
+                                         vm_addr_t ip,
+                                         uint64_t inst,
+                                         uint8_t *op,
+                                         uint8_t *rd,
+                                         uint8_t *rs1,
+                                         uint8_t *rs2,
+                                         int32_t *imm) {
+    VM_DecodeCacheEntry *entry = &cpu->decode_cache[(ip >> 3u) & (VM_DECODE_CACHE_ENTRIES - 1u)];
+    if (entry->valid != 0u && entry->ip == ip && entry->inst == inst) {
+        *op = entry->op;
+        *rd = entry->rd;
+        *rs1 = entry->rs1;
+        *rs2 = entry->rs2;
+        *imm = entry->imm;
+        return;
+    }
+
+    entry->valid = 1u;
+    entry->ip = ip;
+    entry->inst = inst;
+    entry->op = (uint8_t)((inst >> 56) & 0xFFu);
+    entry->rd = (uint8_t)((inst >> 48) & 0xFFu);
+    entry->rs1 = (uint8_t)((inst >> 40) & 0xFFu);
+    entry->rs2 = (uint8_t)((inst >> 32) & 0xFFu);
+    entry->imm = (int32_t)(inst & 0xFFFFFFFFu);
+
+    *op = entry->op;
+    *rd = entry->rd;
+    *rs1 = entry->rs1;
+    *rs2 = entry->rs2;
+    *imm = entry->imm;
+}
+
 #define FETCH64(vm, op, rd, rs1, rs2, imm)                                                         \
     do {                                                                                           \
         VCPU *cpu = vm_current_cpu((vm));                                                          \
@@ -24,11 +58,7 @@
             return;                                                                                \
         }                                                                                          \
         cpu->ip = (size_t)(ip + 8u);                                                               \
-        op = (inst >> 56) & 0xFF;                                                                  \
-        rd = (inst >> 48) & 0xFF;                                                                  \
-        rs1 = (inst >> 40) & 0xFF;                                                                 \
-        rs2 = (inst >> 32) & 0xFF;                                                                 \
-        imm = (int32_t)(inst & 0xFFFFFFFFu);                                                       \
+        vm_decode_inst_cached(cpu, ip, inst, &(op), &(rd), &(rs1), &(rs2), &(imm));                \
     } while (0)
 
 #endif // VM_FETCH_H

@@ -49,21 +49,34 @@ Notes:
 
 ## Run
 
+The executable supports subcommands for the common workflows:
+
 ```bash
-./build/vm --bin bios/boot.bin --smp 1
+./build/vm run bios/boot.bin --cores 1
+./build/vm test
+./build/vm help
 ```
 
 Arguments:
-- `--bin <file>`: program binary path (default: `boot.bin`)
-- `--smp <cores>`: CPU worker thread count in `[1, 64]` (default: `1`)
-- `--selftest`: run built-in SMP tests and exit
+- `run [program.bin]`: boot a guest program image (default: `boot.bin`)
+- `test`: run built-in SMP tests and exit
+- `help`: show usage and examples
+- `--cores <n>` / `--smp <n>`: CPU worker thread count in `[1, 64]` (default: `1`)
 - `--console`: attach the host terminal to the guest serial console while keeping SDL and VNC enabled
-- `--serial-stdin`: legacy headless serial stdin mode
+- `--headless`: legacy headless serial stdin mode
+- `--net <mode>`: ethernet backend: `null`, `nat`, or `udp:<bind-port>:<peer-port>`
+
+Legacy flag-style invocation is still accepted:
+
+```bash
+./build/vm --bin bios/boot.bin --smp 1
+./build/vm --selftest
+```
 
 Run selftests:
 
 ```bash
-./build/vm --selftest
+./build/vm test
 ```
 
 ## SMP Execution Model

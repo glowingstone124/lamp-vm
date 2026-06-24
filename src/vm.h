@@ -122,10 +122,15 @@ typedef struct VM_Debug VM_Debug;
 #define IOMMU_REG_FAULT_IOVA_LO 0x02Cu
 #define IOMMU_REG_FAULT_IOVA_HI 0x030u
 #define IOMMU_REG_FAULT_LEN 0x034u
+#define IOMMU_REG_ROOT_LO 0x038u
+#define IOMMU_REG_ROOT_HI 0x03Cu
 #define IOMMU_MMIO_SIZE 0x100u
 
 #define IOMMU_CTRL_ENABLE 0x01u
 #define IOMMU_DEV_CTRL_ENABLE 0x01u
+#define IOMMU_DEV_CTRL_PAGED 0x02u
+
+#define IOMMU_PTE_P 0x00000001u
 
 #define IOMMU_FAULT_VALID 0x01u
 #define IOMMU_FAULT_REASON_SHIFT 4u
@@ -133,9 +138,13 @@ typedef struct VM_Debug VM_Debug;
 #define IOMMU_FAULT_REASON_UNMAPPED 2u
 #define IOMMU_FAULT_REASON_BOUNDS 3u
 #define IOMMU_FAULT_REASON_PA_RANGE 4u
+#define IOMMU_FAULT_REASON_PTABLE_OOB 5u
+#define IOMMU_FAULT_REASON_BAD_ROOT 6u
+#define IOMMU_FAULT_REASON_NONCONTIG 7u
 
 #define IOMMU_MAX_DEVICES 4u
 #define IOMMU_DEV_DISK 0u
+#define IOMMU_DEV_ETHER 1u
 
 #define MMU_MAX_CORES 32u
 
@@ -168,6 +177,8 @@ typedef struct VM_Debug VM_Debug;
 #define VM_MMU_ACC_WRITE 0x02u
 #define VM_MMU_ACC_EXEC 0x04u
 #define VM_MMU_ACC_USER 0x08u
+#define VM_MMU_TLB_ENTRIES 64u
+#define VM_DECODE_CACHE_ENTRIES 256u
 typedef uint32_t vm_addr_t;
 
 typedef struct {
@@ -200,6 +211,7 @@ typedef struct {
         uint32_t iova_size;
         uint64_t iova_base;
         uint64_t pa_base;
+        uint64_t root;
     } devices[IOMMU_MAX_DEVICES];
 } IOMMU;
 
@@ -218,6 +230,26 @@ typedef struct {
     mmio_read32_fn read32;
     mmio_write32_fn write32;
 } MMIO_Device;
+
+typedef struct {
+    uint32_t vpn;
+    uint32_t ppn;
+    uint32_t root;
+    uint32_t perms;
+    uint8_t valid;
+} VM_TlbEntry;
+
+typedef struct {
+    vm_addr_t ip;
+    uint64_t inst;
+    int32_t imm;
+    uint8_t op;
+    uint8_t rd;
+    uint8_t rs1;
+    uint8_t rs2;
+    uint8_t valid;
+} VM_DecodeCacheEntry;
+
 struct VCPU {
     uint32_t regs[REG_COUNT];
 
@@ -236,6 +268,8 @@ struct VCPU {
     vm_addr_t data_stack_base;
     vm_addr_t isr_stack_base;
     int is_bsp;
+    VM_TlbEntry tlb[VM_MMU_TLB_ENTRIES];
+    VM_DecodeCacheEntry decode_cache[VM_DECODE_CACHE_ENTRIES];
 };
 
 extern _Thread_local VCPU *vm_tls_vcpu;

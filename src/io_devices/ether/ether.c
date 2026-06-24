@@ -1,6 +1,7 @@
 #include "ether.h"
 #include "ether_backend.h"
 #include "ether_trace.h"
+#include "../iommu/iommu_mmio_register.h"
 #include "../../interrupt.h"
 #include "../../vm.h"
 #include <stdio.h>
@@ -23,10 +24,11 @@ typedef struct {
 #define ETHER_MMIO_BASE 0x00750000u
 
 static void ether_pump_rx(VM *vm, ether_state_t *e) {
+    uint64_t dma_addr = 0u;
     if (!e || !e->active) return;
 
     if (e->backend.poll) e->backend.poll(e->backend.state);
-    if (e->rx_len != 0 || e->rx_lo == 0 || e->rx_lo >= vm->memory_size) return;
+    if (e->rx_len != 0 || e->rx_lo == 0) return;
 
     uint8_t frame[ETHER_MTU];
     int n = 0;
@@ -38,10 +40,16 @@ static void ether_pump_rx(VM *vm, ether_state_t *e) {
 
     uint32_t len = (uint32_t)n;
     if (len > ETHER_MTU) len = ETHER_MTU;
-    if (len > vm->memory_size - e->rx_lo) {
-        len = (uint32_t)(vm->memory_size - e->rx_lo);
+    if (!vm_iommu_translate_dma(vm, IOMMU_DEV_ETHER, e->rx_lo, len, &dma_addr)) {
+        fprintf(stderr, "[ether] IOMMU reject rx iova=0x%08x len=%u\n", e->rx_lo, len);
+        return;
     }
-    memcpy(&vm->memory[e->rx_lo], frame, len);
+    if (dma_addr >= (uint64_t)vm->memory_size || len > ((uint64_t)vm->memory_size - dma_addr)) {
+        fprintf(stderr, "[ether] RX DMA violation pa=0x%llx len=%u\n",
+                (unsigned long long)dma_addr, len);
+        return;
+    }
+    memcpy(&vm->memory[(size_t)dma_addr], frame, len);
     e->rx_len = len;
     e->status |= ETHER_STATUS_RX_READY;
 }
@@ -79,12 +87,19 @@ static void ether_mmio_write32(VM *vm, uint32_t addr, uint32_t val) {
     switch (off) {
     case ETHER_OFF_TX_LEN:
         /* TX: copy frame from guest memory, send via backend */
-        if (val > 0 && val <= ETHER_MTU &&
-            e->tx_lo < vm->memory_size &&
-            val <= vm->memory_size - e->tx_lo &&
-            e->backend.send) {
+        if (val > 0 && val <= ETHER_MTU && e->backend.send) {
+            uint64_t dma_addr = 0u;
             uint8_t frame[ETHER_MTU];
-            memcpy(frame, &vm->memory[e->tx_lo], val);
+            if (!vm_iommu_translate_dma(vm, IOMMU_DEV_ETHER, e->tx_lo, val, &dma_addr)) {
+                fprintf(stderr, "[ether] IOMMU reject tx iova=0x%08x len=%u\n", e->tx_lo, val);
+                break;
+            }
+            if (dma_addr >= (uint64_t)vm->memory_size || val > ((uint64_t)vm->memory_size - dma_addr)) {
+                fprintf(stderr, "[ether] TX DMA violation pa=0x%llx len=%u\n",
+                        (unsigned long long)dma_addr, val);
+                break;
+            }
+            memcpy(frame, &vm->memory[(size_t)dma_addr], val);
             e->backend.send(e->backend.state, frame, val);
         }
         break;

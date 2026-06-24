@@ -1,6 +1,7 @@
 #include "mmu_mmio_register.h"
 
 #include <stdio.h>
+#include <string.h>
 
 static inline uint32_t lo32_u64(uint64_t v) {
     return (uint32_t)(v & 0xFFFFFFFFu);
@@ -59,7 +60,26 @@ static inline void mmu_set_fault(VM *vm, uint32_t core_id, uint32_t vaddr, uint3
     vm->mmu.fault_info[core_id] = access;
 }
 
-static int mmu_walk_translate(VM *vm, uint32_t core_id, uint32_t vaddr, uint32_t access, uint32_t *pa_out) {
+static inline uint32_t mmu_access_required_perms(uint32_t access) {
+    uint32_t required = MMU_PTE_P;
+    if ((access & VM_MMU_ACC_WRITE) != 0u) {
+        required |= MMU_PTE_W;
+    }
+    if ((access & VM_MMU_ACC_EXEC) != 0u) {
+        required |= MMU_PTE_X;
+    }
+    if ((access & VM_MMU_ACC_USER) != 0u) {
+        required |= MMU_PTE_U;
+    }
+    return required;
+}
+
+static int mmu_walk_translate(VM *vm,
+                              uint32_t core_id,
+                              uint32_t vaddr,
+                              uint32_t access,
+                              uint32_t *pa_out,
+                              uint32_t *perms_out) {
     uint32_t root;
     uint32_t pde_pa;
     uint32_t pde;
@@ -123,11 +143,26 @@ static int mmu_walk_translate(VM *vm, uint32_t core_id, uint32_t vaddr, uint32_t
 
     pa = (pte & 0xFFFFF000u) | (vaddr & 0xFFFu);
     *pa_out = pa;
+    if (perms_out) {
+        *perms_out = perms;
+    }
     return 1;
+}
+
+void vm_mmu_flush_tlb(VM *vm, uint32_t core_id) {
+    if (!vm || !vm->cpus || core_id >= (uint32_t)vm->smp_cores) {
+        return;
+    }
+    memset(vm->cpus[core_id].tlb, 0, sizeof(vm->cpus[core_id].tlb));
 }
 
 int vm_mmu_translate_access(VM *vm, uint32_t vaddr, uint32_t access, uint32_t *pa_out) {
     uint32_t core_id;
+    uint32_t root;
+    uint32_t vpn;
+    uint32_t tlb_index;
+    uint32_t required_perms;
+    VM_TlbEntry *entry;
     if (!vm || !pa_out) {
         return 0;
     }
@@ -136,7 +171,34 @@ int vm_mmu_translate_access(VM *vm, uint32_t vaddr, uint32_t access, uint32_t *p
         *pa_out = vaddr;
         return 1;
     }
-    return mmu_walk_translate(vm, core_id, vaddr, access, pa_out);
+
+    root = (uint32_t)(vm->mmu.root[core_id] & 0xFFFFF000ull);
+    vpn = vaddr >> 12;
+    tlb_index = vpn & (VM_MMU_TLB_ENTRIES - 1u);
+    required_perms = mmu_access_required_perms(access);
+    entry = &vm->cpus[core_id].tlb[tlb_index];
+    if (entry->valid != 0u &&
+        entry->vpn == vpn &&
+        entry->root == root &&
+        (entry->perms & required_perms) == required_perms) {
+        *pa_out = entry->ppn | (vaddr & 0xFFFu);
+        return 1;
+    }
+
+    {
+        uint32_t pa;
+        uint32_t perms;
+        if (!mmu_walk_translate(vm, core_id, vaddr, access, &pa, &perms)) {
+            return 0;
+        }
+        entry->valid = 1u;
+        entry->vpn = vpn;
+        entry->ppn = pa & 0xFFFFF000u;
+        entry->root = root;
+        entry->perms = perms;
+        *pa_out = pa;
+        return 1;
+    }
 }
 
 static uint32_t mmu_read32(VM *vm, uint32_t addr) {
@@ -171,12 +233,15 @@ static void mmu_write32(VM *vm, uint32_t addr, uint32_t value) {
     switch (offset) {
         case MMU_REG_CTRL:
             vm->mmu.ctrl[core_id] = value & MMU_CTRL_ENABLE;
+            vm_mmu_flush_tlb(vm, core_id);
             return;
         case MMU_REG_ROOT_LO:
             vm->mmu.root[core_id] = set_lo32_u64(vm->mmu.root[core_id], value);
+            vm_mmu_flush_tlb(vm, core_id);
             return;
         case MMU_REG_ROOT_HI:
             vm->mmu.root[core_id] = set_hi32_u64(vm->mmu.root[core_id], value);
+            vm_mmu_flush_tlb(vm, core_id);
             return;
         case MMU_REG_FAULT_STATUS:
             if ((value & MMU_FAULT_VALID) != 0u) {

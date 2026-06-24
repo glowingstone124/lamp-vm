@@ -48,6 +48,31 @@ static int vm_translate_span_or_panic(VM *vm,
     return 1;
 }
 
+static int vm_translate_contiguous_span_or_panic(VM *vm,
+                                                 vm_addr_t addr,
+                                                 uint32_t len,
+                                                 uint32_t access,
+                                                 const char *op,
+                                                 uint32_t *pa_out) {
+    uint32_t pa;
+    if (!pa_out || len == 0u) {
+        return 0;
+    }
+
+    /*
+     * A short access that stays within one guest page is guaranteed to map to
+     * contiguous physical bytes after a single page-table translation.
+     */
+    if (((addr & 0xFFFu) + len) > 0x1000u) {
+        return 0;
+    }
+    if (!vm_translate_or_panic(vm, addr, access, op, &pa)) {
+        return 0;
+    }
+    *pa_out = pa;
+    return 1;
+}
+
 static int vm_span_is_contiguous(const uint32_t *pa, uint32_t len) {
     if (!pa || len == 0u) {
         return 0;
@@ -64,31 +89,35 @@ static _Atomic uint32_t *atomic32_ptr_from_va_or_panic(VM *vm,
                                                         vm_addr_t addr,
                                                         uint32_t access,
                                                         const char *op_name) {
+    uint32_t pa_base;
     uint32_t pa[4];
     if ((addr % _Alignof(_Atomic uint32_t)) != 0u) {
         panic(panic_format("%s unaligned address: 0x%08x", op_name, addr), vm);
         return NULL;
     }
-    if (!vm_translate_span_or_panic(vm, addr, 4u, access, op_name, pa)) {
+    if (!vm_translate_contiguous_span_or_panic(vm, addr, 4u, access, op_name, &pa_base)) {
+        if (!vm_translate_span_or_panic(vm, addr, 4u, access, op_name, pa)) {
+            return NULL;
+        }
+        if (!vm_span_is_contiguous(pa, 4u)) {
+            panic(panic_format("%s non-contiguous mapping: 0x%08x", op_name, addr), vm);
+            return NULL;
+        }
+        pa_base = pa[0];
+    }
+    if ((pa_base % _Alignof(_Atomic uint32_t)) != 0u) {
+        panic(panic_format("%s unaligned physical address: 0x%08x", op_name, pa_base), vm);
         return NULL;
     }
-    if (!vm_span_is_contiguous(pa, 4u)) {
-        panic(panic_format("%s non-contiguous mapping: 0x%08x", op_name, addr), vm);
+    if (find_mmio(vm, pa_base) != NULL) {
+        panic(panic_format("%s does not support MMIO addr: 0x%08x", op_name, pa_base), vm);
         return NULL;
     }
-    if ((pa[0] % _Alignof(_Atomic uint32_t)) != 0u) {
-        panic(panic_format("%s unaligned physical address: 0x%08x", op_name, pa[0]), vm);
+    if (!in_ram(vm, pa_base, sizeof(uint32_t))) {
+        panic(panic_format("%s out of bounds: 0x%08x", op_name, pa_base), vm);
         return NULL;
     }
-    if (find_mmio(vm, pa[0]) != NULL) {
-        panic(panic_format("%s does not support MMIO addr: 0x%08x", op_name, pa[0]), vm);
-        return NULL;
-    }
-    if (!in_ram(vm, pa[0], sizeof(uint32_t))) {
-        panic(panic_format("%s out of bounds: 0x%08x", op_name, pa[0]), vm);
-        return NULL;
-    }
-    return (_Atomic uint32_t *)(void *)(&vm->memory[pa[0]]);
+    return (_Atomic uint32_t *)(void *)(&vm->memory[pa_base]);
 }
 
 uint8_t vm_read8(VM *vm, vm_addr_t addr) {
@@ -111,10 +140,25 @@ uint8_t vm_read8(VM *vm, vm_addr_t addr) {
 }
 
 uint32_t vm_read32(VM *vm, vm_addr_t addr) {
+    uint32_t pa_base;
     uint32_t pa[4];
 #ifdef VM_MEMCHECK
     memcheck_align(vm, addr, 4, "READ32");
 #endif
+    if (vm_translate_contiguous_span_or_panic(vm, addr, 4u, VM_MMU_ACC_READ, "READ32", &pa_base)) {
+        MMIO_Device *dev = find_mmio(vm, pa_base);
+        if (dev) {
+            vm_shared_lock(vm);
+            uint32_t v = vm_mmio_read32(vm, pa_base);
+            vm_shared_unlock(vm);
+            return v;
+        }
+        if (!in_ram(vm, pa_base, 4u)) {
+            panic(panic_format("READ32 out of bounds: 0x%08x", pa_base), vm);
+            return 0u;
+        }
+        return load_le32(&vm->memory[pa_base]);
+    }
     if (!vm_translate_span_or_panic(vm, addr, 4u, VM_MMU_ACC_READ, "READ32", pa)) {
         return 0u;
     }
@@ -150,9 +194,19 @@ uint32_t vm_read32(VM *vm, vm_addr_t addr) {
 }
 
 uint64_t vm_read64(VM *vm, vm_addr_t addr) {
+    uint32_t pa_base;
 #ifdef VM_MEMCHECK
     memcheck_align(vm, addr, 8, "READ64");
 #endif
+    if (vm_translate_contiguous_span_or_panic(vm, addr, 8u, VM_MMU_ACC_READ, "READ64", &pa_base)) {
+        if (!find_mmio(vm, pa_base)) {
+            if (!in_ram(vm, pa_base, 8u)) {
+                panic(panic_format("READ64 out of bounds: 0x%08x", pa_base), vm);
+                return 0u;
+            }
+            return load_le64(&vm->memory[pa_base]);
+        }
+    }
     uint64_t lo = vm_read32(vm, addr);
     uint64_t hi = vm_read32(vm, addr + 4);
     return lo | (hi << 32);
@@ -236,10 +290,26 @@ void vm_write8(VM *vm, vm_addr_t addr, uint8_t value) {
 }
 
 void vm_write32(VM *vm, vm_addr_t addr, uint32_t value) {
+    uint32_t pa_base;
     uint32_t pa[4];
 #ifdef VM_MEMCHECK
     memcheck_align(vm, addr, 4, "WRITE32");
 #endif
+    if (vm_translate_contiguous_span_or_panic(vm, addr, 4u, VM_MMU_ACC_WRITE, "WRITE32", &pa_base)) {
+        MMIO_Device *dev = find_mmio(vm, pa_base);
+        if (dev && dev->write32) {
+            vm_shared_lock(vm);
+            dev->write32(vm, pa_base, value);
+            vm_shared_unlock(vm);
+            return;
+        }
+        if (!in_ram(vm, pa_base, 4u)) {
+            panic(panic_format("WRITE32 out of bounds: 0x%08x", pa_base), vm);
+            return;
+        }
+        store_le32(&vm->memory[pa_base], value);
+        return;
+    }
     if (!vm_translate_span_or_panic(vm, addr, 4u, VM_MMU_ACC_WRITE, "WRITE32", pa)) {
         return;
     }
@@ -274,18 +344,43 @@ void vm_write32(VM *vm, vm_addr_t addr, uint32_t value) {
 }
 
 void vm_write64(VM *vm, vm_addr_t addr, uint64_t value) {
+    uint32_t pa_base;
 #ifdef VM_MEMCHECK
     memcheck_align(vm, addr, 8, "WRITE64");
 #endif
+    if (vm_translate_contiguous_span_or_panic(vm, addr, 8u, VM_MMU_ACC_WRITE, "WRITE64", &pa_base)) {
+        if (!find_mmio(vm, pa_base)) {
+            if (!in_ram(vm, pa_base, 8u)) {
+                panic(panic_format("WRITE64 out of bounds: 0x%08x", pa_base), vm);
+                return;
+            }
+            store_le64(&vm->memory[pa_base], value);
+            return;
+        }
+    }
     vm_write32(vm, addr, (uint32_t)(value & 0xFFFFFFFFu));
     vm_write32(vm, addr + 4u, (uint32_t)((value >> 32) & 0xFFFFFFFFu));
 }
 
 uint32_t vm_fetch64_exec(VM *vm, vm_addr_t addr, uint64_t *out_inst) {
+    uint32_t pa_base;
     uint32_t pa[8];
     uint64_t inst = 0u;
     if (!out_inst) {
         return 0u;
+    }
+    if (vm_translate_contiguous_span_or_panic(vm, addr, 8u, VM_MMU_ACC_EXEC, "IFETCH", &pa_base)) {
+        if (find_mmio(vm, pa_base)) {
+            panic(panic_format("IFETCH from MMIO: 0x%08x", addr), vm);
+            return 0u;
+        }
+        if (!in_ram(vm, pa_base, 8u)) {
+            panic(panic_format("IFETCH out of bounds: 0x%08x", pa_base), vm);
+            return 0u;
+        }
+        memcpy(&inst, &vm->memory[pa_base], sizeof(inst));
+        *out_inst = inst;
+        return 1u;
     }
     if (!vm_translate_span_or_panic(vm, addr, 8u, VM_MMU_ACC_EXEC, "IFETCH", pa)) {
         return 0u;

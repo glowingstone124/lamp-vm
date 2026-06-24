@@ -8,6 +8,7 @@
 #include "memory.h"
 #include "io.h"
 #include "io_devices/disk/disk.h"
+#include "io_devices/iommu/iommu_mmio_register.h"
 
 extern const size_t MEM_SIZE;
 
@@ -152,6 +153,44 @@ static int run_selftest_mmu_percpu_root(void) {
     uint32_t bsp_root = vm_read32(vm, bsp_root_addr);
     uint32_t ap_root = vm_read32(vm, ap_root_addr);
     ok = ok && (bsp_root == 0x00111000u) && (ap_root == 0x00222000u);
+    vm_destroy(vm);
+    return ok;
+}
+
+static int run_selftest_iommu_paged_translation(void) {
+    enum {
+        root_pa = 0x4000u,
+        l2_pa = 0x5000u,
+        iova = 0x20000000u,
+        pa0 = 0x7000u,
+        pa1 = 0x9000u
+    };
+    uint64_t program[] = {
+        INST(OP_HALT, 0, 0, 0, 0),
+    };
+    VM *vm = vm_create(MEM_SIZE, program, sizeof(program) / sizeof(program[0]), NULL, 0, NULL, 1);
+    if (!vm) {
+        return 0;
+    }
+
+    uint32_t pde = (iova >> 22) & 0x3FFu;
+    uint32_t pte = (iova >> 12) & 0x3FFu;
+    store_le32(&vm->memory[root_pa + pde * 4u], l2_pa | IOMMU_PTE_P);
+    store_le32(&vm->memory[l2_pa + pte * 4u], pa0 | IOMMU_PTE_P);
+    store_le32(&vm->memory[l2_pa + (pte + 1u) * 4u], pa1 | IOMMU_PTE_P);
+
+    vm->iommu.ctrl = IOMMU_CTRL_ENABLE;
+    vm->iommu.devices[IOMMU_DEV_DISK].ctrl = IOMMU_DEV_CTRL_ENABLE | IOMMU_DEV_CTRL_PAGED;
+    vm->iommu.devices[IOMMU_DEV_DISK].root = root_pa;
+
+    uint64_t out = 0u;
+    int ok = vm_iommu_translate_dma(vm, IOMMU_DEV_DISK, iova + 0x20u, 64u, &out);
+    ok = ok && (out == pa0 + 0x20u);
+
+    out = 0u;
+    ok = ok && !vm_iommu_translate_dma(vm, IOMMU_DEV_DISK, iova + 0xFF0u, 32u, &out);
+    ok = ok && ((vm->iommu.fault_status >> IOMMU_FAULT_REASON_SHIFT) == IOMMU_FAULT_REASON_NONCONTIG);
+
     vm_destroy(vm);
     return ok;
 }
@@ -678,6 +717,7 @@ int run_selftests(void) {
     int ok12 = run_selftest_inti_imm_conformance();
     int ok13 = run_selftest_ps2_controller();
     int ok14 = run_selftest_fb_accel();
+    int ok15 = run_selftest_iommu_paged_translation();
 
     printf("[selftest] startap_cpuid: %s\n", ok1 ? "PASS" : "FAIL");
     printf("[selftest] ipi: %s\n", ok2 ? "PASS" : "FAIL");
@@ -693,5 +733,6 @@ int run_selftests(void) {
     printf("[selftest] inti_imm_conformance: %s\n", ok12 ? "PASS" : "FAIL");
     printf("[selftest] ps2_controller: %s\n", ok13 ? "PASS" : "FAIL");
     printf("[selftest] fb_accel: %s\n", ok14 ? "PASS" : "FAIL");
-    return (ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12 && ok13 && ok14) ? 0 : 1;
+    printf("[selftest] iommu_paged_translation: %s\n", ok15 ? "PASS" : "FAIL");
+    return (ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12 && ok13 && ok14 && ok15) ? 0 : 1;
 }
