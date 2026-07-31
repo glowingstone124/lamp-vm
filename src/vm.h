@@ -24,7 +24,10 @@ typedef struct VCPU VCPU;
 #ifdef VM_DEBUG
 typedef struct VM_Debug VM_Debug;
 #endif
-#define MAX_MMIO_DEVICES 16
+#define MAX_MMIO_DEVICES 32
+#define VM_MMIO_PAGE_SHIFT 12u
+#define VM_MMIO_PAGE_COUNT (1u << (32u - VM_MMIO_PAGE_SHIFT))
+#define VM_MMIO_PAGE_MAP_BYTES (VM_MMIO_PAGE_COUNT / 8u)
 
 #define FB_WIDTH 640
 #define FB_HEIGHT 480
@@ -61,7 +64,7 @@ typedef struct VM_Debug VM_Debug;
 #define FB_LEGACY_BASE 0x00620000u
 #define SYSINFO_BASE (FB_LEGACY_BASE + FB_SIZE)
 #define SYSINFO_MAGIC 0x31494D56u /* "VMI1" */
-#define SYSINFO_LAYOUT_VERSION 2u
+#define SYSINFO_LAYOUT_VERSION 3u
 #define SYSINFO_VENDOR_WORDS 4u
 #define SYSINFO_VENDOR_BYTES (SYSINFO_VENDOR_WORDS * 4u)
 #define SYSINFO_ARCH_LAMP32 1u
@@ -78,6 +81,8 @@ typedef struct VM_Debug VM_Debug;
 #define SYSINFO_FEATURE_IOMMU_MMIO (1u << 6)
 #define SYSINFO_FEATURE_MMU_PAGING (1u << 7)
 #define SYSINFO_FEATURE_ETHER (1u << 8)
+#define SYSINFO_FEATURE_PCIE (1u << 9)
+#define SYSINFO_FEATURE_RUNTIME_STATS (1u << 10)
 #define SYSINFO_REG_MAGIC 0x00u
 #define SYSINFO_REG_VENDOR0 0x04u
 #define SYSINFO_REG_MEM_BYTES_LO 0x14u
@@ -98,7 +103,24 @@ typedef struct VM_Debug VM_Debug;
 #define SYSINFO_REG_FB_STRIDE_BYTES 0x50u
 #define SYSINFO_REG_BOOT_REALTIME_NS_LO 0x54u
 #define SYSINFO_REG_BOOT_REALTIME_NS_HI 0x58u
-#define SYSINFO_SIZE 0x5Cu
+#define SYSINFO_REG_CPU_FREQ_HZ_LO 0x5Cu
+#define SYSINFO_REG_CPU_FREQ_HZ_HI 0x60u
+#define SYSINFO_REG_CPU_CYCLES_LO 0x64u
+#define SYSINFO_REG_CPU_CYCLES_HI 0x68u
+#define SYSINFO_REG_EXEC_COUNT_LO 0x6Cu
+#define SYSINFO_REG_EXEC_COUNT_HI 0x70u
+#define SYSINFO_REG_EXEC_RATE_HZ_LO 0x74u
+#define SYSINFO_REG_EXEC_RATE_HZ_HI 0x78u
+#define SYSINFO_REG_UPTIME_NS_LO 0x7Cu
+#define SYSINFO_REG_UPTIME_NS_HI 0x80u
+#define SYSINFO_REG_HOST_RSS_BYTES_LO 0x84u
+#define SYSINFO_REG_HOST_RSS_BYTES_HI 0x88u
+#define SYSINFO_REG_RUNTIME_VERSION 0x8Cu
+#define SYSINFO_RUNTIME_VERSION 1u
+#define SYSINFO_SIZE 0x90u
+
+#define VM_DEFAULT_CPU_MHZ 100u
+#define VM_MAX_CPU_MHZ 10000u
 
 #define INTC_BASE 0x0074D000u
 #define INTC_REG_PENDING 0x000u
@@ -131,6 +153,11 @@ typedef struct VM_Debug VM_Debug;
 #define IOMMU_DEV_CTRL_PAGED 0x02u
 
 #define IOMMU_PTE_P 0x00000001u
+#define IOMMU_PTE_R 0x00000002u
+#define IOMMU_PTE_W 0x00000004u
+
+#define IOMMU_DMA_READ 0x01u
+#define IOMMU_DMA_WRITE 0x02u
 
 #define IOMMU_FAULT_VALID 0x01u
 #define IOMMU_FAULT_REASON_SHIFT 4u
@@ -141,10 +168,12 @@ typedef struct VM_Debug VM_Debug;
 #define IOMMU_FAULT_REASON_PTABLE_OOB 5u
 #define IOMMU_FAULT_REASON_BAD_ROOT 6u
 #define IOMMU_FAULT_REASON_NONCONTIG 7u
+#define IOMMU_FAULT_REASON_PERM 8u
 
 #define IOMMU_MAX_DEVICES 4u
 #define IOMMU_DEV_DISK 0u
 #define IOMMU_DEV_ETHER 1u
+#define IOMMU_DEV_AUDIO 2u
 
 #define MMU_MAX_CORES 32u
 
@@ -173,6 +202,35 @@ typedef struct VM_Debug VM_Debug;
 #define MMU_FAULT_REASON_PTABLE_OOB 3u
 #define MMU_FAULT_REASON_BAD_ROOT 4u
 
+/*
+ * PCIe ECAM (Enhanced Configuration Access Mechanism) window.
+ * Layout follows the PCI Express base spec: bus/device/function each get a
+ * fixed 4KB configuration-space slice, addressed as:
+ *   addr = PCIE_ECAM_BASE + ((bus << 20) | (dev << 15) | (func << 12)) + offset
+ * Only bus 0 is populated for now (PCI_ECAM_BUS_COUNT = 1), which is enough
+ * for a single flat hierarchy of endpoints hanging off the host bridge.
+ *
+ * Placement note: this window must avoid several fixed regions that are
+ * *not* reflected in the low MMIO cluster (0x0074C000..0x00750100):
+ *   - 0x00000000..~0x00430000: BIOS/kernel image, stacks, ELF load buffers.
+ *   - ~0x00750000..0x00800000: headroom the native C stack (rooted at
+ *     0x00800000, growing down -- see bios/bios.c "_start": `movi r30,
+ *     8388608`) actively uses across BIOS and early kernel execution.
+ *   - 0x01000000..0x01200000: kernel vfork snapshot scratch
+ *     (kernel/src/sched_task.c SCHED_VFORK_SNAPSHOT_BASE).
+ *   - 0x02000000..0x03000000: guest userspace process region
+ *     (kernel/include/kernel/platform.h USER_REGION_BASE/SIZE).
+ *   - 0x03B80000..0x04000000: SMP per-task stack pool (top of RAM).
+ * 0x00900000 sits in the gap above the native stack's high-water mark and
+ * well below the vfork snapshot area, with >1MB of margin on both sides.
+ */
+#define PCIE_ECAM_BASE 0x00900000u
+#define PCI_ECAM_BUS_COUNT 1u
+#define PCI_ECAM_DEV_COUNT 32u
+#define PCI_ECAM_FUNC_COUNT 8u
+#define PCI_ECAM_FUNC_SIZE 4096u
+#define PCIE_ECAM_SIZE (PCI_ECAM_BUS_COUNT * PCI_ECAM_DEV_COUNT * PCI_ECAM_FUNC_COUNT * PCI_ECAM_FUNC_SIZE)
+
 #define VM_MMU_ACC_READ 0x01u
 #define VM_MMU_ACC_WRITE 0x02u
 #define VM_MMU_ACC_EXEC 0x04u
@@ -197,6 +255,7 @@ typedef struct {
     int current_cmd;
     bool thread_running;
     bool op_complete;
+    bool initialized;
 } Disk;
 
 typedef struct {
@@ -250,6 +309,18 @@ typedef struct {
     uint8_t valid;
 } VM_DecodeCacheEntry;
 
+typedef struct VmRuntimeStats {
+    uint64_t cpu_frequency_hz;
+    uint64_t virtual_cycles;
+    uint64_t executed_instructions;
+    uint64_t execution_rate_hz;
+    uint64_t uptime_ns;
+    uint64_t host_resident_bytes;
+    uint64_t guest_ram_bytes;
+    uint32_t core_count;
+    uint32_t active_core_count;
+} VmRuntimeStats;
+
 struct VCPU {
     uint32_t regs[REG_COUNT];
 
@@ -277,8 +348,7 @@ extern _Thread_local VCPU *vm_tls_vcpu;
 static inline VCPU *vm_current_cpu(VM *vm);
 
 struct VM{
-    _Atomic int halted;
-    _Atomic int panic;
+    _Atomic unsigned int stop_flags;
     uint8_t *memory;
     size_t memory_size;
 
@@ -289,11 +359,17 @@ struct VM{
     uint32_t *fb;
     uint32_t *fb_front;
     pthread_mutex_t fb_row_locks[FB_HEIGHT];
+    atomic_uchar fb_row_dirty[FB_HEIGHT];
 
     int io[IO_SIZE];
     uint8_t serial_rx_fifo[256];
     uint16_t serial_rx_head;
     uint16_t serial_rx_tail;
+    uint8_t serial_tx_fifo[8192];
+    uint16_t serial_tx_head;
+    uint16_t serial_tx_tail;
+    uint64_t serial_tx_dropped;
+    int serial_window_enabled;
     uint8_t ps2_kbd_fifo[256];
     uint16_t ps2_kbd_head;
     uint16_t ps2_kbd_tail;
@@ -324,6 +400,7 @@ struct VM{
     MMU mmu;
     atomic_uint_fast64_t *interrupt_bitmap;
     atomic_uint_fast64_t *interrupt_enable_bitmap;
+    atomic_uint_fast32_t *interrupt_pending_summary;
     atomic_uchar interrupt_priority[IVT_SIZE];
 
     uint64_t start_realtime_ns;
@@ -333,11 +410,19 @@ struct VM{
     uint64_t latched_boottime;
     uint64_t disk_size_bytes;
     uint32_t sysinfo_vendor_words[SYSINFO_VENDOR_WORDS];
+    uint64_t cpu_frequency_hz;
+    pthread_mutex_t runtime_stats_lock;
+    uint64_t runtime_stats_last_sample_ns;
+    uint64_t runtime_stats_last_instructions;
+    VmRuntimeStats runtime_stats_cached;
+    VmRuntimeStats sysinfo_stats_latch;
 
     int suspend_count;
 
     MMIO_Device *mmio_devices[MAX_MMIO_DEVICES];
     int mmio_count;
+    uint8_t mmio_page_map[VM_MMIO_PAGE_MAP_BYTES];
+    uint8_t mmio_page_map_ready;
     MMIO_Device *mmio_cache_dev;
     uint32_t mmio_cache_start;
     uint32_t mmio_cache_end;
@@ -366,6 +451,15 @@ struct VM{
 
     /* Ethernet NIC state (opaque, managed by io_devices/ether/ether.c) */
     void *ether;
+
+    /* PCI dumb-display state (opaque, managed by io_devices/gpu/gpu.c) */
+    void *gpu;
+
+    /* PCI PCM-audio state (opaque, managed by io_devices/audio/audio.c) */
+    void *audio;
+
+    /* PCIe root complex state (opaque, managed by io_devices/pcie/pcie.c) */
+    void *pcie;
 
 #ifdef VM_DEBUG
     VM_Debug *debug;
@@ -407,6 +501,28 @@ static inline void vm_fb_row_lock(VM *vm, size_t row) {
 static inline void vm_fb_row_unlock(VM *vm, size_t row) {
     if (vm && row < FB_HEIGHT) {
         pthread_mutex_unlock(&vm->fb_row_locks[row]);
+    }
+}
+
+static inline void vm_fb_mark_row_dirty(VM *vm, size_t row) {
+    if (vm && row < FB_HEIGHT) {
+        atomic_store_explicit(&vm->fb_row_dirty[row], 1u, memory_order_release);
+    }
+}
+
+static inline int vm_fb_take_row_dirty(VM *vm, size_t row) {
+    if (!vm || row >= FB_HEIGHT) {
+        return 0;
+    }
+    return atomic_exchange_explicit(&vm->fb_row_dirty[row], 0u, memory_order_acq_rel) != 0u;
+}
+
+static inline void vm_fb_mark_all_dirty(VM *vm) {
+    if (!vm) {
+        return;
+    }
+    for (size_t row = 0; row < FB_HEIGHT; row++) {
+        vm_fb_mark_row_dirty(vm, row);
     }
 }
 
@@ -523,19 +639,31 @@ static inline uint64_t host_monotonic_time_ns(void) {
 }
 
 static inline int atomic_is_vm_halted(const VM *vm) {
-    return atomic_load_explicit(&vm->halted, memory_order_acquire);
+    return (atomic_load_explicit(&vm->stop_flags, memory_order_acquire) & 1u) != 0u;
 }
 
 static inline int atomic_is_vm_panicked(const VM *vm) {
-    return atomic_load_explicit(&vm->panic, memory_order_acquire);
+    return (atomic_load_explicit(&vm->stop_flags, memory_order_acquire) & 2u) != 0u;
+}
+
+static inline int atomic_is_vm_stopped(const VM *vm) {
+    return atomic_load_explicit(&vm->stop_flags, memory_order_acquire) != 0u;
 }
 
 static inline void atomic_set_vm_halt(VM *vm, int value) {
-    atomic_store_explicit(&vm->halted, value, memory_order_release);
+    if (value) {
+        atomic_fetch_or_explicit(&vm->stop_flags, 1u, memory_order_release);
+    } else {
+        atomic_fetch_and_explicit(&vm->stop_flags, ~1u, memory_order_release);
+    }
 }
 
 static inline void atomic_set_vm_panic(VM *vm, int value) {
-    atomic_store_explicit(&vm->panic, value, memory_order_release);
+    if (value) {
+        atomic_fetch_or_explicit(&vm->stop_flags, 2u, memory_order_release);
+    } else {
+        atomic_fetch_and_explicit(&vm->stop_flags, ~2u, memory_order_release);
+    }
 }
 
 #endif

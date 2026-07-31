@@ -1,4 +1,5 @@
 #include "mmu_mmio_register.h"
+#include "../../runtime_log.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -290,6 +291,6 @@ void register_mmu_mmio(VM *vm) {
 
     if (vm->mmio_count < MAX_MMIO_DEVICES) {
         vm->mmio_devices[vm->mmio_count++] = &mmu_dev;
-        printf("Registered VM MMU to MMIO ID %d\n", vm->mmio_count);
+        VM_RUNTIME_LOG("Registered VM MMU to MMIO ID %d\n", vm->mmio_count);
     }
 }

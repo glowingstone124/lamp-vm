@@ -33,9 +33,13 @@ No scheduler, no memory manager, no AP startup logic in BIOS.
 
 At BIOS `_start`:
 
-- `r30` (SP) is initialized to `MEM_SIZE` (`0x04000000`).
+- `r30` (SP) is initialized to `0x00800000` (8 MiB) and grows downward.
 - BIOS then calls `bios_main`.
-- `MEM_SIZE` is a build-time contract. If VM RAM size changes, BIOS should be rebuilt with the matching value.
+- This native C stack is inherited by the kernel after the `entry()` jump and
+  continues to be used (still growing down from `0x00800000`) until the
+  scheduler switches to per-task stacks from the SMP stack pool. Any new
+  fixed MMIO/scratch physical window must leave headroom below `0x00800000`
+  for this stack -- see `docs/pci.md` for a worked example of this constraint.
 
 At kernel entry jump (`e_entry`):
 
@@ -63,6 +67,26 @@ BIOS publishes a fixed BootInfo block at `0x002FF000` before jumping to kernel.
 
 These fields are sourced from SYSINFO MMIO (`0x0074C000`), a read-only firmware metadata region provided by the VM.
 Kernel should treat `mem_bytes` in BootInfo as runtime ground truth for memory-size validation.
+
+SYSINFO layout v3 extends the MMIO region with live runtime data. These fields
+are not copied into the fixed BootInfo v2 block; firmware advertises them through
+the `RUNTIME_STATS` feature bit and the kernel reads them directly:
+
+| Offset | Field |
+|---|---|
+| `0x5C/0x60` | nominal CPU frequency, Hz (`lo/hi`) |
+| `0x64/0x68` | invariant virtual cycles (`lo/hi`) |
+| `0x6C/0x70` | retired guest instructions (`lo/hi`) |
+| `0x74/0x78` | measured aggregate execution rate, instructions/s (`lo/hi`) |
+| `0x7C/0x80` | VM uptime, ns (`lo/hi`) |
+| `0x84/0x88` | host process resident memory, bytes (`lo/hi`) |
+| `0x8C` | runtime-statistics ABI version (`1`) |
+
+Reading the low word takes a coherent snapshot for the matching high-word read.
+The v1 CPU model charges one virtual cycle per retired instruction and paces each
+vCPU against a monotonic clock. Nominal MHz is therefore configuration, while
+execution rate is observed interpreter throughput; a slow host may report less
+than the configured rate.
 
 ## Memory Ownership
 

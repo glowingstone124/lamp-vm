@@ -2,6 +2,7 @@
 // Created by Max Wang on 2025/12/30.
 //
 #include "../../vm.h"
+#include "../../runtime_log.h"
 #include "disk.h"
 
 #include <errno.h>
@@ -125,7 +126,9 @@ static void* disk_worker(void *arg) {
         }
 
         dma_addr = mem_addr;
-        if (ok && !vm_iommu_translate_dma(vm, IOMMU_DEV_DISK, mem_addr, bytes, &dma_addr)) {
+        if (ok && !vm_iommu_translate_dma_ex(vm, IOMMU_DEV_DISK, mem_addr, bytes,
+                                             (cmd == DISK_CMD_READ) ? IOMMU_DMA_WRITE : IOMMU_DMA_READ,
+                                             &dma_addr)) {
             fprintf(stderr, "[Disk] IOMMU reject iova=0x%llx len=%llu\n",
                     (unsigned long long)mem_addr, (unsigned long long)bytes);
             ok = 0;
@@ -207,9 +210,12 @@ static void* disk_worker(void *arg) {
 }
 
 void disk_init(VM *vm, const char *path) {
+    if (!vm || vm->disk.initialized) {
+        return;
+    }
     vm->disk.fp = fopen(path, "r+b");
     if (!vm->disk.fp) {
-        printf("[Disk] Creating new image: %s\n", path);
+        VM_RUNTIME_LOG("[Disk] Creating new image: %s\n", path);
         vm->disk.fp = fopen(path, "w+b");
         if (!vm->disk.fp) {
             perror("fopen");
@@ -236,13 +242,23 @@ void disk_init(VM *vm, const char *path) {
     pthread_cond_init(&vm->disk.cond_var, NULL);
 
     if (pthread_create(&vm->disk.worker_thread, NULL, disk_worker, vm) != 0) {
+        vm->disk.thread_running = false;
+        pthread_mutex_destroy(&vm->disk.mutex);
+        pthread_cond_destroy(&vm->disk.cond_var);
+        fclose(vm->disk.fp);
+        vm->disk.fp = NULL;
         panic("Failed to create disk worker", vm);
+        return;
     }
+    vm->disk.initialized = true;
 
-    printf("[Disk] Created disk worker thread. Image: %s\n", path);
+    VM_RUNTIME_LOG("[Disk] Created disk worker thread. Image: %s\n", path);
 }
 
 void disk_close(VM *vm) {
+    if (!vm || !vm->disk.initialized) {
+        return;
+    }
     pthread_mutex_lock(&vm->disk.mutex);
     vm->disk.thread_running = false;
     pthread_cond_signal(&vm->disk.cond_var);
@@ -253,9 +269,14 @@ void disk_close(VM *vm) {
     pthread_cond_destroy(&vm->disk.cond_var);
 
     if (vm->disk.fp) fclose(vm->disk.fp);
+    vm->disk.fp = NULL;
+    vm->disk.initialized = false;
 }
 
 void disk_cmd(VM *vm, const int value) {
+    if (!vm || !vm->disk.initialized) {
+        return;
+    }
     pthread_mutex_lock(&vm->disk.mutex);
 
     if (vm->disk.status == DISK_STATUS_BUSY) {
@@ -279,6 +300,9 @@ void disk_cmd(VM *vm, const int value) {
     pthread_mutex_unlock(&vm->disk.mutex);
 }
 void disk_tick(VM *vm) {
+    if (!vm || !vm->disk.initialized) {
+        return;
+    }
     pthread_mutex_lock(&vm->disk.mutex);
     if (vm->disk.op_complete) {
         vm->disk.op_complete = false;

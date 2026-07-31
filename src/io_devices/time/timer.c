@@ -51,7 +51,7 @@ static inline void sleep_us_interruptible(uint32_t us) {
 void *timer_tick(void *arg) {
     VM *vm = (VM *)arg;
     while (atomic_load(&vm->timer_thread_running)) {
-        if (atomic_is_vm_halted(vm) || atomic_is_vm_panicked(vm)) {
+        if (atomic_is_vm_stopped(vm)) {
             break;
         }
 

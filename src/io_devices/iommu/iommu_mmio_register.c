@@ -1,4 +1,5 @@
 #include "iommu_mmio_register.h"
+#include "../../runtime_log.h"
 
 #include <stdio.h>
 
@@ -54,6 +55,7 @@ static int iommu_page_translate_locked(VM *vm,
                                        uint32_t dev_id,
                                        uint64_t iova,
                                        uint64_t len,
+                                       uint32_t access,
                                        uint64_t *pa_out,
                                        uint32_t *reason_out) {
     uint32_t root;
@@ -120,6 +122,11 @@ static int iommu_page_translate_locked(VM *vm,
         pte = rd_le32_raw(&vm->memory[pte_pa]);
         if ((pte & IOMMU_PTE_P) == 0u) {
             *reason_out = IOMMU_FAULT_REASON_UNMAPPED;
+            return 0;
+        }
+        if (((access & IOMMU_DMA_READ) != 0u && (pte & IOMMU_PTE_R) == 0u) ||
+            ((access & IOMMU_DMA_WRITE) != 0u && (pte & IOMMU_PTE_W) == 0u)) {
+            *reason_out = IOMMU_FAULT_REASON_PERM;
             return 0;
         }
 
@@ -250,12 +257,12 @@ static void iommu_write32(VM *vm, uint32_t addr, uint32_t value) {
     }
 }
 
-int vm_iommu_translate_dma(VM *vm, uint32_t dev_id, uint64_t iova, uint64_t len, uint64_t *pa_out) {
+int vm_iommu_translate_dma_ex(VM *vm, uint32_t dev_id, uint64_t iova, uint64_t len, uint32_t access, uint64_t *pa_out) {
     uint64_t pa = iova;
     uint32_t reason = 0u;
     int ok = 1;
 
-    if (!vm || !pa_out || len == 0u) {
+    if (!vm || !pa_out || len == 0u || (access & (IOMMU_DMA_READ | IOMMU_DMA_WRITE)) == 0u) {
         return 0;
     }
 
@@ -266,7 +273,7 @@ int vm_iommu_translate_dma(VM *vm, uint32_t dev_id, uint64_t iova, uint64_t len,
             reason = IOMMU_FAULT_REASON_DEV_INVALID;
         } else if ((vm->iommu.devices[dev_id].ctrl & IOMMU_DEV_CTRL_ENABLE) != 0u) {
             if ((vm->iommu.devices[dev_id].ctrl & IOMMU_DEV_CTRL_PAGED) != 0u) {
-                ok = iommu_page_translate_locked(vm, dev_id, iova, len, &pa, &reason);
+                ok = iommu_page_translate_locked(vm, dev_id, iova, len, access, &pa, &reason);
             } else {
                 uint64_t base = vm->iommu.devices[dev_id].iova_base;
                 uint64_t size = (uint64_t)vm->iommu.devices[dev_id].iova_size;
@@ -311,6 +318,10 @@ int vm_iommu_translate_dma(VM *vm, uint32_t dev_id, uint64_t iova, uint64_t len,
     return 1;
 }
 
+int vm_iommu_translate_dma(VM *vm, uint32_t dev_id, uint64_t iova, uint64_t len, uint64_t *pa_out) {
+    return vm_iommu_translate_dma_ex(vm, dev_id, iova, len, IOMMU_DMA_READ | IOMMU_DMA_WRITE, pa_out);
+}
+
 void register_iommu_mmio(VM *vm) {
     static MMIO_Device iommu_dev;
     iommu_dev.start = IOMMU_BASE;
@@ -320,6 +331,6 @@ void register_iommu_mmio(VM *vm) {
 
     if (vm->mmio_count < MAX_MMIO_DEVICES) {
         vm->mmio_devices[vm->mmio_count++] = &iommu_dev;
-        printf("Registered VM IOMMU to MMIO ID %d\n", vm->mmio_count);
+        VM_RUNTIME_LOG("Registered VM IOMMU to MMIO ID %d\n", vm->mmio_count);
     }
 }

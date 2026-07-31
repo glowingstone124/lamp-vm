@@ -1,5 +1,7 @@
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "selftest.h"
 #include "vm.h"
@@ -7,8 +9,15 @@
 #include "interrupt.h"
 #include "memory.h"
 #include "io.h"
+#include "mmio.h"
 #include "io_devices/disk/disk.h"
+#include "io_devices/audio/audio.h"
+#include "io_devices/ether/ether.h"
+#include "io_devices/ether/ether_backend.h"
 #include "io_devices/iommu/iommu_mmio_register.h"
+#include "io_devices/mmu/mmu_mmio_register.h"
+#include "io_devices/pcie/pcie.h"
+#include "runtime_stats.h"
 
 extern const size_t MEM_SIZE;
 
@@ -176,8 +185,8 @@ static int run_selftest_iommu_paged_translation(void) {
     uint32_t pde = (iova >> 22) & 0x3FFu;
     uint32_t pte = (iova >> 12) & 0x3FFu;
     store_le32(&vm->memory[root_pa + pde * 4u], l2_pa | IOMMU_PTE_P);
-    store_le32(&vm->memory[l2_pa + pte * 4u], pa0 | IOMMU_PTE_P);
-    store_le32(&vm->memory[l2_pa + (pte + 1u) * 4u], pa1 | IOMMU_PTE_P);
+    store_le32(&vm->memory[l2_pa + pte * 4u], pa0 | IOMMU_PTE_P | IOMMU_PTE_R | IOMMU_PTE_W);
+    store_le32(&vm->memory[l2_pa + (pte + 1u) * 4u], pa1 | IOMMU_PTE_P | IOMMU_PTE_R | IOMMU_PTE_W);
 
     vm->iommu.ctrl = IOMMU_CTRL_ENABLE;
     vm->iommu.devices[IOMMU_DEV_DISK].ctrl = IOMMU_DEV_CTRL_ENABLE | IOMMU_DEV_CTRL_PAGED;
@@ -190,6 +199,143 @@ static int run_selftest_iommu_paged_translation(void) {
     out = 0u;
     ok = ok && !vm_iommu_translate_dma(vm, IOMMU_DEV_DISK, iova + 0xFF0u, 32u, &out);
     ok = ok && ((vm->iommu.fault_status >> IOMMU_FAULT_REASON_SHIFT) == IOMMU_FAULT_REASON_NONCONTIG);
+
+    store_le32(&vm->memory[l2_pa + pte * 4u], pa0 | IOMMU_PTE_P | IOMMU_PTE_R);
+    out = 0u;
+    ok = ok && !vm_iommu_translate_dma_ex(vm, IOMMU_DEV_DISK, iova + 0x20u, 64u, IOMMU_DMA_WRITE, &out);
+    ok = ok && ((vm->iommu.fault_status >> IOMMU_FAULT_REASON_SHIFT) == IOMMU_FAULT_REASON_PERM);
+
+    vm_destroy(vm);
+    return ok;
+}
+
+typedef struct {
+    uint32_t scratch;
+    uint32_t relocated_base;
+    int relocated_called;
+} PcieDemoDeviceState;
+
+static uint32_t pcie_demo_bar_read32(VM *vm, PciFunction *f, uint32_t bar_index, uint32_t offset) {
+    (void)vm;
+    (void)bar_index;
+    PcieDemoDeviceState *st = (PcieDemoDeviceState *)f->cookie;
+    return (offset == 0u) ? st->scratch : 0u;
+}
+
+static void pcie_demo_bar_write32(VM *vm, PciFunction *f, uint32_t bar_index, uint32_t offset, uint32_t value) {
+    (void)vm;
+    (void)bar_index;
+    PcieDemoDeviceState *st = (PcieDemoDeviceState *)f->cookie;
+    if (offset == 0u) {
+        st->scratch = value;
+    }
+}
+
+static void pcie_demo_bar_relocated(VM *vm, PciFunction *f, uint32_t bar_index, uint32_t new_base) {
+    (void)vm;
+    (void)bar_index;
+    PcieDemoDeviceState *st = (PcieDemoDeviceState *)f->cookie;
+    st->relocated_base = new_base;
+    st->relocated_called = 1;
+}
+
+static int run_selftest_pcie_enumeration(void) {
+    uint64_t program[] = {
+        INST(OP_HALT, 0, 0, 0, 0),
+    };
+    VM *vm = vm_create(MEM_SIZE, program, sizeof(program) / sizeof(program[0]), NULL, 0, NULL, 1);
+    if (!vm) {
+        return 0;
+    }
+    init_ivt(vm);
+
+    int ok = (vm->pcie != NULL);
+
+    /* Host bridge at 00:00.0 must already be enumerable. */
+    uint32_t hb_id = vm_mmio_read32(vm, PCIE_ECAM_BASE + PCI_CFG_VENDOR_ID);
+    ok = ok && ((hb_id & 0xFFFFu) == LAMP_PCI_VENDOR_ID) && ((hb_id >> 16) == 0x0001u);
+
+    /* A high unpopulated slot must read back as all-1s. */
+    const uint32_t empty_addr = PCIE_ECAM_BASE + (31u * PCI_ECAM_FUNC_COUNT) * PCI_ECAM_FUNC_SIZE;
+    ok = ok && (vm_mmio_read32(vm, empty_addr + PCI_CFG_VENDOR_ID) == 0xFFFFFFFFu);
+
+    /* Register a demo endpoint at 01:00.0 with one 4KB BAR, MSI, and a PCIe capability. */
+    PcieDemoDeviceState demo_state;
+    memset(&demo_state, 0, sizeof(demo_state));
+    demo_state.scratch = 0xCAFEBABEu;
+
+    PciFunction *fn = pci_register_function(vm, 1u, 0u, LAMP_PCI_VENDOR_ID, 0xBEEFu,
+                                             PCI_CLASS_NETWORK, PCI_SUBCLASS_ETHERNET, 0x00u);
+    ok = ok && (fn != NULL);
+    if (!fn) {
+        vm_destroy(vm);
+        return ok;
+    }
+
+    pci_configure_bar(vm, fn, 0u, 0x1000u, 0u, 0u,
+                       pcie_demo_bar_read32, pcie_demo_bar_write32, pcie_demo_bar_relocated, &demo_state);
+    uint8_t msi_off = pci_add_msi_capability(fn);
+    uint8_t exp_off = pci_add_express_capability(fn, 0x0u);
+    ok = ok && (msi_off != 0u) && (exp_off != 0u);
+    pci_set_irq_pin(fn, 1u, 0x2Bu); /* INTA#, legacy fallback vector */
+
+    const uint32_t fn_addr = PCIE_ECAM_BASE + (1u * PCI_ECAM_FUNC_COUNT) * PCI_ECAM_FUNC_SIZE;
+
+    uint32_t fn_id = vm_mmio_read32(vm, fn_addr + PCI_CFG_VENDOR_ID);
+    ok = ok && ((fn_id & 0xFFFFu) == LAMP_PCI_VENDOR_ID) && ((fn_id >> 16) == 0xBEEFu);
+
+    /* Status register must advertise a capability list once one has been added. */
+    uint32_t status_cmd = vm_mmio_read32(vm, fn_addr + PCI_CFG_COMMAND);
+    ok = ok && (((status_cmd >> 16) & PCI_STATUS_CAP_LIST) != 0u);
+
+    /* BAR size probe: write all-1s, read back the size mask (type bits = 0 for a 32-bit non-prefetchable BAR). */
+    vm_mmio_write32(vm, fn_addr + PCI_CFG_BAR0, 0xFFFFFFFFu);
+    uint32_t bar_probe = vm_mmio_read32(vm, fn_addr + PCI_CFG_BAR0);
+    ok = ok && (bar_probe == 0xFFFFF000u);
+
+    /* Assign a real base; the BAR window must not be decoded until Command.MEM_ENABLE is set.
+     * Chosen just above the ECAM window (0x00900000..0x009FFFFF) with margin below the
+     * kernel vfork snapshot area (0x01000000), see the PCIE_ECAM_BASE placement note in pcie.h. */
+    const uint32_t bar_base = 0x00A10000u;
+    vm_mmio_write32(vm, fn_addr + PCI_CFG_BAR0, bar_base);
+    uint32_t bar_val = vm_mmio_read32(vm, fn_addr + PCI_CFG_BAR0);
+    ok = ok && (bar_val == bar_base);
+    ok = ok && demo_state.relocated_called && (demo_state.relocated_base == bar_base);
+    ok = ok && (find_mmio(vm, bar_base) == NULL);
+
+    vm_mmio_write32(vm, fn_addr + PCI_CFG_COMMAND, PCI_COMMAND_MEM_ENABLE | PCI_COMMAND_BUS_MASTER);
+    ok = ok && (find_mmio(vm, bar_base) != NULL);
+
+    uint32_t scratch_read = vm_mmio_read32(vm, bar_base + 0u);
+    ok = ok && (scratch_read == 0xCAFEBABEu);
+    vm_mmio_write32(vm, bar_base + 0u, 0x12345678u);
+    ok = ok && (demo_state.scratch == 0x12345678u);
+
+    /* MSI: enable, program address (core 0) + data (vector 40), then have the "device" notify. */
+    const uint32_t vector = 40u;
+    uint32_t msi_ctrl = vm_mmio_read32(vm, fn_addr + msi_off);
+    msi_ctrl |= (uint32_t)0x1u << 16; /* Message Control bit0 = MSI Enable */
+    vm_mmio_write32(vm, fn_addr + msi_off, msi_ctrl);
+    vm_mmio_write32(vm, fn_addr + msi_off + 0x4u, 0u); /* Message Address Low: core 0 */
+    vm_mmio_write32(vm, fn_addr + msi_off + 0x8u, 0u); /* Message Address High */
+    vm_mmio_write32(vm, fn_addr + msi_off + 0xCu, vector);
+
+    pci_notify_irq(vm, fn);
+    uint32_t reg_index = vector / 32u;
+    uint32_t bit = vector % 32u;
+    uint32_t pending = vm_interrupt_read_pending32(vm, 0, reg_index);
+    ok = ok && (((pending >> bit) & 0x1u) != 0u);
+
+    /* Disabling MSI must fall back to the legacy INTx vector. */
+    msi_ctrl &= ~((uint32_t)0x1u << 16);
+    vm_mmio_write32(vm, fn_addr + msi_off, msi_ctrl);
+    pci_notify_irq(vm, fn);
+    uint32_t legacy_pending = vm_interrupt_read_pending32(vm, 0, 0x2Bu / 32u);
+    ok = ok && (((legacy_pending >> (0x2Bu % 32u)) & 0x1u) != 0u);
+
+    /* PCI Express capability: Data Link Layer Active must read back set (no physical link to train). */
+    uint32_t link_status_ctrl = vm_mmio_read32(vm, fn_addr + exp_off + 0x10u);
+    ok = ok && (((link_status_ctrl >> 16) & (1u << 13)) != 0u);
 
     vm_destroy(vm);
     return ok;
@@ -670,6 +816,28 @@ static int run_selftest_ps2_controller(void) {
     ok = ok && ((vm_ps2_read_status(vm) & PS2_STATUS_AUX_DATA) != 0u);
     ok = ok && (vm_ps2_read_data(vm) == 0x08u);
 
+    /* The active 8042 path must keep working after the compatibility-only
+     * legacy mouse FIFO fills up. The kernel does not consume that FIFO. */
+    for (uint32_t i = 0u; i < 300u; i++) {
+        const uint8_t value = (uint8_t)(i ^ 0x5Au);
+        ok = ok && vm_ps2_mouse_enqueue(vm, value);
+        ok = ok && ((vm_ps2_read_status(vm) & PS2_STATUS_AUX_DATA) != 0u);
+        ok = ok && (vm_ps2_read_data(vm) == value);
+    }
+
+    /* Reproduce the end-of-handler race: a new byte raises the mouse IRQ,
+     * then a late EOI clears that latch while the 8042 buffer is non-empty.
+     * The level source must immediately reassert it. */
+    ok = ok && vm_ps2_mouse_enqueue(vm, 0x08u);
+    ok = ok && (vm_ps2_read_data(vm) == 0x08u);
+    ok = ok && vm_ps2_mouse_enqueue(vm, 0x09u);
+    ok = ok && ((vm_interrupt_read_pending32(vm, BSP_CORE, 0u) &
+                 (1u << INT_MOUSE)) != 0u);
+    vm_write32(vm, INTC_BASE + INTC_REG_EOI, INT_MOUSE);
+    ok = ok && ((vm_interrupt_read_pending32(vm, BSP_CORE, 0u) &
+                 (1u << INT_MOUSE)) != 0u);
+    ok = ok && (vm_ps2_read_data(vm) == 0x09u);
+
     vm_destroy(vm);
     return ok;
 }
@@ -683,10 +851,29 @@ static int run_selftest_fb_accel(void) {
         return 0;
 
     int ok = 1;
+    for (size_t row = 0; row < FB_HEIGHT; row++) {
+        (void)vm_fb_take_row_dirty(vm, row);
+    }
+    {
+        const size_t target_row = 17u;
+        const size_t target_col = 3u;
+        const vm_addr_t target_addr = (vm_addr_t)FB_BASE(vm->memory_size) +
+                                      (vm_addr_t)((target_row * FB_WIDTH + target_col) * FB_BPP);
+        vm_write32(vm, target_addr, 0x0055AA11u);
+        ok = ok && (vm_read32(vm, target_addr) == 0x0055AA11u);
+        for (size_t row = 0; row < FB_HEIGHT; row++) {
+            const int dirty = vm_fb_take_row_dirty(vm, row);
+            ok = ok && (dirty == ((row == target_row) ? 1 : 0));
+        }
+    }
+
     accept_io(vm, FB_ACCEL_ARG0, 0x00112233u);
     accept_io(vm, FB_ACCEL_CMD, FB_ACCEL_CMD_CLEAR);
     ok = ok && (vm->fb[0] == 0x00112233u);
     ok = ok && (vm->fb[(size_t)FB_WIDTH * (size_t)FB_HEIGHT - 1u] == 0x00112233u);
+    for (size_t row = 0; row < FB_HEIGHT; row++) {
+        ok = ok && vm_fb_take_row_dirty(vm, row);
+    }
 
     for (size_t y = 0; y < (size_t)FB_HEIGHT; y++) {
         vm->fb[y * (size_t)FB_WIDTH] = (uint32_t)y;
@@ -698,6 +885,401 @@ static int run_selftest_fb_accel(void) {
     ok = ok && (vm->fb[((size_t)FB_HEIGHT - 8u) * (size_t)FB_WIDTH] == 0x00ABCDEFu);
     ok = ok && (vm->fb[(size_t)FB_WIDTH * (size_t)FB_HEIGHT - 1u] == 0x00ABCDEFu);
 
+    vm_destroy(vm);
+    return ok;
+}
+
+static int run_selftest_nat_rx_queue(void) {
+    static const uint8_t device_mac[6] = {0x02u, 0u, 0u, 0u, 0u, 1u};
+    static const uint8_t guest_mac[6] = {0x02u, 0u, 0u, 0u, 0u, 2u};
+    ether_backend_t backend;
+    uint8_t request[42] = {0};
+    uint8_t reply[64];
+    int ok = 1;
+
+    memset(&backend, 0, sizeof(backend));
+    if (ether_backend_nat_create(&backend) != 0) return 0;
+    if (!backend.init || backend.init(backend.state, device_mac) != 0) {
+        if (backend.close) backend.close(backend.state);
+        return 0;
+    }
+
+    memset(request, 0xFF, 6);
+    memcpy(request + 6, guest_mac, sizeof(guest_mac));
+    request[12] = 0x08u;
+    request[13] = 0x06u;
+    request[14] = 0x00u; request[15] = 0x01u;
+    request[16] = 0x08u; request[17] = 0x00u;
+    request[18] = 6u; request[19] = 4u;
+    request[20] = 0x00u; request[21] = 0x01u;
+    memcpy(request + 22, guest_mac, sizeof(guest_mac));
+    request[28] = 10u; request[29] = 0u; request[30] = 2u; request[31] = 15u;
+    request[38] = 10u; request[39] = 0u; request[40] = 2u; request[41] = 2u;
+
+    for (int i = 0; i < 16; i++) {
+        ok = ok && backend.send && backend.send(backend.state, request, sizeof(request)) == 0;
+    }
+    ok = ok && backend.send && backend.send(backend.state, request, sizeof(request)) != 0;
+    for (int i = 0; i < 16; i++) {
+        int n = backend.recv ? backend.recv(backend.state, reply, sizeof(reply)) : -1;
+        ok = ok && n == 42;
+        ok = ok && reply[12] == 0x08u && reply[13] == 0x06u;
+        ok = ok && reply[20] == 0x00u && reply[21] == 0x02u;
+        ok = ok && memcmp(reply, guest_mac, sizeof(guest_mac)) == 0;
+    }
+    ok = ok && backend.recv && backend.recv(backend.state, reply, sizeof(reply)) == 0;
+    if (backend.close) backend.close(backend.state);
+    return ok;
+}
+
+static int run_selftest_pci_ethernet(void) {
+    uint64_t program[] = {INST(OP_HALT, 0, 0, 0, 0)};
+    ether_backend_t backend;
+    VM *vm = vm_create(MEM_SIZE, program, 1u, NULL, 0u, NULL, 1);
+    if (!vm) return 0;
+
+    memset(&backend, 0, sizeof(backend));
+    if (ether_backend_null_create(&backend) != 0 || ether_init(vm, &backend) != 0) {
+        vm_destroy(vm);
+        return 0;
+    }
+
+    int ok = 1;
+    const uint32_t fn_addr = PCIE_ECAM_BASE + PCI_ECAM_FUNC_COUNT * PCI_ECAM_FUNC_SIZE;
+    uint32_t id = vm_mmio_read32(vm, fn_addr + PCI_CFG_VENDOR_ID);
+    uint32_t class_rev = vm_mmio_read32(vm, fn_addr + PCI_CFG_REVISION_ID);
+    ok = ok && (id & 0xFFFFu) == LAMP_PCI_VENDOR_ID;
+    ok = ok && (id >> 16) == ETHER_PCI_DEVICE_ID;
+    ok = ok && ((class_rev >> 24) & 0xFFu) == PCI_CLASS_NETWORK;
+    ok = ok && ((class_rev >> 16) & 0xFFu) == PCI_SUBCLASS_ETHERNET;
+
+    vm_mmio_write32(vm, fn_addr + PCI_CFG_BAR0, 0xFFFFFFFFu);
+    ok = ok && vm_mmio_read32(vm, fn_addr + PCI_CFG_BAR0) == 0xFFFFF000u;
+    const uint32_t bar0 = 0x00A00000u;
+    vm_mmio_write32(vm, fn_addr + PCI_CFG_BAR0, bar0);
+    vm_mmio_write32(vm, fn_addr + PCI_CFG_COMMAND,
+                    PCI_COMMAND_MEM_ENABLE | PCI_COMMAND_BUS_MASTER);
+    ok = ok && find_mmio(vm, bar0) != NULL;
+    ok = ok && vm_mmio_read32(vm, bar0 + ETHER_OFF_STATUS) == ETHER_STATUS_LINK;
+    ok = ok && vm_mmio_read32(vm, bar0 + ETHER_OFF_MAC_LO) == 0x00000002u;
+    ok = ok && vm_mmio_read32(vm, bar0 + ETHER_OFF_MAC_HI) == 0x00000100u;
+
+    ether_shutdown(vm);
+    vm_destroy(vm);
+    return ok;
+}
+
+static int run_selftest_pci_gpu(void) {
+    uint64_t program[] = {INST(OP_HALT, 0, 0, 0, 0)};
+    VM *vm = vm_create(MEM_SIZE, program, 1u, NULL, 0u, NULL, 1);
+    if (!vm) return 0;
+
+    int ok = 1;
+    const uint32_t fn_addr = PCIE_ECAM_BASE +
+                             (2u * PCI_ECAM_FUNC_COUNT) * PCI_ECAM_FUNC_SIZE;
+    const uint32_t ctrl = 0x00A10000u;
+    const uint32_t vram = 0x00C00000u;
+    const uint32_t row = 10u;
+    const uint32_t col = 20u;
+    const uint32_t pixel_offset = (row * FB_WIDTH + col) * FB_BPP;
+    const uint32_t color = 0x0011AACC;
+    const uint32_t flipped_color = 0x00CC8844u;
+    const uint32_t second_scanout = FB_SIZE;
+    const uint32_t vector = 41u;
+    uint32_t id = vm_mmio_read32(vm, fn_addr + PCI_CFG_VENDOR_ID);
+    uint32_t class_rev = vm_mmio_read32(vm, fn_addr + PCI_CFG_REVISION_ID);
+
+    ok = ok && (id & 0xFFFFu) == LAMP_PCI_VENDOR_ID;
+    ok = ok && (id >> 16) == LAMP_PCI_GPU_DEVICE_ID;
+    ok = ok && ((class_rev >> 24) & 0xFFu) == PCI_CLASS_DISPLAY;
+    vm_mmio_write32(vm, fn_addr + PCI_CFG_BAR0, 0xFFFFFFFFu);
+    ok = ok && vm_mmio_read32(vm, fn_addr + PCI_CFG_BAR0) == 0xFFFFF000u;
+    vm_mmio_write32(vm, fn_addr + PCI_CFG_BAR0 + 4u, 0xFFFFFFFFu);
+    ok = ok && vm_mmio_read32(vm, fn_addr + PCI_CFG_BAR0 + 4u) == 0xFFC00008u;
+    vm_mmio_write32(vm, fn_addr + PCI_CFG_BAR0, ctrl);
+    vm_mmio_write32(vm, fn_addr + PCI_CFG_BAR0 + 4u, vram | PCI_BAR_PREFETCHABLE);
+    vm_mmio_write32(vm, fn_addr + PCI_CFG_COMMAND,
+                    PCI_COMMAND_MEM_ENABLE | PCI_COMMAND_BUS_MASTER);
+
+    ok = ok && vm_mmio_read32(vm, ctrl + LAMP_GPU_REG_MAGIC) == LAMP_GPU_MAGIC;
+    ok = ok && vm_mmio_read32(vm, ctrl + LAMP_GPU_REG_VRAM_SIZE) == LAMP_GPU_VRAM_SIZE;
+    ok = ok && (vm_mmio_read32(vm, ctrl + LAMP_GPU_REG_CAPS) &
+                LAMP_GPU_CAP_CURSOR) != 0u;
+    for (size_t dirty_row = 0; dirty_row < FB_HEIGHT; dirty_row++) {
+        (void)vm_fb_take_row_dirty(vm, dirty_row);
+    }
+    vm_mmio_write32(vm, vram + pixel_offset, color);
+    vm_mmio_write32(vm, ctrl + LAMP_GPU_REG_DAMAGE_X, col);
+    vm_mmio_write32(vm, ctrl + LAMP_GPU_REG_DAMAGE_Y, row);
+    vm_mmio_write32(vm, ctrl + LAMP_GPU_REG_DAMAGE_W, 1u);
+    vm_mmio_write32(vm, ctrl + LAMP_GPU_REG_DAMAGE_H, 1u);
+    vm_mmio_write32(vm, ctrl + LAMP_GPU_REG_COMMAND,
+                    LAMP_GPU_CMD_ENABLE | LAMP_GPU_CMD_FLUSH);
+    ok = ok && vm->fb[(size_t)row * FB_WIDTH + col] == color;
+    for (size_t dirty_row = 0; dirty_row < FB_HEIGHT; dirty_row++) {
+        const int dirty = vm_fb_take_row_dirty(vm, dirty_row);
+        ok = ok && (dirty == ((dirty_row == row) ? 1 : 0));
+    }
+
+    uint32_t cap = vm_mmio_read32(vm, fn_addr + PCI_CFG_CAP_PTR) & 0xFCu;
+    while (cap >= PCI_CFG_CAP_START && cap < 0x100u) {
+        uint32_t header = vm_mmio_read32(vm, fn_addr + cap);
+        if ((header & 0xFFu) == PCI_CAP_ID_MSI) {
+            vm_mmio_write32(vm, fn_addr + cap + 4u, 0u);
+            vm_mmio_write32(vm, fn_addr + cap + 8u, 0u);
+            vm_mmio_write32(vm, fn_addr + cap + 12u, vector);
+            vm_mmio_write32(vm, fn_addr + cap, header | (1u << 16));
+            break;
+        }
+        cap = (header >> 8) & 0xFCu;
+    }
+    ok = ok && cap >= PCI_CFG_CAP_START && cap < 0x100u;
+    vm_mmio_write32(vm, ctrl + LAMP_GPU_REG_IRQ_ENABLE, LAMP_GPU_IRQ_FLIP_COMPLETE);
+    vm_mmio_write32(vm, vram + second_scanout + pixel_offset, flipped_color);
+    vm_mmio_write32(vm, ctrl + LAMP_GPU_REG_PENDING_OFFSET, second_scanout);
+    vm_mmio_write32(vm, ctrl + LAMP_GPU_REG_COMMAND, LAMP_GPU_CMD_PAGE_FLIP);
+    ok = ok && vm_mmio_read32(vm, ctrl + LAMP_GPU_REG_COMPLETE_SEQ) == 2u;
+    ok = ok && vm_mmio_read32(vm, ctrl + LAMP_GPU_REG_SCANOUT_OFFSET) == second_scanout;
+    ok = ok && vm->fb[(size_t)row * FB_WIDTH + col] == flipped_color;
+    ok = ok && (vm_mmio_read32(vm, ctrl + LAMP_GPU_REG_IRQ_STATUS) &
+                LAMP_GPU_IRQ_FLIP_COMPLETE) != 0u;
+    ok = ok && ((vm_interrupt_read_pending32(vm, 0, vector / 32u) >> (vector % 32u)) & 1u) != 0u;
+    vm_mmio_write32(vm, ctrl + LAMP_GPU_REG_IRQ_ACK, LAMP_GPU_IRQ_FLIP_COMPLETE);
+
+    vm_mmio_write32(vm, ctrl + LAMP_GPU_REG_CURSOR_X, col);
+    vm_mmio_write32(vm, ctrl + LAMP_GPU_REG_CURSOR_Y, row);
+    vm_mmio_write32(vm, ctrl + LAMP_GPU_REG_CURSOR_CTRL,
+                    LAMP_GPU_CURSOR_VISIBLE);
+    vm_mmio_write32(vm, ctrl + LAMP_GPU_REG_COMMAND,
+                    LAMP_GPU_CMD_CURSOR_UPDATE);
+    ok = ok && vm->fb[(size_t)row * FB_WIDTH + col] == 0x00030A10u;
+
+    vm_mmio_write32(vm, ctrl + LAMP_GPU_REG_CURSOR_X, col + 8u);
+    vm_mmio_write32(vm, ctrl + LAMP_GPU_REG_CURSOR_Y, row + 8u);
+    vm_mmio_write32(vm, ctrl + LAMP_GPU_REG_CURSOR_CTRL,
+                    LAMP_GPU_CURSOR_VISIBLE |
+                    (1u << LAMP_GPU_CURSOR_BUTTONS_SHIFT));
+    vm_mmio_write32(vm, ctrl + LAMP_GPU_REG_COMMAND,
+                    LAMP_GPU_CMD_CURSOR_UPDATE);
+    ok = ok && vm->fb[(size_t)row * FB_WIDTH + col] == flipped_color;
+    ok = ok && vm->fb[(size_t)(row + 10u) * FB_WIDTH + col + 9u] == 0x0038BDF8u;
+
+    /* A scanout flip replaces the scene but must preserve the independent
+     * cursor plane at its current position and button color. */
+    vm_mmio_write32(vm, ctrl + LAMP_GPU_REG_PENDING_OFFSET, 0u);
+    vm_mmio_write32(vm, ctrl + LAMP_GPU_REG_COMMAND, LAMP_GPU_CMD_PAGE_FLIP);
+    ok = ok && vm->fb[(size_t)row * FB_WIDTH + col] == color;
+    ok = ok && vm->fb[(size_t)(row + 8u) * FB_WIDTH + col + 8u] == 0x00030A10u;
+    ok = ok && vm->fb[(size_t)(row + 10u) * FB_WIDTH + col + 9u] == 0x0038BDF8u;
+
+    vm_mmio_write32(vm, ctrl + LAMP_GPU_REG_CURSOR_CTRL, 0u);
+    vm_mmio_write32(vm, ctrl + LAMP_GPU_REG_COMMAND,
+                    LAMP_GPU_CMD_CURSOR_UPDATE);
+    ok = ok && vm->fb[(size_t)(row + 8u) * FB_WIDTH + col + 8u] == 0u;
+
+    vm_mmio_write32(vm, ctrl + LAMP_GPU_REG_COMMAND, LAMP_GPU_CMD_DISABLE);
+    ok = ok && vm->fb[(size_t)row * FB_WIDTH + col] == 0u;
+    vm_destroy(vm);
+    return ok;
+}
+
+static int run_selftest_pci_audio_dma(void) {
+    enum {
+        submit_pa = 0x00030000u,
+        complete_pa = 0x00031000u,
+        pcm_pa = 0x00032000u,
+        iommu_root_pa = 0x00034000u,
+        iommu_l2_pa = 0x00035000u,
+        dma_iova_base = 0x10000000u,
+        ring_count = 8u,
+        pcm_bytes = 16u
+    };
+    uint64_t program[] = {INST(OP_HALT, 0, 0, 0, 0)};
+    VM *vm = vm_create(MEM_SIZE, program, 1u, NULL, 0u, NULL, 1);
+    if (!vm) return 0;
+
+    int ok = 1;
+    const uint32_t fn_addr = PCIE_ECAM_BASE +
+                             (3u * PCI_ECAM_FUNC_COUNT) * PCI_ECAM_FUNC_SIZE;
+    const uint32_t ctrl = 0x00E00000u;
+    const uint32_t vector = 42u;
+    uint32_t id = vm_mmio_read32(vm, fn_addr + PCI_CFG_VENDOR_ID);
+    uint32_t class_rev = vm_mmio_read32(vm, fn_addr + PCI_CFG_REVISION_ID);
+
+    ok = ok && (id & 0xFFFFu) == LAMP_PCI_VENDOR_ID;
+    ok = ok && (id >> 16) == LAMP_PCI_AUDIO_DEVICE_ID;
+    ok = ok && ((class_rev >> 24) & 0xFFu) == PCI_CLASS_MULTIMEDIA;
+    ok = ok && ((class_rev >> 16) & 0xFFu) == PCI_SUBCLASS_AUDIO;
+    vm_mmio_write32(vm, fn_addr + PCI_CFG_BAR0, 0xFFFFFFFFu);
+    ok = ok && vm_mmio_read32(vm, fn_addr + PCI_CFG_BAR0) == 0xFFFFF000u;
+    vm_mmio_write32(vm, fn_addr + PCI_CFG_BAR0, ctrl);
+    vm_mmio_write32(vm, fn_addr + PCI_CFG_COMMAND,
+                    PCI_COMMAND_MEM_ENABLE | PCI_COMMAND_BUS_MASTER);
+
+    ok = ok && vm_mmio_read32(vm, ctrl + LAMP_AUDIO_REG_MAGIC) == LAMP_AUDIO_MAGIC;
+    ok = ok && vm_mmio_read32(vm, ctrl + LAMP_AUDIO_REG_RATE) == LAMP_AUDIO_RATE;
+    ok = ok && vm_mmio_read32(vm, ctrl + LAMP_AUDIO_REG_CHANNELS) == LAMP_AUDIO_CHANNELS;
+    ok = ok && vm_mmio_read32(vm, ctrl + LAMP_AUDIO_REG_SAMPLE_BITS) ==
+               LAMP_AUDIO_SAMPLE_BITS;
+
+    vm->iommu.ctrl = IOMMU_CTRL_ENABLE;
+    vm->iommu.devices[IOMMU_DEV_AUDIO].ctrl =
+        IOMMU_DEV_CTRL_ENABLE | IOMMU_DEV_CTRL_PAGED;
+    vm->iommu.devices[IOMMU_DEV_AUDIO].root = iommu_root_pa;
+    const uint32_t dma_pde = dma_iova_base >> 22;
+    store_le32(&vm->memory[iommu_root_pa + dma_pde * 4u],
+               iommu_l2_pa | IOMMU_PTE_P);
+    store_le32(&vm->memory[iommu_l2_pa +
+                           (((dma_iova_base + submit_pa) >> 12) & 0x3FFu) * 4u],
+               submit_pa | IOMMU_PTE_P | IOMMU_PTE_R | IOMMU_PTE_W);
+    store_le32(&vm->memory[iommu_l2_pa +
+                           (((dma_iova_base + complete_pa) >> 12) & 0x3FFu) * 4u],
+               complete_pa | IOMMU_PTE_P | IOMMU_PTE_R | IOMMU_PTE_W);
+    store_le32(&vm->memory[iommu_l2_pa +
+                           (((dma_iova_base + pcm_pa) >> 12) & 0x3FFu) * 4u],
+               pcm_pa | IOMMU_PTE_P | IOMMU_PTE_R | IOMMU_PTE_W);
+
+    for (uint32_t i = 0u; i < pcm_bytes; i++) {
+        vm->memory[pcm_pa + i] = (uint8_t)(i * 7u);
+    }
+    store_le32(&vm->memory[submit_pa + 0u], dma_iova_base + pcm_pa);
+    store_le32(&vm->memory[submit_pa + 4u], 0u);
+    store_le32(&vm->memory[submit_pa + 8u], pcm_bytes);
+    store_le32(&vm->memory[submit_pa + 12u],
+               LAMP_DMA_DESC_F_IRQ | LAMP_DMA_DESC_F_END);
+    store_le32(&vm->memory[submit_pa + 16u], 0xA11D0001u);
+    store_le32(&vm->memory[submit_pa + 20u], 0u);
+    store_le32(&vm->memory[submit_pa + 24u], 0u);
+    store_le32(&vm->memory[submit_pa + 28u], 0u);
+
+    uint32_t cap = vm_mmio_read32(vm, fn_addr + PCI_CFG_CAP_PTR) & 0xFCu;
+    while (cap >= PCI_CFG_CAP_START && cap < 0x100u) {
+        uint32_t header = vm_mmio_read32(vm, fn_addr + cap);
+        if ((header & 0xFFu) == PCI_CAP_ID_MSI) {
+            vm_mmio_write32(vm, fn_addr + cap + 4u, 0u);
+            vm_mmio_write32(vm, fn_addr + cap + 8u, 0u);
+            vm_mmio_write32(vm, fn_addr + cap + 12u, vector);
+            vm_mmio_write32(vm, fn_addr + cap, header | (1u << 16));
+            break;
+        }
+        cap = (header >> 8) & 0xFCu;
+    }
+    ok = ok && cap >= PCI_CFG_CAP_START && cap < 0x100u;
+
+    vm_mmio_write32(vm, ctrl + LAMP_AUDIO_REG_SUBMIT_BASE_LO,
+                    dma_iova_base + submit_pa);
+    vm_mmio_write32(vm, ctrl + LAMP_AUDIO_REG_SUBMIT_BASE_HI, 0u);
+    vm_mmio_write32(vm, ctrl + LAMP_AUDIO_REG_SUBMIT_COUNT, ring_count);
+    vm_mmio_write32(vm, ctrl + LAMP_AUDIO_REG_COMPLETE_BASE_LO,
+                    dma_iova_base + complete_pa);
+    vm_mmio_write32(vm, ctrl + LAMP_AUDIO_REG_COMPLETE_BASE_HI, 0u);
+    vm_mmio_write32(vm, ctrl + LAMP_AUDIO_REG_COMPLETE_COUNT, ring_count);
+    vm_mmio_write32(vm, ctrl + LAMP_AUDIO_REG_IRQ_ENABLE,
+                    LAMP_AUDIO_IRQ_COMPLETION | LAMP_AUDIO_IRQ_ERROR);
+    vm_mmio_write32(vm, ctrl + LAMP_AUDIO_REG_COMMAND, LAMP_AUDIO_CMD_ENABLE);
+    vm_mmio_write32(vm, ctrl + LAMP_AUDIO_REG_SUBMIT_TAIL, 1u);
+    audio_poll(vm);
+
+    ok = ok && vm_mmio_read32(vm, ctrl + LAMP_AUDIO_REG_SUBMIT_HEAD) == 1u;
+    ok = ok && vm_mmio_read32(vm, ctrl + LAMP_AUDIO_REG_COMPLETE_TAIL) == 1u;
+    ok = ok && vm_mmio_read32(vm, ctrl + LAMP_AUDIO_REG_COMPLETED_DESCS) == 1u;
+    ok = ok && load_le32(&vm->memory[complete_pa + 0u]) == 0xA11D0001u;
+    ok = ok && load_le32(&vm->memory[complete_pa + 4u]) == LAMP_DMA_COMPLETION_OK;
+    ok = ok && load_le32(&vm->memory[complete_pa + 8u]) == pcm_bytes;
+    ok = ok && load_le32(&vm->memory[complete_pa + 12u]) == 1u;
+    ok = ok && (vm_mmio_read32(vm, ctrl + LAMP_AUDIO_REG_IRQ_STATUS) &
+                LAMP_AUDIO_IRQ_COMPLETION) != 0u;
+    ok = ok && ((vm_interrupt_read_pending32(vm, 0, vector / 32u) >>
+                 (vector % 32u)) & 1u) != 0u;
+    vm_mmio_write32(vm, ctrl + LAMP_AUDIO_REG_COMPLETE_HEAD, 1u);
+    vm_mmio_write32(vm, ctrl + LAMP_AUDIO_REG_IRQ_ACK,
+                    LAMP_AUDIO_IRQ_COMPLETION | LAMP_AUDIO_IRQ_ERROR);
+
+    vm_destroy(vm);
+    return ok;
+}
+
+static uint64_t selftest_sysinfo_read64(VM *vm, uint32_t low_offset,
+                                        uint32_t high_offset) {
+    const uint32_t low = vm_mmio_read32(vm, SYSINFO_BASE + low_offset);
+    const uint32_t high = vm_mmio_read32(vm, SYSINFO_BASE + high_offset);
+    return ((uint64_t)high << 32) | low;
+}
+
+static int run_selftest_runtime_stats(void) {
+    uint64_t program[] = {
+        INST(OP_HALT, 0, 0, 0, 0),
+    };
+    VM *vm = vm_create(MEM_SIZE, program,
+                       sizeof(program) / sizeof(program[0]),
+                       NULL, 0, NULL, 1);
+    VmRuntimeStats stats;
+    int ok;
+    if (!vm) {
+        return 0;
+    }
+
+    vm->cpu_frequency_hz = 123000000ull;
+    atomic_store_explicit(&vm->cpus[0].execution_times, 12345u,
+                          memory_order_relaxed);
+    vm_runtime_stats_sample(vm, &stats);
+
+    ok = stats.cpu_frequency_hz == 123000000ull &&
+         stats.executed_instructions == 12345u &&
+         stats.guest_ram_bytes == MEM_SIZE &&
+         stats.core_count == 1u &&
+         stats.active_core_count == 1u;
+    ok = ok && vm_mmio_read32(vm, SYSINFO_BASE + SYSINFO_REG_LAYOUT_VERSION) ==
+                   SYSINFO_LAYOUT_VERSION;
+    ok = ok && (vm_mmio_read32(vm, SYSINFO_BASE + SYSINFO_REG_FEATURES) &
+                SYSINFO_FEATURE_RUNTIME_STATS) != 0u;
+    ok = ok && vm_mmio_read32(vm, SYSINFO_BASE + SYSINFO_REG_RUNTIME_VERSION) ==
+                   SYSINFO_RUNTIME_VERSION;
+    ok = ok && selftest_sysinfo_read64(vm, SYSINFO_REG_CPU_FREQ_HZ_LO,
+                                        SYSINFO_REG_CPU_FREQ_HZ_HI) ==
+                   123000000ull;
+    ok = ok && selftest_sysinfo_read64(vm, SYSINFO_REG_EXEC_COUNT_LO,
+                                        SYSINFO_REG_EXEC_COUNT_HI) == 12345u;
+    ok = ok && selftest_sysinfo_read64(vm, SYSINFO_REG_CPU_CYCLES_LO,
+                                        SYSINFO_REG_CPU_CYCLES_HI) > 0u;
+
+    vm_destroy(vm);
+    return ok;
+}
+
+static int run_selftest_cpu_pacing(void) {
+    enum { PACE_TEST_INSTRUCTIONS = 20000 };
+    uint64_t *program = malloc(sizeof(*program) * PACE_TEST_INSTRUCTIONS);
+    VM *vm;
+    uint64_t start_ns;
+    uint64_t elapsed_ns;
+    uint64_t executed;
+    int ok;
+    if (!program) {
+        return 0;
+    }
+    for (size_t i = 0; i + 1u < PACE_TEST_INSTRUCTIONS; i++) {
+        program[i] = INST(OP_MOVI, 1, 0, 0, (uint32_t)i);
+    }
+    program[PACE_TEST_INSTRUCTIONS - 1u] = INST(OP_HALT, 0, 0, 0, 0);
+
+    vm = vm_create(MEM_SIZE, program, PACE_TEST_INSTRUCTIONS,
+                   NULL, 0, NULL, 1);
+    free(program);
+    if (!vm) {
+        return 0;
+    }
+    vm->cpu_frequency_hz = 1000000ull;
+    start_ns = host_monotonic_time_ns();
+    ok = vm_run_headless(vm, 1000u);
+    elapsed_ns = host_monotonic_time_ns() - start_ns;
+    executed = atomic_load_explicit(&vm->cpus[0].execution_times,
+                                    memory_order_relaxed);
+
+    /* At 1 MHz, 20,000 one-cycle instructions need 20 ms. Keep a small
+     * tolerance for the first host scheduling handoff. */
+    ok = ok && executed == PACE_TEST_INSTRUCTIONS &&
+         elapsed_ns >= 18000000ull;
     vm_destroy(vm);
     return ok;
 }
@@ -718,6 +1300,13 @@ int run_selftests(void) {
     int ok13 = run_selftest_ps2_controller();
     int ok14 = run_selftest_fb_accel();
     int ok15 = run_selftest_iommu_paged_translation();
+    int ok16 = run_selftest_pcie_enumeration();
+    int ok17 = run_selftest_nat_rx_queue();
+    int ok18 = run_selftest_pci_ethernet();
+    int ok19 = run_selftest_pci_gpu();
+    int ok20 = run_selftest_pci_audio_dma();
+    int ok21 = run_selftest_runtime_stats();
+    int ok22 = run_selftest_cpu_pacing();
 
     printf("[selftest] startap_cpuid: %s\n", ok1 ? "PASS" : "FAIL");
     printf("[selftest] ipi: %s\n", ok2 ? "PASS" : "FAIL");
@@ -734,5 +1323,169 @@ int run_selftests(void) {
     printf("[selftest] ps2_controller: %s\n", ok13 ? "PASS" : "FAIL");
     printf("[selftest] fb_accel: %s\n", ok14 ? "PASS" : "FAIL");
     printf("[selftest] iommu_paged_translation: %s\n", ok15 ? "PASS" : "FAIL");
-    return (ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12 && ok13 && ok14 && ok15) ? 0 : 1;
+    printf("[selftest] pcie_enumeration: %s\n", ok16 ? "PASS" : "FAIL");
+    printf("[selftest] nat_rx_queue: %s\n", ok17 ? "PASS" : "FAIL");
+    printf("[selftest] pci_ethernet: %s\n", ok18 ? "PASS" : "FAIL");
+    printf("[selftest] pci_gpu: %s\n", ok19 ? "PASS" : "FAIL");
+    printf("[selftest] pci_audio_dma: %s\n", ok20 ? "PASS" : "FAIL");
+    printf("[selftest] runtime_stats: %s\n", ok21 ? "PASS" : "FAIL");
+    printf("[selftest] cpu_pacing: %s\n", ok22 ? "PASS" : "FAIL");
+    return (ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12 && ok13 && ok14 && ok15 && ok16 && ok17 && ok18 && ok19 && ok20 && ok21 && ok22) ? 0 : 1;
+}
+
+static int run_interpreter_benchmark_mode(const char *label, int enable_mmu) {
+    enum {
+        BENCHMARK_ITERATIONS = 10000000u,
+        BENCHMARK_MMU_ROOT = 0x4000u,
+        BENCHMARK_MMU_L2 = 0x5000u,
+    };
+    const uint64_t expected_instructions =
+        2ull * (uint64_t)BENCHMARK_ITERATIONS + 2ull;
+    uint64_t program[] = {
+        INST(OP_MOVI, 1, 0, 0, BENCHMARK_ITERATIONS),
+        INST(OP_SUBI, 1, 1, 0, 1),
+        INST(OP_RJNZ, 0, 0, 0, (uint32_t)-8),
+        INST(OP_HALT, 0, 0, 0, 0),
+    };
+    VM *vm = vm_create(MEM_SIZE, program,
+                       sizeof(program) / sizeof(program[0]),
+                       NULL, 0, NULL, 1);
+    uint64_t start_ns;
+    uint64_t elapsed_ns;
+    uint64_t executed;
+    double mips;
+    int ok;
+
+    if (!vm) {
+        fprintf(stderr, "[benchmark] failed to create VM (%s)\n", label);
+        return 1;
+    }
+
+    /* Zero disables the virtual clock limiter so this measures the host-side
+     * single-core interpreter ceiling rather than the configured vCPU clock. */
+    vm->cpu_frequency_hz = 0u;
+    init_ivt(vm);
+    if (enable_mmu) {
+        const uint32_t page = (uint32_t)PROGRAM_BASE & ~0xFFFu;
+        const uint32_t pde_index = ((uint32_t)PROGRAM_BASE >> 22) & 0x3FFu;
+        const uint32_t pte_index = ((uint32_t)PROGRAM_BASE >> 12) & 0x3FFu;
+        const uint32_t perms = MMU_PTE_P | MMU_PTE_W | MMU_PTE_X;
+        store_le32(&vm->memory[BENCHMARK_MMU_ROOT + pde_index * 4u],
+                   BENCHMARK_MMU_L2 | perms);
+        store_le32(&vm->memory[BENCHMARK_MMU_L2 + pte_index * 4u],
+                   page | perms);
+        vm->mmu.root[0] = BENCHMARK_MMU_ROOT;
+        vm->mmu.ctrl[0] = MMU_CTRL_ENABLE;
+        vm_mmu_flush_tlb(vm, 0u);
+    }
+    start_ns = host_monotonic_time_ns();
+    ok = vm_run_headless(vm, 30000u);
+    elapsed_ns = host_monotonic_time_ns() - start_ns;
+    executed = atomic_load_explicit(&vm->cpus[0].execution_times,
+                                    memory_order_relaxed);
+    mips = elapsed_ns != 0u
+        ? ((double)executed * 1000.0) / (double)elapsed_ns
+        : 0.0;
+
+    printf("[benchmark] single-core %-8s: %.1f MIPS "
+           "(%llu instructions, %.1f ms)\n",
+           label,
+           mips,
+           (unsigned long long)executed,
+           (double)elapsed_ns / 1000000.0);
+
+    ok = ok && !atomic_is_vm_panicked(vm) &&
+         executed == expected_instructions &&
+         vm->cpus[0].regs[1] == 0u;
+    vm_destroy(vm);
+    if (!ok) {
+        fprintf(stderr,
+                "[benchmark] invalid %s result: expected %llu instructions\n",
+                label,
+                (unsigned long long)expected_instructions);
+        return 1;
+    }
+    return 0;
+}
+
+static int run_memory_benchmark_mode(const char *label, int enable_mmu) {
+    enum {
+        BENCHMARK_ITERATIONS = 5000000u,
+        BENCHMARK_MMU_ROOT = 0x4000u,
+        BENCHMARK_MMU_L2 = 0x5000u,
+        BENCHMARK_DATA = 0x6000u,
+    };
+    const uint64_t expected_instructions =
+        5ull * (uint64_t)BENCHMARK_ITERATIONS + 3ull;
+    uint64_t program[] = {
+        INST(OP_MOVI, 1, 0, 0, BENCHMARK_ITERATIONS),
+        INST(OP_MOVI, 2, 0, 0, BENCHMARK_DATA),
+        INST(OP_LOAD32, 3, 2, 0, 0),
+        INST(OP_ADDI, 3, 3, 0, 1),
+        INST(OP_STORE32, 3, 2, 0, 0),
+        INST(OP_SUBI, 1, 1, 0, 1),
+        INST(OP_RJNZ, 0, 0, 0, (uint32_t)-32),
+        INST(OP_HALT, 0, 0, 0, 0),
+    };
+    VM *vm = vm_create(MEM_SIZE, program,
+                       sizeof(program) / sizeof(program[0]),
+                       NULL, 0, NULL, 1);
+    uint64_t start_ns;
+    uint64_t elapsed_ns;
+    uint64_t executed;
+    double mips;
+    int ok;
+
+    if (!vm) {
+        fprintf(stderr, "[benchmark] failed to create VM (%s)\n", label);
+        return 1;
+    }
+    vm->cpu_frequency_hz = 0u;
+    init_ivt(vm);
+    if (enable_mmu) {
+        const uint32_t code_page = (uint32_t)PROGRAM_BASE & ~0xFFFu;
+        const uint32_t pde_index = ((uint32_t)PROGRAM_BASE >> 22) & 0x3FFu;
+        const uint32_t code_pte = ((uint32_t)PROGRAM_BASE >> 12) & 0x3FFu;
+        const uint32_t data_pte = BENCHMARK_DATA >> 12;
+        const uint32_t perms = MMU_PTE_P | MMU_PTE_W | MMU_PTE_X;
+        store_le32(&vm->memory[BENCHMARK_MMU_ROOT + pde_index * 4u],
+                   BENCHMARK_MMU_L2 | perms);
+        store_le32(&vm->memory[BENCHMARK_MMU_L2 + code_pte * 4u],
+                   code_page | perms);
+        store_le32(&vm->memory[BENCHMARK_MMU_L2 + data_pte * 4u],
+                   BENCHMARK_DATA | perms);
+        vm->mmu.root[0] = BENCHMARK_MMU_ROOT;
+        vm->mmu.ctrl[0] = MMU_CTRL_ENABLE;
+        vm_mmu_flush_tlb(vm, 0u);
+    }
+
+    start_ns = host_monotonic_time_ns();
+    ok = vm_run_headless(vm, 30000u);
+    elapsed_ns = host_monotonic_time_ns() - start_ns;
+    executed = atomic_load_explicit(&vm->cpus[0].execution_times,
+                                    memory_order_relaxed);
+    mips = elapsed_ns != 0u
+        ? ((double)executed * 1000.0) / (double)elapsed_ns
+        : 0.0;
+    printf("[benchmark] single-core %-8s: %.1f MIPS "
+           "(%llu instructions, %.1f ms)\n",
+           label,
+           mips,
+           (unsigned long long)executed,
+           (double)elapsed_ns / 1000000.0);
+
+    ok = ok && !atomic_is_vm_panicked(vm) &&
+         executed == expected_instructions &&
+         load_le32(&vm->memory[BENCHMARK_DATA]) == BENCHMARK_ITERATIONS;
+    vm_destroy(vm);
+    return ok ? 0 : 1;
+}
+
+int run_benchmark(void) {
+    const int flat_ok = run_interpreter_benchmark_mode("flat", 0);
+    const int mmu_ok = run_interpreter_benchmark_mode("MMU", 1);
+    const int memory_ok = run_memory_benchmark_mode("memory", 0);
+    const int memory_mmu_ok = run_memory_benchmark_mode("memory+MMU", 1);
+    return (flat_ok == 0 && mmu_ok == 0 &&
+            memory_ok == 0 && memory_mmu_ok == 0) ? 0 : 1;
 }

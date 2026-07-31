@@ -1,90 +1,97 @@
-#include <SDL2/SDL.h>
+#include <SDL3/SDL.h>
 #include <string.h>
 #include <stdio.h>
-#include <stdlib.h>
+#include <unistd.h>
 #include "display.h"
 #include "../../io.h"
 #include "../../interrupt.h"
 #include "../../vm.h"
+#include "../serial/serial_console.h"
 
 static SDL_Window *window = NULL;
 static SDL_Renderer *renderer = NULL;
 static SDL_Texture *texture = NULL;
-static uint8_t g_mouse_buttons;
-static int g_serial_console_mode;
+static SDL_MouseButtonFlags g_mouse_buttons;
+static uint32_t g_display_window_id;
+static uint8_t g_pressed_scancodes[SDL_SCANCODE_COUNT];
+static uint8_t g_pointer_capture_requested;
+static uint8_t g_pointer_captured;
+static uint8_t g_capture_hotkey_down;
+static float g_mouse_motion_remainder_x;
+static float g_mouse_motion_remainder_y;
 
-static int console_trace_enabled(void) {
-    static int initialized;
-    static int enabled;
-    if (!initialized) {
-        enabled = getenv("LAMP_CONSOLE_TRACE") ? 1 : 0;
-        initialized = 1;
-    }
-    return enabled;
-}
-
-int vga_display_init(void) {
-    if (SDL_Init(SDL_INIT_VIDEO) != 0)
+int display_init(VM *vm, int serial_window_enabled) {
+    /* Keep macOS trackpads on the mouse path and apply the user's native
+     * acceleration curve in relative mode. Centering is the most reliable
+     * continuous-capture mode on macOS. */
+    (void)SDL_SetHint(SDL_HINT_TRACKPAD_IS_TOUCH_ONLY, "0");
+    (void)SDL_SetHint(SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE, "1");
+    (void)SDL_SetHint(SDL_HINT_MOUSE_RELATIVE_MODE_CENTER, "1");
+    (void)SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
+    if (!SDL_InitSubSystem(SDL_INIT_VIDEO))
         return -1;
 
     window = SDL_CreateWindow(
-        "VM Display", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, FB_WIDTH, FB_HEIGHT, SDL_WINDOW_SHOWN);
+        "VM Display", FB_WIDTH, FB_HEIGHT,
+        SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_RESIZABLE);
 
-    renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    if (!window) {
+        SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        return -1;
+    }
+    g_display_window_id = SDL_GetWindowID(window);
+    renderer = SDL_CreateRenderer(window, NULL);
+    if (!renderer) {
+        display_shutdown();
+        return -1;
+    }
+    /* The VM owns a high-resolution 120 Hz deadline loop. Renderer VSync would
+     * add a second blocking clock and make frame time alternate under load. */
+    (void)SDL_SetRenderVSync(renderer, 0);
+    (void)SDL_SetRenderDrawColor(renderer, 0u, 0u, 0u, 255u);
+    if (!SDL_SetRenderLogicalPresentation(
+            renderer, FB_WIDTH, FB_HEIGHT, SDL_LOGICAL_PRESENTATION_LETTERBOX)) {
+        fprintf(stderr, "Failed to configure VM display presentation: %s\n", SDL_GetError());
+        display_shutdown();
+        return -1;
+    }
     texture = SDL_CreateTexture(
         renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, FB_WIDTH, FB_HEIGHT);
+    if (!texture) {
+        display_shutdown();
+        return -1;
+    }
+    if (!SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_NEAREST)) {
+        fprintf(stderr, "Failed to configure VM framebuffer scaling: %s\n", SDL_GetError());
+        display_shutdown();
+        return -1;
+    }
+    /* Guest framebuffer pixels are 0x00RRGGBB as well as 0xAARRGGBB.
+     * They are always opaque display pixels; the high byte is not alpha. */
+    if (!SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_NONE)) {
+        fprintf(stderr, "Failed to configure VM framebuffer texture: %s\n", SDL_GetError());
+        display_shutdown();
+        return -1;
+    }
 
-    return 0;
-}
-
-void display_set_serial_console_mode(int enabled) {
-    g_serial_console_mode = enabled ? 1 : 0;
-}
-
-static void serial_console_push(VM *vm, uint8_t c) {
-    if (c == (uint8_t)'\r') {
-        c = (uint8_t)'\n';
-    }
-    if (console_trace_enabled()) {
-        fprintf(stderr, "[console sdl] rx=0x%02x\n", (unsigned)c);
-    }
-    (void)vm_serial_rx_enqueue(vm, c);
-}
-
-static int sdl_keycode_to_serial_ascii(SDL_Keycode sym, SDL_Keymod mod, uint8_t *out) {
-    const int shift = ((mod & KMOD_SHIFT) != 0) ? 1 : 0;
-    const int caps = ((mod & KMOD_CAPS) != 0) ? 1 : 0;
-    if (!out) {
-        return 0;
-    }
-    if (sym >= SDLK_a && sym <= SDLK_z) {
-        uint8_t c = (uint8_t)('a' + (sym - SDLK_a));
-        if ((shift ^ caps) != 0) {
-            c = (uint8_t)(c - 'a' + 'A');
-        }
-        *out = c;
-        return 1;
-    }
-    if (sym >= SDLK_0 && sym <= SDLK_9) {
-        static const uint8_t shifted_digits[] = {')', '!', '@', '#', '$', '%', '^', '&', '*', '('};
-        uint32_t idx = (uint32_t)(sym - SDLK_0);
-        *out = shift ? shifted_digits[idx] : (uint8_t)('0' + idx);
-        return 1;
-    }
-    switch (sym) {
-        case SDLK_SPACE: *out = (uint8_t)' '; return 1;
-        case SDLK_MINUS: *out = shift ? (uint8_t)'_' : (uint8_t)'-'; return 1;
-        case SDLK_EQUALS: *out = shift ? (uint8_t)'+' : (uint8_t)'='; return 1;
-        case SDLK_LEFTBRACKET: *out = shift ? (uint8_t)'{' : (uint8_t)'['; return 1;
-        case SDLK_RIGHTBRACKET: *out = shift ? (uint8_t)'}' : (uint8_t)']'; return 1;
-        case SDLK_BACKSLASH: *out = shift ? (uint8_t)'|' : (uint8_t)'\\'; return 1;
-        case SDLK_SEMICOLON: *out = shift ? (uint8_t)':' : (uint8_t)';'; return 1;
-        case SDLK_QUOTE: *out = shift ? (uint8_t)'"' : (uint8_t)'\''; return 1;
-        case SDLK_BACKQUOTE: *out = shift ? (uint8_t)'~' : (uint8_t)'`'; return 1;
-        case SDLK_COMMA: *out = shift ? (uint8_t)'<' : (uint8_t)','; return 1;
-        case SDLK_PERIOD: *out = shift ? (uint8_t)'>' : (uint8_t)'.'; return 1;
-        case SDLK_SLASH: *out = shift ? (uint8_t)'?' : (uint8_t)'/'; return 1;
-        default: break;
+    vm->serial_window_enabled = serial_window_enabled ? 1 : 0;
+    memset(g_pressed_scancodes, 0, sizeof(g_pressed_scancodes));
+    g_mouse_buttons = 0u;
+    /* Keep capture armed before the Serial window is created. On macOS the
+     * first trackpad click used to focus an inactive Display window may not be
+     * delivered as a mouse-button event even with click-through enabled. The
+     * focus-gained event can now enter relative mode immediately.
+     * Ctrl+Command+G on macOS (or Ctrl+Alt+G elsewhere) still clears this
+     * request until the user clicks Display again. */
+    g_pointer_capture_requested = 1u;
+    g_pointer_captured = 0u;
+    g_capture_hotkey_down = 0u;
+    g_mouse_motion_remainder_x = 0.0f;
+    g_mouse_motion_remainder_y = 0.0f;
+    vm_fb_mark_all_dirty(vm);
+    if (vm->serial_window_enabled && serial_console_init() != 0) {
+        fprintf(stderr, "Failed to create VM Serial window: %s\n", SDL_GetError());
+        vm->serial_window_enabled = 0;
     }
     return 0;
 }
@@ -93,8 +100,8 @@ static void ps2_kbd_push(VM *vm, uint8_t c) {
     (void)vm_ps2_kbd_enqueue(vm, c);
 }
 
-static void ps2_mouse_push(VM *vm, uint8_t c) {
-    (void)vm_ps2_mouse_enqueue(vm, c);
+static int ps2_mouse_push(VM *vm, uint8_t c) {
+    return vm_ps2_mouse_enqueue(vm, c);
 }
 
 static int sdl_scancode_to_ps2_set1(SDL_Scancode scancode, uint8_t *prefix, uint8_t *code) {
@@ -170,6 +177,8 @@ static int sdl_scancode_to_ps2_set1(SDL_Scancode scancode, uint8_t *prefix, uint
     }
 }
 
+static void ps2_mouse_send_packet(VM *vm, int dx, int dy);
+
 static void ps2_kbd_send_key(VM *vm, SDL_Scancode scancode, int released) {
     uint8_t prefix;
     uint8_t code;
@@ -180,6 +189,72 @@ static void ps2_kbd_send_key(VM *vm, SDL_Scancode scancode, int released) {
         ps2_kbd_push(vm, prefix);
     }
     ps2_kbd_push(vm, released ? (uint8_t)(code | 0x80u) : code);
+}
+
+static void ps2_release_input_state(VM *vm) {
+    for (int scancode = 0; scancode < SDL_SCANCODE_COUNT; scancode++) {
+        if (g_pressed_scancodes[scancode] == 0u) {
+            continue;
+        }
+        ps2_kbd_send_key(vm, (SDL_Scancode)scancode, 1);
+        g_pressed_scancodes[scancode] = 0u;
+    }
+    if (g_mouse_buttons != 0u) {
+        g_mouse_buttons = 0u;
+        ps2_mouse_send_packet(vm, 0, 0);
+    }
+}
+
+static int display_window_has_input_focus(void) {
+    return window &&
+        (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) != 0u;
+}
+
+static void display_apply_pointer_capture(void) {
+    float discarded_x;
+    float discarded_y;
+    int relative_enabled;
+    int should_capture;
+    if (!window) {
+        g_pointer_captured = 0u;
+        return;
+    }
+    relative_enabled = SDL_GetWindowRelativeMouseMode(window) ? 1 : 0;
+    should_capture = g_pointer_capture_requested &&
+                     display_window_has_input_focus();
+    if (should_capture) {
+        if (!SDL_GetWindowMouseGrab(window)) {
+            (void)SDL_SetWindowMouseGrab(window, true);
+        }
+        if (relative_enabled) {
+            g_pointer_captured = 1u;
+            return;
+        }
+        if (!SDL_SetWindowRelativeMouseMode(window, true)) {
+            fprintf(stderr, "Failed to capture VM Display pointer: %s\n",
+                    SDL_GetError());
+            (void)SDL_SetWindowMouseGrab(window, false);
+            g_pointer_captured = 0u;
+            return;
+        }
+        (void)SDL_GetRelativeMouseState(&discarded_x, &discarded_y);
+        g_pointer_captured = SDL_GetWindowRelativeMouseMode(window) ? 1u : 0u;
+    } else {
+        if (relative_enabled) {
+            (void)SDL_GetRelativeMouseState(&discarded_x, &discarded_y);
+            (void)SDL_SetWindowRelativeMouseMode(window, false);
+        }
+        if (SDL_GetWindowMouseGrab(window)) {
+            (void)SDL_SetWindowMouseGrab(window, false);
+        }
+        (void)SDL_ShowCursor();
+        g_pointer_captured = 0u;
+    }
+}
+
+static void display_set_pointer_capture(int enabled) {
+    g_pointer_capture_requested = enabled ? 1u : 0u;
+    display_apply_pointer_capture();
 }
 
 static void ps2_mouse_send_packet(VM *vm, int dx, int dy) {
@@ -205,102 +280,192 @@ static void ps2_mouse_send_packet(VM *vm, int dx, int dy) {
         if (pkt_x < 0) b0 |= 0x10u;
         if (ps2_y < 0) b0 |= 0x20u;
 
-        ps2_mouse_push(vm, b0);
-        ps2_mouse_push(vm, (uint8_t)((int8_t)pkt_x));
-        ps2_mouse_push(vm, (uint8_t)((int8_t)ps2_y));
+        (void)ps2_mouse_push(vm, b0);
+        (void)ps2_mouse_push(vm, (uint8_t)((int8_t)pkt_x));
+        (void)ps2_mouse_push(vm, (uint8_t)((int8_t)ps2_y));
     } while (rem_x != 0 || rem_y != 0);
 }
 
-void display_update(VM *vm) {
-    //printf("first 16 pixels:");
-    //for (int i = 0; i < 16; i++) {
-    //    printf(" %08x", ((uint32_t *)vm->fb)[i]);
-    //}
-    //printf("\n");
+static void ps2_mouse_flush_motion(VM *vm, float *dx, float *dy) {
+    const int whole_x = (int)*dx;
+    const int whole_y = (int)*dy;
+    *dx -= (float)whole_x;
+    *dy -= (float)whole_y;
+    if (whole_x != 0 || whole_y != 0) {
+        ps2_mouse_send_packet(vm, whole_x, whole_y);
+    }
+}
 
+static void display_upload_dirty_rows(VM *vm) {
+    const size_t row_bytes = (size_t)FB_WIDTH * FB_BPP;
     uint8_t *front = (uint8_t *)vm->fb_front;
     const uint8_t *back = (const uint8_t *)vm->fb;
-    vm_shared_lock(vm);
-    memcpy(front, back, FB_SIZE);
-    vm_shared_unlock(vm);
+    size_t run_start = FB_HEIGHT;
 
-    SDL_UpdateTexture(texture, NULL, vm->fb_front, FB_WIDTH * FB_BPP);
+    for (size_t row = 0; row <= FB_HEIGHT; row++) {
+        const int dirty = (row < FB_HEIGHT) ? vm_fb_take_row_dirty(vm, row) : 0;
+
+        if (dirty) {
+            vm_fb_row_lock(vm, row);
+            memcpy(front + row * row_bytes, back + row * row_bytes, row_bytes);
+            vm_fb_row_unlock(vm, row);
+            if (run_start == FB_HEIGHT) {
+                run_start = row;
+            }
+            continue;
+        }
+
+        if (run_start != FB_HEIGHT) {
+            SDL_Rect rect = {
+                .x = 0,
+                .y = (int)run_start,
+                .w = FB_WIDTH,
+                .h = (int)(row - run_start),
+            };
+            if (!SDL_UpdateTexture(texture, &rect, front + run_start * row_bytes, (int)row_bytes)) {
+                fprintf(stderr, "Failed to update VM framebuffer texture: %s\n", SDL_GetError());
+                for (size_t retry = run_start; retry < row; retry++) {
+                    vm_fb_mark_row_dirty(vm, retry);
+                }
+            }
+            run_start = FB_HEIGHT;
+        }
+    }
+}
+
+void display_update(VM *vm) {
+    display_upload_dirty_rows(vm);
     SDL_RenderClear(renderer);
-    SDL_RenderCopy(renderer, texture, NULL, NULL);
+    SDL_RenderTexture(renderer, texture, NULL, NULL);
     SDL_RenderPresent(renderer);
-    //printf("flushed\n");
+    if (vm->serial_window_enabled) {
+        serial_console_update(vm);
+    }
+}
+
+static void display_disable_serial_window(VM *vm) {
+    uint8_t c;
+    serial_console_shutdown();
+    vm->serial_window_enabled = 0;
+    while (vm_serial_tx_dequeue(vm, &c)) {
+        (void)write(STDOUT_FILENO, &c, 1);
+    }
 }
 
 void display_poll_events(VM *vm) {
     SDL_Event e;
+    float motion_dx = g_mouse_motion_remainder_x;
+    float motion_dy = g_mouse_motion_remainder_y;
     while (SDL_PollEvent(&e)) {
+        if (vm->serial_window_enabled && serial_console_handle_event(vm, &e)) {
+            continue;
+        }
         switch (e.type) {
-            case SDL_QUIT:
-                atomic_set_vm_halt(vm, 1);;
+            case SDL_EVENT_QUIT:
+                atomic_set_vm_halt(vm, 1);
                 break;
-            case SDL_KEYDOWN:
-                if (g_serial_console_mode) {
-                    uint8_t ascii;
-                    if (e.key.repeat) {
-                        break;
-                    }
-                    if ((e.key.keysym.mod & KMOD_CTRL) != 0 &&
-                        e.key.keysym.sym >= SDLK_a && e.key.keysym.sym <= SDLK_z) {
-                        serial_console_push(vm, (uint8_t)(e.key.keysym.sym - SDLK_a + 1));
-                        break;
-                    }
-                    switch (e.key.keysym.sym) {
-                        case SDLK_RETURN:
-                        case SDLK_KP_ENTER:
-                            serial_console_push(vm, (uint8_t)'\n');
-                            break;
-                        case SDLK_BACKSPACE:
-                        case SDLK_DELETE:
-                            serial_console_push(vm, (uint8_t)0x7Fu);
-                            break;
-                        case SDLK_TAB:
-                            serial_console_push(vm, (uint8_t)'\t');
-                            break;
-                        case SDLK_ESCAPE:
-                            serial_console_push(vm, (uint8_t)0x1Bu);
-                            break;
-                        default:
-                            if (sdl_keycode_to_serial_ascii(e.key.keysym.sym,
-                                                            (SDL_Keymod)e.key.keysym.mod,
-                                                            &ascii)) {
-                                serial_console_push(vm, ascii);
-                            }
-                            break;
+            case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+                if (e.window.windowID == g_display_window_id) {
+                    atomic_set_vm_halt(vm, 1);
+                } else if (e.window.windowID == serial_console_window_id()) {
+                    display_disable_serial_window(vm);
+                }
+                break;
+            case SDL_EVENT_KEY_DOWN:
+                if (e.key.windowID != g_display_window_id) {
+                    break;
+                }
+                if (e.key.scancode == SDL_SCANCODE_G &&
+                    (e.key.mod & SDL_KMOD_CTRL) != 0u &&
+                    (e.key.mod & (SDL_KMOD_ALT | SDL_KMOD_GUI)) != 0u) {
+                    if (!g_capture_hotkey_down) {
+                        g_capture_hotkey_down = 1u;
+                        display_set_pointer_capture(
+                            !g_pointer_capture_requested);
                     }
                     break;
                 }
-                ps2_kbd_send_key(vm, e.key.keysym.scancode, 0);
+                ps2_kbd_send_key(vm, e.key.scancode, 0);
+                if ((int)e.key.scancode >= 0 && (int)e.key.scancode < SDL_SCANCODE_COUNT) {
+                    g_pressed_scancodes[e.key.scancode] = 1u;
+                }
                 break;
-            case SDL_KEYUP:
-                if (g_serial_console_mode) {
+            case SDL_EVENT_KEY_UP:
+                if (e.key.windowID != g_display_window_id) {
                     break;
                 }
-                ps2_kbd_send_key(vm, e.key.keysym.scancode, 1);
-                break;
-            case SDL_MOUSEMOTION:
-                if (e.motion.xrel != 0 || e.motion.yrel != 0) {
-                    ps2_mouse_send_packet(vm, e.motion.xrel, e.motion.yrel);
+                if (e.key.scancode == SDL_SCANCODE_G && g_capture_hotkey_down) {
+                    g_capture_hotkey_down = 0u;
+                    break;
+                }
+                ps2_kbd_send_key(vm, e.key.scancode, 1);
+                if ((int)e.key.scancode >= 0 && (int)e.key.scancode < SDL_SCANCODE_COUNT) {
+                    g_pressed_scancodes[e.key.scancode] = 0u;
                 }
                 break;
-            case SDL_MOUSEBUTTONDOWN:
-            case SDL_MOUSEBUTTONUP:
-                g_mouse_buttons = (uint8_t)SDL_GetMouseState(NULL, NULL);
+            case SDL_EVENT_WINDOW_FOCUS_GAINED:
+                if (e.window.windowID == g_display_window_id) {
+                    display_apply_pointer_capture();
+                }
+                break;
+            case SDL_EVENT_WINDOW_FOCUS_LOST:
+                if (e.window.windowID == g_display_window_id) {
+                    ps2_mouse_flush_motion(vm, &motion_dx, &motion_dy);
+                    ps2_release_input_state(vm);
+                    g_capture_hotkey_down = 0u;
+                    /* Preserve the user's capture request. SDL requires
+                     * relative mode to be suspended without focus; the focus
+                     * gained path restores it. */
+                    display_apply_pointer_capture();
+                    motion_dx = 0.0f;
+                    motion_dy = 0.0f;
+                }
+                break;
+            case SDL_EVENT_MOUSE_MOTION:
+                if (!g_pointer_captured) break;
+                /* Some relative-mode backends report no owning window. Once
+                 * Display owns relative mode, window id 0 is unambiguous. */
+                if (e.motion.windowID != 0u &&
+                    e.motion.windowID != g_display_window_id) break;
+                motion_dx += e.motion.xrel;
+                motion_dy += e.motion.yrel;
+                g_mouse_buttons = e.motion.state;
+                break;
+            case SDL_EVENT_MOUSE_BUTTON_DOWN:
+            case SDL_EVENT_MOUSE_BUTTON_UP:
+                if (e.button.windowID != g_display_window_id) break;
+                ps2_mouse_flush_motion(vm, &motion_dx, &motion_dy);
+                if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+                    !g_pointer_capture_requested) {
+                    display_set_pointer_capture(1);
+                }
+                g_mouse_buttons = SDL_GetMouseState(NULL, NULL);
                 ps2_mouse_send_packet(vm, 0, 0);
                 break;
             default:
                 break;
         }
     }
+    if (g_pointer_capture_requested && display_window_has_input_focus() &&
+        !SDL_GetWindowRelativeMouseMode(window)) {
+        display_apply_pointer_capture();
+    }
+    g_pointer_captured = window && SDL_GetWindowRelativeMouseMode(window) ?
+        1u : 0u;
+    ps2_mouse_flush_motion(vm, &motion_dx, &motion_dy);
+    g_mouse_motion_remainder_x = motion_dx;
+    g_mouse_motion_remainder_y = motion_dy;
 }
 
 void display_shutdown(void) {
+    display_set_pointer_capture(0);
+    serial_console_shutdown();
     SDL_DestroyTexture(texture);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
-    SDL_Quit();
+    texture = NULL;
+    renderer = NULL;
+    window = NULL;
+    g_display_window_id = 0u;
+    SDL_QuitSubSystem(SDL_INIT_VIDEO);
 }

@@ -3,6 +3,7 @@
 //
 
 #include "time_mmio_register.h"
+#include "../../runtime_log.h"
 
 #include <stdlib.h>
 
@@ -81,6 +82,6 @@ void register_time_mmio(VM *vm) {
     initialize_timer_related(vm);
     if (vm->mmio_count < MAX_MMIO_DEVICES) {
         vm->mmio_devices[vm->mmio_count++] = &time_dev;
-        printf("Registered VM Timer to MMIO ID %d\n", vm->mmio_count);
+        VM_RUNTIME_LOG("Registered VM Timer to MMIO ID %d\n", vm->mmio_count);
     }
 }

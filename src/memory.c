@@ -85,6 +85,52 @@ static int vm_span_is_contiguous(const uint32_t *pa, uint32_t len) {
     return 1;
 }
 
+static uint32_t vm_fb_read32_locked(VM *vm, size_t fb_index) {
+    size_t first_row;
+    size_t last_row;
+    uint32_t value;
+
+    if (fb_index > (size_t)FB_SIZE - sizeof(uint32_t)) {
+        panic(panic_format("READ32 crosses framebuffer boundary at byte 0x%zx", fb_index), vm);
+        return 0u;
+    }
+    first_row = vm_fb_row_from_byte_index(fb_index);
+    last_row = vm_fb_row_from_byte_index(fb_index + sizeof(uint32_t) - 1u);
+    vm_fb_row_lock(vm, first_row);
+    if (last_row != first_row) {
+        vm_fb_row_lock(vm, last_row);
+    }
+    value = load_le32((const uint8_t *)vm->fb + fb_index);
+    if (last_row != first_row) {
+        vm_fb_row_unlock(vm, last_row);
+    }
+    vm_fb_row_unlock(vm, first_row);
+    return value;
+}
+
+static void vm_fb_write32_locked(VM *vm, size_t fb_index, uint32_t value) {
+    size_t first_row;
+    size_t last_row;
+
+    if (fb_index > (size_t)FB_SIZE - sizeof(uint32_t)) {
+        panic(panic_format("WRITE32 crosses framebuffer boundary at byte 0x%zx", fb_index), vm);
+        return;
+    }
+    first_row = vm_fb_row_from_byte_index(fb_index);
+    last_row = vm_fb_row_from_byte_index(fb_index + sizeof(uint32_t) - 1u);
+    vm_fb_row_lock(vm, first_row);
+    if (last_row != first_row) {
+        vm_fb_row_lock(vm, last_row);
+    }
+    store_le32((uint8_t *)vm->fb + fb_index, value);
+    vm_fb_mark_row_dirty(vm, first_row);
+    if (last_row != first_row) {
+        vm_fb_mark_row_dirty(vm, last_row);
+        vm_fb_row_unlock(vm, last_row);
+    }
+    vm_fb_row_unlock(vm, first_row);
+}
+
 static _Atomic uint32_t *atomic32_ptr_from_va_or_panic(VM *vm,
                                                         vm_addr_t addr,
                                                         uint32_t access,
@@ -127,9 +173,10 @@ uint8_t vm_read8(VM *vm, vm_addr_t addr) {
         return 0u;
     }
     if (fb_byte_index(vm, pa, &fb_index)) {
-        vm_shared_lock(vm);
+        const size_t row = vm_fb_row_from_byte_index(fb_index);
+        vm_fb_row_lock(vm, row);
         uint8_t v = ((uint8_t *) vm->fb)[fb_index];
-        vm_shared_unlock(vm);
+        vm_fb_row_unlock(vm, row);
         return v;
     }
     if (!in_ram(vm, pa, 1)) {
@@ -146,6 +193,10 @@ uint32_t vm_read32(VM *vm, vm_addr_t addr) {
     memcheck_align(vm, addr, 4, "READ32");
 #endif
     if (vm_translate_contiguous_span_or_panic(vm, addr, 4u, VM_MMU_ACC_READ, "READ32", &pa_base)) {
+        size_t fb_index = 0u;
+        if (fb_byte_index(vm, pa_base, &fb_index)) {
+            return vm_fb_read32_locked(vm, fb_index);
+        }
         MMIO_Device *dev = find_mmio(vm, pa_base);
         if (dev) {
             vm_shared_lock(vm);
@@ -164,6 +215,10 @@ uint32_t vm_read32(VM *vm, vm_addr_t addr) {
     }
 
     if (vm_span_is_contiguous(pa, 4u)) {
+        size_t fb_index = 0u;
+        if (fb_byte_index(vm, pa[0], &fb_index)) {
+            return vm_fb_read32_locked(vm, fb_index);
+        }
         MMIO_Device *dev = find_mmio(vm, pa[0]);
         if (dev) {
             vm_shared_lock(vm);
@@ -275,9 +330,11 @@ void vm_write8(VM *vm, vm_addr_t addr, uint8_t value) {
         return;
     }
     if (fb_byte_index(vm, pa, &fb_index)) {
-        vm_shared_lock(vm);
+        const size_t row = vm_fb_row_from_byte_index(fb_index);
+        vm_fb_row_lock(vm, row);
         ((uint8_t *) vm->fb)[fb_index] = value;
-        vm_shared_unlock(vm);
+        vm_fb_mark_row_dirty(vm, row);
+        vm_fb_row_unlock(vm, row);
         return;
     }
 
@@ -296,6 +353,11 @@ void vm_write32(VM *vm, vm_addr_t addr, uint32_t value) {
     memcheck_align(vm, addr, 4, "WRITE32");
 #endif
     if (vm_translate_contiguous_span_or_panic(vm, addr, 4u, VM_MMU_ACC_WRITE, "WRITE32", &pa_base)) {
+        size_t fb_index = 0u;
+        if (fb_byte_index(vm, pa_base, &fb_index)) {
+            vm_fb_write32_locked(vm, fb_index, value);
+            return;
+        }
         MMIO_Device *dev = find_mmio(vm, pa_base);
         if (dev && dev->write32) {
             vm_shared_lock(vm);
@@ -315,6 +377,11 @@ void vm_write32(VM *vm, vm_addr_t addr, uint32_t value) {
     }
 
     if (vm_span_is_contiguous(pa, 4u)) {
+        size_t fb_index = 0u;
+        if (fb_byte_index(vm, pa[0], &fb_index)) {
+            vm_fb_write32_locked(vm, fb_index, value);
+            return;
+        }
         MMIO_Device *dev = find_mmio(vm, pa[0]);
         if (dev && dev->write32) {
             vm_shared_lock(vm);
@@ -369,6 +436,7 @@ uint32_t vm_fetch64_exec(VM *vm, vm_addr_t addr, uint64_t *out_inst) {
     if (!out_inst) {
         return 0u;
     }
+
     if (vm_translate_contiguous_span_or_panic(vm, addr, 8u, VM_MMU_ACC_EXEC, "IFETCH", &pa_base)) {
         if (find_mmio(vm, pa_base)) {
             panic(panic_format("IFETCH from MMIO: 0x%08x", addr), vm);

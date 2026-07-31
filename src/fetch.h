@@ -44,10 +44,9 @@ static inline void vm_decode_inst_cached(VCPU *cpu,
     *imm = entry->imm;
 }
 
-#define FETCH64(vm, op, rd, rs1, rs2, imm)                                                         \
+#define FETCH64(vm, cpu, op, rd, rs1, rs2, imm)                                                    \
     do {                                                                                           \
-        VCPU *cpu = vm_current_cpu((vm));                                                          \
-        if (!cpu) {                                                                                \
+        if (!(cpu)) {                                                                              \
             panic("No active CPU context\n", (vm));                                                \
             return;                                                                                \
         }                                                                                          \

@@ -28,6 +28,7 @@
 #define NAT_TCP_MAX   32
 #define NAT_UDP_MAX   16
 #define NAT_TCP_MSS   1460
+#define NAT_RX_QUEUE_LEN 16
 
 enum {
     NAT_CONNECT_TIMEOUT_MS = 1000,
@@ -93,9 +94,16 @@ typedef struct {
 } udp_map_t;
 
 typedef struct {
+    uint16_t len;
+    uint8_t data[NAT_MTU];
+} nat_rx_frame_t;
+
+typedef struct {
     uint8_t mac[6];
-    uint8_t rx_buf[NAT_MTU];
-    int rx_len;
+    nat_rx_frame_t rx_queue[NAT_RX_QUEUE_LEN];
+    uint32_t rx_head;
+    uint32_t rx_tail;
+    uint32_t rx_count;
 
     tcp_conn_t tcp[NAT_TCP_MAX];
     udp_map_t udp[NAT_UDP_MAX];
@@ -176,6 +184,34 @@ static int nat_set_nonblock(int fd) {
 
 static uint32_t nat_make_ip(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
     return ((uint32_t) a << 24) | ((uint32_t) b << 16) | ((uint32_t) c << 8) | d;
+}
+
+static int nat_rx_enqueue(nat_state_t *ns, const uint8_t *frame, int len) {
+    if (!ns || !frame || len <= 0 || len > NAT_MTU) return -1;
+    if (ns->rx_count >= NAT_RX_QUEUE_LEN) {
+        if (ether_trace_enabled()) {
+            fprintf(stderr, "[NAT] RX queue full, dropping frame len=%d\n", len);
+        }
+        return -1;
+    }
+    nat_rx_frame_t *slot = &ns->rx_queue[ns->rx_tail];
+    memcpy(slot->data, frame, (size_t)len);
+    slot->len = (uint16_t)len;
+    ns->rx_tail = (ns->rx_tail + 1u) % NAT_RX_QUEUE_LEN;
+    ns->rx_count++;
+    return 0;
+}
+
+static int nat_rx_dequeue(nat_state_t *ns, uint8_t *frame, uint32_t max) {
+    if (!ns || !frame || ns->rx_count == 0u) return 0;
+    nat_rx_frame_t *slot = &ns->rx_queue[ns->rx_head];
+    uint32_t len = slot->len;
+    uint32_t copied = len > max ? max : len;
+    memcpy(frame, slot->data, copied);
+    slot->len = 0u;
+    ns->rx_head = (ns->rx_head + 1u) % NAT_RX_QUEUE_LEN;
+    ns->rx_count--;
+    return (int)copied;
 }
 
 /* ---- ARP handler ---- */
@@ -713,7 +749,9 @@ static int nat_init(void *state, const uint8_t mac[6]) {
     ns->guest_ip = nat_make_ip(10, 0, 2, 15);
     ns->dns_ip = nat_make_ip(10, 0, 2, 3);
     ns->netmask = nat_make_ip(255, 255, 255, 0);
-    ns->rx_len = 0;
+    ns->rx_head = 0u;
+    ns->rx_tail = 0u;
+    ns->rx_count = 0u;
     for (int i = 0; i < NAT_TCP_MAX; i++) {
         ns->tcp[i].fd = -1;
         ns->tcp[i].state = NAT_TCP_CLOSED;
@@ -727,105 +765,92 @@ static int nat_send(void *state, const uint8_t *frame, uint32_t len) {
     uint8_t reply[NAT_MTU];
     int rlen = 0;
     if (nat_handle_frame(ns, frame, (int) len, reply, &rlen)) {
-        /* Store reply to be picked up by recv */
-        if (rlen <= NAT_MTU && ns->rx_len == 0) {
-            memcpy(ns->rx_buf, reply, rlen);
-            ns->rx_len = rlen;
-        }
+        return nat_rx_enqueue(ns, reply, rlen);
     }
     return 0;
 }
 
 static int nat_recv(void *state, uint8_t *frame, uint32_t max) {
-    nat_state_t *ns = (nat_state_t *) state;
-    if (ns->rx_len <= 0) return 0;
-    uint32_t n = (uint32_t) ns->rx_len;
-    if (n > max) n = max;
-    memcpy(frame, ns->rx_buf, n);
-    ns->rx_len = 0;
-    return (int) n;
+    return nat_rx_dequeue((nat_state_t *)state, frame, max);
 }
 
 static void nat_poll(void *state) {
     nat_state_t *ns = (nat_state_t *) state;
     uint8_t dummy[NAT_MTU];
     int dlen = 0;
-    /* Poll all TCP connections for incoming data, store to ns->rx_buf */
+    /* Poll remote sockets first, then queue ready frames for the guest. */
     nat_tcp_poll_all(ns, dummy, &dlen);
-    /* If any TCP conn has data, build a reply into ns->rx_buf */
-    if (ns->rx_len == 0) {
-        for (int i = 0; i < NAT_TCP_MAX; i++) {
-            tcp_conn_t *c = &ns->tcp[i];
-            if ((c->state == NAT_TCP_CONNECTED && c->rx_len > 0) || c->state == NAT_TCP_CLOSING) {
-                /* Build push packet to guest */
-                uint8_t segment[NAT_MTU];
-                struct tcphdr *push = (struct tcphdr *)segment;
-                int copy = (c->state == NAT_TCP_CLOSING) ? 0 : c->rx_len;
-                int seg_len;
-                if ((int)sizeof(struct tcphdr) + copy > NAT_MTU) {
-                    copy = NAT_MTU - (int)sizeof(struct tcphdr);
-                }
-                memset(push, 0, sizeof(*push));
-                push->th_sport = htons(c->remote_port);
-                push->th_dport = htons(c->guest_port);
-                push->th_seq = htonl(c->remote_seq);
-                push->th_ack = htonl(c->guest_ack);
-                push->th_flags = TH_ACK | (copy > 0 ? TH_PUSH : TH_FIN);
-                push->th_off = 5;
-                push->th_win = htons(65535);
-                if (copy > 0) {
-                    memcpy(segment + sizeof(struct tcphdr), c->rx_buf, (size_t)copy);
-                }
-                seg_len = (int)sizeof(struct tcphdr) + copy;
-                nat_build_ip_eth(ns->rx_buf, c->guest_mac, ns->gw_mac,
-                                 c->remote_ip, c->guest_ip,
-                                 IPPROTO_TCP, segment, seg_len);
-                ns->rx_len = (int)sizeof(eth_hdr_t) + (int)sizeof(struct ip) + seg_len;
-                if (ether_trace_enabled()) {
-                    fprintf(stderr, "[NAT tcp] deliver guest_port=%u payload=%d flags=0x%02x frame=%d\n",
-                            c->guest_port, copy, push->th_flags, ns->rx_len);
-                }
-                c->remote_seq += (uint32_t) copy;
-                if (c->state == NAT_TCP_CLOSING) {
-                    c->remote_seq++;
-                    nat_tcp_close(c);
-                }
-                c->rx_len = 0;
-                break;
+    for (int i = 0; i < NAT_TCP_MAX && ns->rx_count < NAT_RX_QUEUE_LEN; i++) {
+        tcp_conn_t *c = &ns->tcp[i];
+        if ((c->state == NAT_TCP_CONNECTED && c->rx_len > 0) || c->state == NAT_TCP_CLOSING) {
+            uint8_t segment[NAT_MTU];
+            uint8_t frame[NAT_MTU];
+            struct tcphdr *push = (struct tcphdr *)segment;
+            int copy = (c->state == NAT_TCP_CLOSING) ? 0 : c->rx_len;
+            int seg_len;
+            int frame_len;
+            if ((int)sizeof(struct tcphdr) + copy > NAT_MTU) {
+                copy = NAT_MTU - (int)sizeof(struct tcphdr);
             }
+            memset(push, 0, sizeof(*push));
+            push->th_sport = htons(c->remote_port);
+            push->th_dport = htons(c->guest_port);
+            push->th_seq = htonl(c->remote_seq);
+            push->th_ack = htonl(c->guest_ack);
+            push->th_flags = TH_ACK | (copy > 0 ? TH_PUSH : TH_FIN);
+            push->th_off = 5;
+            push->th_win = htons(65535);
+            if (copy > 0) {
+                memcpy(segment + sizeof(struct tcphdr), c->rx_buf, (size_t)copy);
+            }
+            seg_len = (int)sizeof(struct tcphdr) + copy;
+            nat_build_ip_eth(frame, c->guest_mac, ns->gw_mac,
+                             c->remote_ip, c->guest_ip,
+                             IPPROTO_TCP, segment, seg_len);
+            frame_len = (int)sizeof(eth_hdr_t) + (int)sizeof(struct ip) + seg_len;
+            if (nat_rx_enqueue(ns, frame, frame_len) != 0) break;
+            if (ether_trace_enabled()) {
+                fprintf(stderr, "[NAT tcp] queue guest_port=%u payload=%d flags=0x%02x frame=%d depth=%u\n",
+                        c->guest_port, copy, push->th_flags, frame_len, ns->rx_count);
+            }
+            c->remote_seq += (uint32_t)copy;
+            if (c->state == NAT_TCP_CLOSING) {
+                c->remote_seq++;
+                nat_tcp_close(c);
+            }
+            c->rx_len = 0;
         }
     }
-    if (ns->rx_len == 0) {
-        for (int i = 0; i < NAT_UDP_MAX; i++) {
-            udp_map_t *u = &ns->udp[i];
-            if (u->fd < 0 || u->guest_port == 0u) continue;
-            u->rx_from_len = sizeof(u->rx_from);
-            u->rx_len = (int)recvfrom(u->fd, u->rx_buf, NAT_MTU - 64, 0,
-                                      (struct sockaddr *)&u->rx_from, &u->rx_from_len);
-            if (u->rx_len <= 0) {
-                if (u->rx_len < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-                    close(u->fd);
-                    u->fd = -1;
-                }
-                u->rx_len = 0;
-                continue;
+    for (int i = 0; i < NAT_UDP_MAX && ns->rx_count < NAT_RX_QUEUE_LEN; i++) {
+        udp_map_t *u = &ns->udp[i];
+        if (u->fd < 0 || u->guest_port == 0u) continue;
+        u->rx_from_len = sizeof(u->rx_from);
+        u->rx_len = (int)recvfrom(u->fd, u->rx_buf, NAT_MTU - 64, 0,
+                                  (struct sockaddr *)&u->rx_from, &u->rx_from_len);
+        if (u->rx_len <= 0) {
+            if (u->rx_len < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                close(u->fd);
+                u->fd = -1;
             }
-
-            uint8_t segment[NAT_MTU];
-            struct udphdr *resp = (struct udphdr *)segment;
-            int seg_len = (int)sizeof(struct udphdr) + u->rx_len;
-            memset(resp, 0, sizeof(*resp));
-            resp->uh_sport = htons(u->remote_port);
-            resp->uh_dport = htons(u->guest_port);
-            resp->uh_ulen = htons((uint16_t)seg_len);
-            memcpy(segment + sizeof(struct udphdr), u->rx_buf, (size_t)u->rx_len);
-            nat_build_ip_eth(ns->rx_buf, u->guest_mac, ns->gw_mac,
-                             u->remote_ip, u->guest_ip,
-                             IPPROTO_UDP, segment, seg_len);
-            ns->rx_len = (int)sizeof(eth_hdr_t) + (int)sizeof(struct ip) + seg_len;
             u->rx_len = 0;
-            break;
+            continue;
         }
+
+        uint8_t segment[NAT_MTU];
+        uint8_t frame[NAT_MTU];
+        struct udphdr *resp = (struct udphdr *)segment;
+        int seg_len = (int)sizeof(struct udphdr) + u->rx_len;
+        int frame_len = (int)sizeof(eth_hdr_t) + (int)sizeof(struct ip) + seg_len;
+        memset(resp, 0, sizeof(*resp));
+        resp->uh_sport = htons(u->remote_port);
+        resp->uh_dport = htons(u->guest_port);
+        resp->uh_ulen = htons((uint16_t)seg_len);
+        memcpy(segment + sizeof(struct udphdr), u->rx_buf, (size_t)u->rx_len);
+        nat_build_ip_eth(frame, u->guest_mac, ns->gw_mac,
+                         u->remote_ip, u->guest_ip,
+                         IPPROTO_UDP, segment, seg_len);
+        (void)nat_rx_enqueue(ns, frame, frame_len);
+        u->rx_len = 0;
     }
 }
 

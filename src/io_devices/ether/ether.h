@@ -29,6 +29,10 @@ enum {
 
 #define ETHER_MTU 2048u
 
+/* Lamp virtual PCI Ethernet endpoint at 00:01.0. */
+#define ETHER_PCI_DEVICE_ID 0x1000u
+#define ETHER_PCI_BAR_SIZE  0x1000u
+
 /* Forward declaration */
 typedef struct VM VM;
 typedef struct ether_backend ether_backend_t;

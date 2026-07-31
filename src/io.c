@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #define SERIAL_RX_FIFO_MASK 0xFFu
+#define SERIAL_TX_FIFO_MASK 0x1FFFu
 #define PS2_LEGACY_FIFO_MASK 0xFFu
 #define PS2_OUT_FIFO_MASK 0x1FFu
 
@@ -213,15 +214,29 @@ static void ps2_mouse_command_locked(VM *vm, uint8_t value) {
 static void fb_accel_scroll_up_locked(VM *vm, uint32_t clear_color) {
     const size_t line_pixels = (size_t)FB_WIDTH * 8u;
     const size_t move_pixels = (size_t)FB_WIDTH * ((size_t)FB_HEIGHT - 8u);
+    for (size_t row = 0; row < FB_HEIGHT; row++) {
+        vm_fb_row_lock(vm, row);
+    }
     memmove(vm->fb, vm->fb + line_pixels, move_pixels * sizeof(uint32_t));
     for (size_t i = move_pixels; i < (size_t)FB_WIDTH * (size_t)FB_HEIGHT; i++) {
         vm->fb[i] = clear_color;
     }
+    vm_fb_mark_all_dirty(vm);
+    for (size_t row = FB_HEIGHT; row > 0; row--) {
+        vm_fb_row_unlock(vm, row - 1u);
+    }
 }
 
 static void fb_accel_clear_locked(VM *vm, uint32_t color) {
+    for (size_t row = 0; row < FB_HEIGHT; row++) {
+        vm_fb_row_lock(vm, row);
+    }
     for (size_t i = 0; i < (size_t)FB_WIDTH * (size_t)FB_HEIGHT; i++) {
         vm->fb[i] = color;
+    }
+    vm_fb_mark_all_dirty(vm);
+    for (size_t row = FB_HEIGHT; row > 0; row--) {
+        vm_fb_row_unlock(vm, row - 1u);
     }
 }
 
@@ -259,6 +274,18 @@ uint8_t vm_ps2_read_data(VM *vm) {
     return value;
 }
 
+void vm_ps2_reassert_irq(VM *vm) {
+    if (!vm) {
+        return;
+    }
+    vm_shared_lock(vm);
+    /* PS/2 output is a level source: completing an ISR must not lose data
+     * that arrived between the handler's final read and its INTC EOI. */
+    ps2_update_status_locked(vm);
+    ps2_raise_front_irq_locked(vm);
+    vm_shared_unlock(vm);
+}
+
 int vm_serial_rx_enqueue(VM *vm, uint8_t c) {
     if (!vm) {
         return 0;
@@ -293,7 +320,44 @@ int vm_serial_rx_enqueue(VM *vm, uint8_t c) {
     return 1;
 }
 
+int vm_serial_tx_enqueue(VM *vm, uint8_t c) {
+    uint16_t head;
+    uint16_t next;
+
+    if (!vm) {
+        return 0;
+    }
+    vm_shared_lock(vm);
+    head = vm->serial_tx_head;
+    next = (uint16_t)((head + 1u) & SERIAL_TX_FIFO_MASK);
+    if (next == vm->serial_tx_tail) {
+        vm->serial_tx_dropped++;
+        vm_shared_unlock(vm);
+        return 0;
+    }
+    vm->serial_tx_fifo[head] = c;
+    vm->serial_tx_head = next;
+    vm_shared_unlock(vm);
+    return 1;
+}
+
+int vm_serial_tx_dequeue(VM *vm, uint8_t *c) {
+    if (!vm || !c) {
+        return 0;
+    }
+    vm_shared_lock(vm);
+    if (vm->serial_tx_tail == vm->serial_tx_head) {
+        vm_shared_unlock(vm);
+        return 0;
+    }
+    *c = vm->serial_tx_fifo[vm->serial_tx_tail];
+    vm->serial_tx_tail = (uint16_t)((vm->serial_tx_tail + 1u) & SERIAL_TX_FIFO_MASK);
+    vm_shared_unlock(vm);
+    return 1;
+}
+
 int vm_ps2_kbd_enqueue(VM *vm, uint8_t c) {
+    int queued = 0;
     if (!vm) {
         return 0;
     }
@@ -304,31 +368,30 @@ int vm_ps2_kbd_enqueue(VM *vm, uint8_t c) {
         const uint16_t head = vm->ps2_kbd_head;
         const uint16_t tail = vm->ps2_kbd_tail;
         const uint16_t next = (uint16_t)((head + 1u) & PS2_LEGACY_FIFO_MASK);
-        if (next == tail) {
-            vm_shared_unlock(vm);
-            return 0;
-        }
+        if (next != tail) {
+            const int was_empty = (head == tail);
+            vm->ps2_kbd_fifo[head] = c;
+            vm->ps2_kbd_head = next;
+            queued = 1;
 
-        const int was_empty = (head == tail);
-        vm->ps2_kbd_fifo[head] = c;
-        vm->ps2_kbd_head = next;
-
-        if (was_empty) {
-            vm->io[PS2_KBD_DATA] = (int)vm->ps2_kbd_fifo[tail];
-            vm->io[PS2_KBD_STATUS] |= PS2_STATUS_RX_READY;
-            trigger_interrupt(vm, INT_KEYBOARD);
+            if (was_empty) {
+                vm->io[PS2_KBD_DATA] = (int)vm->ps2_kbd_fifo[tail];
+                vm->io[PS2_KBD_STATUS] |= PS2_STATUS_RX_READY;
+                trigger_interrupt(vm, INT_KEYBOARD);
+            }
         }
         if (vm->ps2_kbd_enabled != 0u && vm->ps2_kbd_scanning != 0u &&
             (vm->ps2_config & PS2_CONFIG_FIRST_DISABLED) == 0u) {
-            (void)ps2_output_push_locked(vm, c, 0u, 1u);
+            queued |= ps2_output_push_locked(vm, c, 0u, 1u);
         }
     }
 
     vm_shared_unlock(vm);
-    return 1;
+    return queued;
 }
 
 int vm_ps2_mouse_enqueue(VM *vm, uint8_t c) {
+    int queued = 0;
     if (!vm) {
         return 0;
     }
@@ -339,28 +402,26 @@ int vm_ps2_mouse_enqueue(VM *vm, uint8_t c) {
         const uint16_t head = vm->ps2_mouse_head;
         const uint16_t tail = vm->ps2_mouse_tail;
         const uint16_t next = (uint16_t)((head + 1u) & PS2_LEGACY_FIFO_MASK);
-        if (next == tail) {
-            vm_shared_unlock(vm);
-            return 0;
-        }
+        if (next != tail) {
+            const int was_empty = (head == tail);
+            vm->ps2_mouse_fifo[head] = c;
+            vm->ps2_mouse_head = next;
+            queued = 1;
 
-        const int was_empty = (head == tail);
-        vm->ps2_mouse_fifo[head] = c;
-        vm->ps2_mouse_head = next;
-
-        if (was_empty) {
-            vm->io[PS2_MOUSE_DATA] = (int)vm->ps2_mouse_fifo[tail];
-            vm->io[PS2_MOUSE_STATUS] |= PS2_STATUS_RX_READY;
-            trigger_interrupt(vm, INT_MOUSE);
+            if (was_empty) {
+                vm->io[PS2_MOUSE_DATA] = (int)vm->ps2_mouse_fifo[tail];
+                vm->io[PS2_MOUSE_STATUS] |= PS2_STATUS_RX_READY;
+                trigger_interrupt(vm, INT_MOUSE);
+            }
         }
         if (vm->ps2_mouse_enabled != 0u && vm->ps2_mouse_reporting != 0u &&
             (vm->ps2_config & PS2_CONFIG_SECOND_DISABLED) == 0u) {
-            (void)ps2_output_push_locked(vm, c, 1u, 1u);
+            queued |= ps2_output_push_locked(vm, c, 1u, 1u);
         }
     }
 
     vm_shared_unlock(vm);
-    return 1;
+    return queued;
 }
 
 void accept_io(VM *vm, const int addr, const int value) {
@@ -371,7 +432,11 @@ void accept_io(VM *vm, const int addr, const int value) {
     switch (addr) {
     case SCREEN: {
         unsigned char c = (unsigned char)value;
-        write(STDOUT_FILENO, &c, 1);
+        if (vm->serial_window_enabled) {
+            (void)vm_serial_tx_enqueue(vm, c);
+        } else {
+            (void)write(STDOUT_FILENO, &c, 1);
+        }
         vm->io[SCREEN] = value;
         break;
     }

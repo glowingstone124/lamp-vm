@@ -6,7 +6,7 @@
 #include "vm.h"
 
 #define BSP_CORE 0
-void vm_handle_interrupts(VM *vm);
+void vm_handle_interrupts(VM *vm, VCPU *cpu);
 void init_ivt(VM *vm);
 void register_isr(VM *vm, uint32_t int_no, uint64_t isr_ip);
 void trigger_interrupt(VM *vm, uint32_t int_no);
@@ -31,6 +31,8 @@ typedef enum InterruptNo {
     INT_TIMER           = 0x04,
     INT_MOUSE           = 0x05,
     INT_ETHER           = 0x06,
+    INT_GPU             = 0x07,
+    INT_AUDIO           = 0x08,
 } InterruptNo;
 
 #endif // VM_INTERRUPT_H

@@ -11,6 +11,7 @@
 #include "arpa/inet.h"
 #include "errno.h"
 #include "panic.h"
+#include "runtime_log.h"
 #include "netinet/in.h"
 #include "signal.h"
 #include "stdint.h"
@@ -229,8 +230,9 @@ static int send_framebuffer_update(
 
     int native_format = vnc_format_is_native(format);
     for (uint16_t row = 0; row < h; row++) {
-        uint32_t *line = &vm->fb[(size_t)(y + row) * FB_WIDTH + x];
-        vm_shared_lock(vm);
+        const size_t fb_row = (size_t)y + row;
+        uint32_t *line = &vm->fb[fb_row * FB_WIDTH + x];
+        vm_fb_row_lock(vm, fb_row);
         if (native_format) {
             memcpy(row_buffer, line, row_bytes);
         } else {
@@ -238,7 +240,7 @@ static int send_framebuffer_update(
                 encode_pixel(row_buffer + (size_t) col * (size_t) bytes_per_pixel, line[col], format);
             }
         }
-        vm_shared_unlock(vm);
+        vm_fb_row_unlock(vm, fb_row);
         if (write_exact(client_fd, row_buffer, row_bytes) < 0) {
             free(row_buffer);
             return -1;
@@ -283,7 +285,7 @@ static int handle_client(VM *vm, int client_fd) {
         uint8_t type;
         r = read_exact(client_fd, &type, 1);
         if (r == 0) {
-            printf("Client disconnected\n");
+            VM_RUNTIME_LOG("VNC client disconnected\n");
             return 0;
         }
         if (r < 0) return -1;
@@ -416,7 +418,7 @@ static void *vnc_main(void *arg) {
         return NULL;
     }
 
-    printf("vnc_main: listening for connections on port %u\n", VNC_PORT);
+    VM_RUNTIME_LOG("VNC server listening on port %u\n", VNC_PORT);
     while (1) {
         struct sockaddr_in client_addr;
         socklen_t client_addr_len = sizeof(client_addr);
@@ -427,12 +429,12 @@ static void *vnc_main(void *arg) {
             continue;
         }
 
-        printf("Client connected\n");
+        VM_RUNTIME_LOG("VNC client connected\n");
 
         handle_client(vm, client_fd);
 
         close(client_fd);
-        printf("Client disconnected\n");
+        VM_RUNTIME_LOG("VNC client disconnected\n");
     }
     close(server_fd);
 }

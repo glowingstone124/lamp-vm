@@ -4,12 +4,7 @@
 
 #ifndef VM_DISPLAY_H
 #define VM_DISPLAY_H
-#define SDL_DISABLE_IMMINTRIN_H
-#define SDL_DISABLE_MM3DNOW_H
-#define SDL_DISABLE_MMINTRIN_H
-#define SDL_DISABLE_XMMINTRIN_H
-#define SDL_DISABLE_EMMINTRIN_H
-#include <SDL2/SDL_render.h>
+#include <SDL3/SDL_render.h>
 #include "../../vm.h"
 typedef struct {
     uint32_t *vram;
@@ -19,8 +14,7 @@ typedef struct {
     SDL_Renderer *renderer;
     SDL_Texture *texture;
 } display;
-int vga_display_init(void);
-void display_set_serial_console_mode(int enabled);
+int display_init(VM *vm, int serial_window_enabled);
 void display_poll_events(VM *vm);
 void display_update(VM *vm);
 void display_shutdown(void);

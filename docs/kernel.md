@@ -38,15 +38,22 @@ Current kernel target in this repository:
 - `include/kernel/spinlock.h`: lock primitive API
 - `include/kernel/blk.h`: synchronous block I/O API over disk MMIO
 - `include/kernel/iommu.h`: IOMMU init and DMA address translation API
+- `include/kernel/dma_ring.h`: reusable descriptor/completion ring producer API
+- `include/kernel/gpu.h`: PCI display takeover, completion IRQ, and cursor-plane API
+- `include/kernel/graphics.h`: graphical VM Display ownership and state API
+- `include/kernel/wm.h`: kernel window and PS/2 pointer API
+- `include/kernel/audio.h`: fixed-format PCI PCM DMA API
+- `include/kernel/pci.h`: PCI enumeration results for bound device drivers
 - `include/kernel/mmu.h`: kernel paging setup API
 - `include/kernel/user_exec.h`: temporary user ELF load/spawn API
 - `include/kernel/fs.h`: VFS-like dispatcher API
+- `include/kernel/fs_proc.h`: generated read-only procfs backend API
 - `include/kernel/fs_ext4.h`: ext4 backend API
 - `src/entry.c`: `kernel_entry` and top-level init sequence
 - `src/console.c`: console core (`rx` ring buffer, wait queue, read/write path, no implicit rx echo)
 - `src/init_task.c`: kernel init task (`init$` command loop and runtime controls)
 - `src/trap.c`: trap dispatch + INTC MMIO irq control
-- `src/irq.c`: IRQ handlers (timer/serial/keyboard/disk/syscall/div0)
+- `src/irq.c`: IRQ handlers, including PS/2 keyboard and three-byte mouse decode
 - `src/sched.c`: scheduler core (context switch, stack pool, per-CPU runqueue)
 - `src/sched_task.c`: task lifecycle and wait queue operations
 - `src/sched_fd.c`: per-task fd table and regular-file metadata handling
@@ -56,22 +63,30 @@ Current kernel target in this repository:
 - `src/vm_info.c`: BootInfo decode/log helper
 - `src/spinlock.c`: CAS/LDAR/STLR spinlock implementation
 - `src/blk.c`: blocking disk read/write wrapper
-- `src/iommu.c`: IOMMU capability probe and disk DMA IOVA setup
+- `src/iommu.c`: IOMMU capability probe and shared DMA IOVA setup
+- `src/dma_ring.c`: reusable DMA submission and completion ownership logic
+- `src/pci.c`: bus-0 enumeration, BAR allocation, and MSI programming
+- `src/gpu.c`: PCI framebuffer validation and firmware-console takeover
+- `src/graphics.c`: graphical ownership shim that starts the window manager
+- `src/wm.c`: double-buffered kernel compositor, window model, and cursor policy
+- `src/audio.c`: 48 kHz S16 stereo DMA-ring playback driver
 - `src/mmu.c`: early paging init and identity map bring-up
 - `src/user_exec.c`: user ELF loader (`ext4`) + initial user stack builder + temporary launcher task entry
-- `src/fs.c`: fs dispatch (`/dev/*` + ext4)
+- `src/fs.c`: fs dispatch (`/dev/*` + procfs + ext4)
+- `src/fs_proc.c`: generated runtime, scheduler, and memory status files
 - `src/fs_ext4.c`: ext4 mount/lookup/read/write backend
 
 ## Boot Sequence
 
 `kernel_entry` currently performs:
 
-1. console + logging init
+1. firmware console, MMU, and IOMMU init
 2. trap/IRQ + syscall init
-3. SMP BSP init
-4. scheduler init
-5. block/fs init and init task spawn
-6. AP startup and scheduler run loop
+3. PCI enumeration and display/audio/Ethernet driver binding
+4. graphical VM Display takeover; terminal traffic remains on serial
+5. SMP BSP init
+6. scheduler and block/fs init, then init task spawn
+7. AP startup and scheduler run loop
 
 ## Scheduler Status
 
@@ -89,6 +104,30 @@ Current notes:
 - task switch saves/restores task-local runtime context (`r31` stack pointer + VM call/data stack state)
 - blocking syscalls (`waitpid/poll/select` paths) can park the current task and resume at the original call site
 - scheduler critical paths are protected with spinlocks
+
+## Virtual Clock and procfs
+
+SYSINFO layout v3 advertises `RUNTIME_STATS` and exposes the configured virtual
+CPU frequency separately from measured interpreter throughput. Clock model v1
+charges one cycle per retired guest instruction, caps each vCPU with a monotonic
+deadline budget, and uses an invariant wall-time-derived cycle counter. It is a
+stable virtual clock contract, not a model of physical pipeline/cache latency.
+
+The read-only procfs backend currently provides:
+
+- `/proc/cpuinfo`: per-core identity, nominal MHz, timer frequency, and cycle model
+- `/proc/meminfo`: guest RAM and conservative kernel/task-stack availability estimates
+- `/proc/uptime`: monotonic VM uptime and scheduler idle time
+- `/proc/stat`: scheduler user/system/idle ticks and task counts
+- `/proc/loadavg`: current runnable tasks per online CPU (not yet historical EMA)
+- `/proc/version`: kernel/procfs version string
+- `/proc/lampvm`: raw frequency, cycles, retired instructions, measured IPS,
+  uptime, guest estimates, host RSS, and task count
+
+`/proc/meminfo` is intentionally labeled as an estimate: the kernel does not yet
+have a page allocator that can report exact free/active/cache page accounting.
+Host RSS is observable separately in `/proc/lampvm` and in the Serial SDL metrics
+line.
 
 ## Syscall ABI (Current)
 
@@ -112,13 +151,20 @@ Note:
 ## IOMMU (Current VM v2)
 
 - VM exposes IOMMU MMIO at `0x0074E000` and advertises `IOMMU_MMIO` in BootInfo/SYSINFO features.
-- Disk and Ethernet DMA paths now go through VM-side IOMMU translation API.
+- Disk, Ethernet, and PCI audio DMA paths go through the VM-side IOMMU translation API.
 - Default compatibility behavior:
   - global IOMMU disabled => DMA address is identity-mapped (legacy behavior)
   - enabled but device entry disabled => identity-mapped
   - enabled + device entry enabled => `iova_base/iova_size/pa_base` window translation is enforced
 - Device entries can also enable `DEV_CTRL_PAGED`, which switches translation to a 2-level 4KB IOVA page table.
-- Kernel DMA now programs paged IOMMU mode for the `0x01000000 + pa` IOVA window on disk and Ethernet device entries.
+- Kernel DMA programs paged IOMMU mode for the `0x01000000 + pa` IOVA window on disk, Ethernet, and audio device entries.
+- Paged IOMMU PTEs now carry explicit DMA permission bits:
+  - `IOMMU_PTE_P`: mapping is present
+  - `IOMMU_PTE_R`: device may read guest memory through this mapping
+  - `IOMMU_PTE_W`: device may write guest memory through this mapping
+- Disk, Ethernet, and audio pass access intent into translation (`READ` for device reads
+  from memory, `WRITE` for device writes into memory), and permission failures
+  are reported with `IOMMU_FAULT_REASON_PERM`.
 - Paged IOMMU translations currently require the requested DMA span to resolve to contiguous physical memory because the disk backend consumes one physical address per request.
 - fault registers record last rejected translation (`dev/iova/len/reason`).
 
@@ -143,6 +189,16 @@ Note:
 
 ## Console Behavior (Current)
 
+- firmware and early-kernel output is mirrored to serial and framebuffer
+- after graphical takeover, logs, stdout/stderr, input, and TTY echo use serial
+  while VM Display remains a kernel-owned graphical desktop
+- VM Display PS/2 keyboard input is reserved in graphics mode and does not feed
+  the shell
+- PS/2 mouse packets are coalesced in the priority-`0xD0` mouse IRQ and move the
+  PCI GPU cursor plane without desktop recomposition; left click raises windows
+- SDL3 relative mode captures the pointer after clicking VM Display, and
+  Control+Command+G on macOS (or Ctrl+Alt+G elsewhere) releases it
+- panic handling restores framebuffer text output
 - default tty local mode: `ECHO|ICANON|ISIG`
 - RX path normalizes `\r` to `\n`
 - RX path handles backspace/delete (`0x08`/`0x7F`) by deleting the latest unread non-newline byte
@@ -184,6 +240,7 @@ Note:
 - `blk` layer provides synchronous sector read/write over disk MMIO command interface
 - `fs_open` dispatch:
   - `/dev/*` -> scheduler special fds
+  - `/proc/*` -> generated read-only procfs files
   - absolute non-`/dev` path -> ext4 backend
 - ext4 backend currently supports:
   - superblock + group descriptor + inode table reads

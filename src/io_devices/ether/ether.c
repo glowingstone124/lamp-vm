@@ -2,7 +2,9 @@
 #include "ether_backend.h"
 #include "ether_trace.h"
 #include "../iommu/iommu_mmio_register.h"
+#include "../pcie/pcie.h"
 #include "../../interrupt.h"
+#include "../../runtime_log.h"
 #include "../../vm.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +19,7 @@ typedef struct {
     uint32_t rx_len;
     uint32_t rx_lo;
     uint32_t status;
+    PciFunction *pci_function;
     int irq;
     int active;
 } ether_state_t;
@@ -40,7 +43,7 @@ static void ether_pump_rx(VM *vm, ether_state_t *e) {
 
     uint32_t len = (uint32_t)n;
     if (len > ETHER_MTU) len = ETHER_MTU;
-    if (!vm_iommu_translate_dma(vm, IOMMU_DEV_ETHER, e->rx_lo, len, &dma_addr)) {
+    if (!vm_iommu_translate_dma_ex(vm, IOMMU_DEV_ETHER, e->rx_lo, len, IOMMU_DMA_WRITE, &dma_addr)) {
         fprintf(stderr, "[ether] IOMMU reject rx iova=0x%08x len=%u\n", e->rx_lo, len);
         return;
     }
@@ -52,14 +55,13 @@ static void ether_pump_rx(VM *vm, ether_state_t *e) {
     memcpy(&vm->memory[(size_t)dma_addr], frame, len);
     e->rx_len = len;
     e->status |= ETHER_STATUS_RX_READY;
+    if (e->pci_function) {
+        pci_notify_irq(vm, e->pci_function);
+    }
 }
 
-/* ---- MMIO read handler ---- */
-static uint32_t ether_mmio_read32(VM *vm, uint32_t addr) {
-    ether_state_t *e = (ether_state_t *)vm->ether;
-    if (!e) return 0;
-    uint32_t off = addr - ETHER_MMIO_BASE;
-
+static uint32_t ether_reg_read32(VM *vm, ether_state_t *e, uint32_t off) {
+    if (!e) return 0u;
     if (off == ETHER_OFF_RX_LEN || off == ETHER_OFF_STATUS) {
         ether_pump_rx(vm, e);
     }
@@ -78,19 +80,15 @@ static uint32_t ether_mmio_read32(VM *vm, uint32_t addr) {
     }
 }
 
-/* ---- MMIO write handler ---- */
-static void ether_mmio_write32(VM *vm, uint32_t addr, uint32_t val) {
-    ether_state_t *e = (ether_state_t *)vm->ether;
+static void ether_reg_write32(VM *vm, ether_state_t *e, uint32_t off, uint32_t val) {
     if (!e) return;
-    uint32_t off = addr - ETHER_MMIO_BASE;
-
     switch (off) {
     case ETHER_OFF_TX_LEN:
         /* TX: copy frame from guest memory, send via backend */
         if (val > 0 && val <= ETHER_MTU && e->backend.send) {
             uint64_t dma_addr = 0u;
             uint8_t frame[ETHER_MTU];
-            if (!vm_iommu_translate_dma(vm, IOMMU_DEV_ETHER, e->tx_lo, val, &dma_addr)) {
+            if (!vm_iommu_translate_dma_ex(vm, IOMMU_DEV_ETHER, e->tx_lo, val, IOMMU_DMA_READ, &dma_addr)) {
                 fprintf(stderr, "[ether] IOMMU reject tx iova=0x%08x len=%u\n", e->tx_lo, val);
                 break;
             }
@@ -114,10 +112,35 @@ static void ether_mmio_write32(VM *vm, uint32_t addr, uint32_t val) {
         }
         e->rx_len = 0;
         e->status &= ~ETHER_STATUS_RX_READY;
+        if (e->pci_function) {
+            e->pci_function->status &= (uint16_t)~PCI_STATUS_INTX;
+        }
         break;
     default:
         break;
     }
+}
+
+/* ---- Legacy fixed-MMIO compatibility window ---- */
+static uint32_t ether_mmio_read32(VM *vm, uint32_t addr) {
+    return ether_reg_read32(vm, (ether_state_t *)vm->ether, addr - ETHER_MMIO_BASE);
+}
+
+static void ether_mmio_write32(VM *vm, uint32_t addr, uint32_t val) {
+    ether_reg_write32(vm, (ether_state_t *)vm->ether, addr - ETHER_MMIO_BASE, val);
+}
+
+/* ---- PCI BAR0 window ---- */
+static uint32_t ether_pci_bar_read32(VM *vm, PciFunction *f,
+                                    uint32_t bar_index, uint32_t offset) {
+    (void)bar_index;
+    return ether_reg_read32(vm, (ether_state_t *)f->cookie, offset);
+}
+
+static void ether_pci_bar_write32(VM *vm, PciFunction *f,
+                                  uint32_t bar_index, uint32_t offset, uint32_t value) {
+    (void)bar_index;
+    ether_reg_write32(vm, (ether_state_t *)f->cookie, offset, value);
 }
 
 /* ---- Public API ---- */
@@ -150,8 +173,25 @@ int ether_init(VM *vm, ether_backend_t *backend) {
     dev.write32 = ether_mmio_write32;
     if (vm->mmio_count < MAX_MMIO_DEVICES) {
         vm->mmio_devices[vm->mmio_count++] = &dev;
-        printf("Registered VM Ether to MMIO ID %d (MAC=%02x:%02x:%02x:%02x:%02x:%02x)\n",
-               vm->mmio_count, e->mac[0],e->mac[1],e->mac[2],e->mac[3],e->mac[4],e->mac[5]);
+        VM_RUNTIME_LOG("Registered VM Ether to MMIO ID %d (MAC=%02x:%02x:%02x:%02x:%02x:%02x)\n",
+                       vm->mmio_count, e->mac[0], e->mac[1], e->mac[2],
+                       e->mac[3], e->mac[4], e->mac[5]);
+    }
+
+    PciFunction *pci_fn = pci_register_function(vm, 1u, 0u,
+                                                 LAMP_PCI_VENDOR_ID, ETHER_PCI_DEVICE_ID,
+                                                 PCI_CLASS_NETWORK, PCI_SUBCLASS_ETHERNET, 0u);
+    if (pci_fn) {
+        pci_configure_bar(vm, pci_fn, 0u, ETHER_PCI_BAR_SIZE, 0u, 0u,
+                          ether_pci_bar_read32, ether_pci_bar_write32,
+                          NULL, e);
+        (void)pci_add_pm_capability(pci_fn);
+        (void)pci_add_msi_capability(pci_fn);
+        (void)pci_add_express_capability(pci_fn, 0u);
+        pci_set_irq_pin(pci_fn, 1u, INT_ETHER);
+        e->pci_function = pci_fn;
+        VM_RUNTIME_LOG("Registered PCI Ethernet at 00:01.0 device=0x%04x\n",
+                       ETHER_PCI_DEVICE_ID);
     }
     return 0;
 }

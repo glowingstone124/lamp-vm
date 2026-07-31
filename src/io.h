@@ -5,10 +5,13 @@
 
 void accept_io(VM *vm, int addr, int value);
 int vm_serial_rx_enqueue(VM *vm, uint8_t c);
+int vm_serial_tx_enqueue(VM *vm, uint8_t c);
+int vm_serial_tx_dequeue(VM *vm, uint8_t *c);
 int vm_ps2_kbd_enqueue(VM *vm, uint8_t c);
 int vm_ps2_mouse_enqueue(VM *vm, uint8_t c);
 uint8_t vm_ps2_read_data(VM *vm);
 uint8_t vm_ps2_read_status(VM *vm);
+void vm_ps2_reassert_irq(VM *vm);
 
 enum IO_TABLE {
     SCREEN = 0x01,

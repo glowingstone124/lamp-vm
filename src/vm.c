@@ -6,7 +6,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sched.h>
-#include <SDL2/SDL_timer.h>
+#include <SDL3/SDL_timer.h>
+#include <SDL3/SDL_thread.h>
 #include <pthread.h>
 
 #include "fetch.h"
@@ -14,17 +15,21 @@
 #include "stack.h"
 #include "io.h"
 #include "panic.h"
+#include "runtime_log.h"
 #include "loadbin.h"
 #include "interrupt.h"
 #include "memory.h"
 #include "io_devices/disk/disk.h"
+#include "io_devices/audio/audio.h"
 #include "io_devices/ether/ether.h"
 #include "io_devices/ether/ether_backend.h"
 #include "io_devices/frame/frame.h"
+#include "io_devices/gpu/gpu.h"
 #include "io_devices/sysinfo/sysinfo_mmio_register.h"
 #include "io_devices/intc/intc_mmio_register.h"
 #include "io_devices/iommu/iommu_mmio_register.h"
 #include "io_devices/mmu/mmu_mmio_register.h"
+#include "io_devices/pcie/pcie.h"
 #include "io_devices/time/time_mmio_register.h"
 #include "io_devices/vga_display/display.h"
 #include "io_devices/vga_display/vga_mmio_register.h"
@@ -36,16 +41,40 @@
 
 const size_t MEM_SIZE = 1048576 * 64; // 64MB
 enum { EXECUTION_TIMES_FLUSH_INTERVAL = 1024 };
-enum { DEVICE_POLL_INTERVAL = 256 };
+enum { DEVICE_POLL_CHECK_INTERVAL = 2048 };
+enum { DEVICE_POLL_PERIOD_NS = 1000000 };
+enum { DISPLAY_TARGET_HZ = 120 };
+enum { CPU_PACE_TARGET_NS = 250000 };
+enum { CPU_PACE_MIN_QUANTUM = 64 };
+enum { CPU_PACE_MAX_QUANTUM = 16384 };
+enum { CPU_PACE_REBASE_NS = 2000000 };
 
 typedef struct {
     VM *vm;
     int core_id;
 } CpuThreadArg;
 
-typedef struct {
-    VM *vm;
-} SerialConsoleArg;
+static void vm_build_mmio_page_map(VM *vm) {
+    if (!vm) {
+        return;
+    }
+    memset(vm->mmio_page_map, 0, sizeof(vm->mmio_page_map));
+    for (int i = 0; i < vm->mmio_count; i++) {
+        const MMIO_Device *dev = vm->mmio_devices[i];
+        uint32_t first_page;
+        uint32_t last_page;
+        if (!dev) {
+            continue;
+        }
+        first_page = dev->start >> VM_MMIO_PAGE_SHIFT;
+        last_page = dev->end >> VM_MMIO_PAGE_SHIFT;
+        for (uint32_t page = first_page; page <= last_page; page++) {
+            vm->mmio_page_map[page >> 3u] |=
+                (uint8_t)(1u << (page & 7u));
+        }
+    }
+    vm->mmio_page_map_ready = 1u;
+}
 
 _Thread_local VCPU *vm_tls_vcpu = NULL;
 volatile int g_vfork_trace_steps[32];
@@ -149,14 +178,10 @@ static inline int vm_stack_region_valid(const VM *vm, vm_addr_t base, size_t byt
 }
 
 static inline void vm_irq_ack_input(VM *vm, uint32_t int_no) {
-    if (!vm || !vm->interrupt_bitmap || int_no >= IVT_SIZE) {
+    if (!vm || int_no >= IVT_SIZE) {
         return;
     }
-    {
-        const size_t word_idx = ((size_t)int_no >> 6);
-        const uint_fast64_t bit = (uint_fast64_t)(1ULL << (int_no & 63u));
-        atomic_fetch_and(&vm->interrupt_bitmap[word_idx], ~bit);
-    }
+    vm_interrupt_eoi(vm, BSP_CORE, int_no);
 }
 
 static inline vm_addr_t rel_target_from_last_ip(const VCPU *cpu, int32_t imm) {
@@ -181,13 +206,12 @@ static inline uint32_t rotr32(uint32_t v, uint32_t sh) {
     return (v >> sh) | (v << (32u - sh));
 }
 
-void vm_instruction_case(VM *vm) {
-    VCPU *cpu = vm_current_cpu(vm);
+void vm_instruction_case(VM *vm, VCPU *cpu) {
     if (!cpu)
         return;
     uint8_t op, rd, rs1, rs2;
     int32_t imm;
-    FETCH64(vm, op, rd, rs1, rs2, imm);
+    FETCH64(vm, cpu, op, rd, rs1, rs2, imm);
     if (cpu->core_id >= 0 && cpu->core_id < 32 && g_vfork_trace_steps[cpu->core_id] > 0) {
         g_vfork_trace_steps[cpu->core_id]--;
         fprintf(stderr,
@@ -1160,122 +1184,145 @@ static inline void vm_flush_execution_times(VCPU *cpu, uint64_t *local_cycles) {
     *local_cycles = 0;
 }
 
+static uint64_t vm_cpu_cycles_to_ns(uint64_t cycles, uint64_t frequency_hz) {
+    const uint64_t seconds = cycles / frequency_hz;
+    const uint64_t remainder = cycles % frequency_hz;
+    return seconds * 1000000000ull +
+           (remainder * 1000000000ull) / frequency_hz;
+}
+
+static uint32_t vm_cpu_pace_quantum(uint64_t frequency_hz) {
+    uint64_t quantum = frequency_hz /
+                       (1000000000ull / CPU_PACE_TARGET_NS);
+    if (quantum < CPU_PACE_MIN_QUANTUM) {
+        quantum = CPU_PACE_MIN_QUANTUM;
+    }
+    if (quantum > CPU_PACE_MAX_QUANTUM) {
+        quantum = CPU_PACE_MAX_QUANTUM;
+    }
+    return (uint32_t)quantum;
+}
+
+static void vm_pace_cpu(VM *vm, uint64_t *epoch_ns,
+                        uint64_t *paced_cycles) {
+    uint64_t now_ns;
+    uint64_t deadline_ns;
+    if (!vm || !epoch_ns || !paced_cycles || vm->cpu_frequency_hz == 0u) {
+        return;
+    }
+    now_ns = host_monotonic_time_ns();
+    deadline_ns = *epoch_ns +
+        vm_cpu_cycles_to_ns(*paced_cycles, vm->cpu_frequency_hz);
+    if (deadline_ns > now_ns) {
+        SDL_DelayPrecise(deadline_ns - now_ns);
+    } else if (now_ns - deadline_ns > CPU_PACE_REBASE_NS) {
+        /* A debugger stop or a host scheduling stall must not create a large
+         * catch-up burst. Start a fresh execution budget at current time. */
+        *epoch_ns = now_ns;
+        *paced_cycles = 0u;
+    }
+}
+
 void *vm_thread(void *arg) {
     CpuThreadArg *thread_arg = (CpuThreadArg *)arg;
     VM *vm = thread_arg->vm;
     int core_id = thread_arg->core_id;
     free(thread_arg);
+    (void)SDL_SetCurrentThreadPriority(core_id == 0 ?
+        SDL_THREAD_PRIORITY_HIGH : SDL_THREAD_PRIORITY_NORMAL);
     vm_tls_vcpu = &vm->cpus[core_id];
     uint64_t local_cycles = 0;
+    uint64_t paced_cycles = 0u;
+    uint64_t pace_epoch_ns = 0u;
     uint32_t device_poll_cycles = 0;
+    uint64_t next_device_poll_ns = 0u;
+    uint32_t pace_check_cycles = 0u;
+    const uint32_t pace_quantum = vm_cpu_pace_quantum(vm->cpu_frequency_hz);
+    int pacing_started = 0;
 
     while (1) {
-        if (atomic_is_vm_halted(vm)|| atomic_is_vm_panicked(vm)) {
+        if (atomic_is_vm_stopped(vm)) {
             break;
         }
         if (core_id != 0 && !atomic_load_explicit(&vm->core_released[core_id], memory_order_acquire)) {
             sched_yield();
             continue;
         }
+        if (!pacing_started) {
+            pace_epoch_ns = host_monotonic_time_ns();
+            paced_cycles = 0u;
+            pace_check_cycles = 0u;
+            pacing_started = 1;
+        }
         if (core_id == 0) {
             vm_debug_pause_if_needed(vm, (uint32_t) vm_tls_vcpu->ip);
         }
-        vm_handle_interrupts(vm);
-        vm_instruction_case(vm);
+        vm_handle_interrupts(vm, vm_tls_vcpu);
+        vm_instruction_case(vm, vm_tls_vcpu);
         local_cycles++;
+        paced_cycles++;
+        pace_check_cycles++;
         if (core_id == 0) {
             device_poll_cycles++;
         }
         if (local_cycles >= EXECUTION_TIMES_FLUSH_INTERVAL) {
             vm_flush_execution_times(vm_tls_vcpu, &local_cycles);
         }
-        if (core_id == 0 && device_poll_cycles >= DEVICE_POLL_INTERVAL) {
-            disk_tick(vm);
-            ether_poll(vm);
+        if (core_id == 0 && device_poll_cycles >= DEVICE_POLL_CHECK_INTERVAL) {
+            const uint64_t now_ns = host_monotonic_time_ns();
+            if (next_device_poll_ns == 0u || now_ns >= next_device_poll_ns) {
+                disk_tick(vm);
+                ether_poll(vm);
+                audio_poll(vm);
+                next_device_poll_ns = now_ns + DEVICE_POLL_PERIOD_NS;
+            }
             device_poll_cycles = 0;
+        }
+        if (pace_check_cycles >= pace_quantum) {
+            vm_pace_cpu(vm, &pace_epoch_ns, &paced_cycles);
+            pace_check_cycles = 0u;
         }
     }
     if (core_id == 0 && device_poll_cycles > 0) {
         disk_tick(vm);
         ether_poll(vm);
+        audio_poll(vm);
     }
     vm_flush_execution_times(vm_tls_vcpu, &local_cycles);
     return NULL;
 }
 
-void display_loop(VM *vm, int serial_console) {
-    vga_display_init();
-    display_set_serial_console_mode(serial_console);
-    const int frame_delay = 16; // ~60FPS
-    while (!atomic_is_vm_halted(vm) && !atomic_is_vm_panicked(vm)) {
-        uint32_t frame_start = SDL_GetTicks();
+static void display_loop(VM *vm) {
+    const uint64_t frame_ns = 1000000000ull / DISPLAY_TARGET_HZ;
+    uint64_t next_frame_ns = SDL_GetTicksNS();
+    (void)SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_HIGH);
+    while (!atomic_is_vm_stopped(vm)) {
+        uint64_t now_ns;
+        next_frame_ns += frame_ns;
         display_poll_events(vm);
         display_update(vm);
-        uint32_t frame_time = SDL_GetTicks() - frame_start;
-        if (frame_time < frame_delay) {
-            SDL_Delay(frame_delay - frame_time);
+        now_ns = SDL_GetTicksNS();
+        if (now_ns < next_frame_ns) {
+            SDL_DelayPrecise(next_frame_ns - now_ns);
+        } else if (now_ns - next_frame_ns > frame_ns * 2u) {
+            /* Drop missed deadlines instead of producing a burst of stale
+             * frames after a debugger stop or an expensive guest flip. */
+            next_frame_ns = now_ns;
         }
     }
-    display_shutdown();
 }
 
-static void *serial_console_thread(void *arg) {
-    SerialConsoleArg *console_arg = (SerialConsoleArg *)arg;
-    VM *vm = console_arg ? console_arg->vm : NULL;
-    int stdin_flags = -1;
-    int stdin_restore = 0;
-    int raw_mode = 0;
-
-    free(console_arg);
-    if (!vm) {
-        return NULL;
-    }
-
-    stdin_flags = fcntl(STDIN_FILENO, F_GETFL, 0);
-    if (stdin_flags >= 0) {
-        if (fcntl(STDIN_FILENO, F_SETFL, stdin_flags | O_NONBLOCK) == 0) {
-            stdin_restore = 1;
-        }
-    }
-    if (isatty(STDIN_FILENO)) {
-        enable_raw_mode();
-        raw_mode = 1;
-    }
-
-    while (!atomic_is_vm_halted(vm) && !atomic_is_vm_panicked(vm)) {
-        vm_handle_keyboard(vm);
-        usleep(1000);
-    }
-
-    if (raw_mode) {
-        disable_raw_mode();
-    }
-    if (stdin_restore) {
-        (void)fcntl(STDIN_FILENO, F_SETFL, stdin_flags);
-    }
-    return NULL;
-}
-
-static int vm_start_serial_console(VM *vm, pthread_t *thread_out) {
-    SerialConsoleArg *arg = malloc(sizeof(SerialConsoleArg));
-    if (!arg) {
-        return -1;
-    }
-    arg->vm = vm;
-    if (pthread_create(thread_out, NULL, serial_console_thread, arg) != 0) {
-        free(arg);
-        return -1;
-    }
-    return 0;
-}
-
-void vm_run(VM *vm, int serial_console) {
+void vm_run(VM *vm, int serial_window) {
     const int cores = (vm->smp_cores > 0) ? vm->smp_cores : 1;
     pthread_t *thread_ids = malloc(sizeof(pthread_t) * (size_t)cores);
-    pthread_t serial_thread;
-    int serial_thread_started = 0;
     if (!thread_ids) {
         panic("Failed to allocate CPU thread list", vm);
+        return;
+    }
+
+    if (display_init(vm, serial_window) != 0) {
+        free(thread_ids);
+        panic("Failed to initialize SDL display", vm);
         return;
     }
 
@@ -1298,22 +1345,12 @@ void vm_run(VM *vm, int serial_console) {
         created_threads++;
     }
 
-    if (serial_console) {
-        if (vm_start_serial_console(vm, &serial_thread) == 0) {
-            serial_thread_started = 1;
-        } else {
-            fprintf(stderr, "Failed to start serial console input thread.\n");
-        }
-    }
+    display_loop(vm);
 
-    display_loop(vm, serial_console);
-
-    if (serial_thread_started) {
-        pthread_join(serial_thread, NULL);
-    }
     for (int i = 0; i < created_threads; i++) {
         pthread_join(thread_ids[i], NULL);
     }
+    display_shutdown();
     free(thread_ids);
 }
 
@@ -1358,7 +1395,7 @@ void vm_run_serial(VM *vm) {
         created_threads++;
     }
 
-    while (!atomic_is_vm_halted(vm) && !atomic_is_vm_panicked(vm)) {
+    while (!atomic_is_vm_stopped(vm)) {
         vm_handle_keyboard(vm);
         usleep(1000);
     }
@@ -1402,7 +1439,7 @@ int vm_run_headless(VM *vm, uint64_t timeout_ms) {
     }
 
     const uint64_t start_ns = host_monotonic_time_ns();
-    while (!atomic_is_vm_halted(vm) && !atomic_is_vm_panicked(vm)) {
+    while (!atomic_is_vm_stopped(vm)) {
         const uint64_t elapsed_ms = (host_monotonic_time_ns() - start_ns) / 1000000ull;
         if (elapsed_ms > timeout_ms) {
             atomic_set_vm_halt(vm, 1);;
@@ -1496,9 +1533,9 @@ VM *vm_create(size_t memory_size,
 
     memset(vm, 0, sizeof(VM));
     vm->smp_cores = (smp_cores > 0) ? smp_cores : 1;
+    vm->cpu_frequency_hz = (uint64_t)VM_DEFAULT_CPU_MHZ * 1000000ull;
     vm->cpus = calloc((size_t)vm->smp_cores, sizeof(VCPU));
-    atomic_init(&vm->halted, 0);
-    atomic_init(&vm->panic, 0);
+    atomic_init(&vm->stop_flags, 0u);
     if (!vm->cpus) {
         free(vm);
         vm_error("Couldn't create CPU.");
@@ -1530,16 +1567,34 @@ VM *vm_create(size_t memory_size,
         vm_error("Couldn't allocate VM CPU Interrupt enable bitmap");
         return NULL;
     }
+    vm->interrupt_pending_summary = calloc((size_t)vm->smp_cores,
+                                           sizeof(atomic_uint_fast32_t));
+    if (!vm->interrupt_pending_summary) {
+        free(vm->interrupt_enable_bitmap);
+        free(vm->interrupt_bitmap);
+        free(vm->core_released);
+        free(vm->cpus);
+        free(vm);
+        vm_error("Couldn't allocate VM CPU Interrupt pending summary");
+        return NULL;
+    }
+    for (int core = 0; core < vm->smp_cores; core++) {
+        atomic_init(&vm->interrupt_pending_summary[core], 0u);
+    }
 
     pthread_mutexattr_t shared_attr;
     pthread_mutexattr_init(&shared_attr);
     pthread_mutexattr_settype(&shared_attr, PTHREAD_MUTEX_RECURSIVE);
     pthread_mutex_init(&vm->shared_lock, &shared_attr);
     pthread_mutexattr_destroy(&shared_attr);
+    pthread_mutex_init(&vm->runtime_stats_lock, NULL);
 
     vm->memory_size = memory_size;
     vm->memory = malloc(memory_size);
     if (!vm->memory) {
+        pthread_mutex_destroy(&vm->runtime_stats_lock);
+        pthread_mutex_destroy(&vm->shared_lock);
+        free(vm->interrupt_pending_summary);
         free(vm->interrupt_enable_bitmap);
         free(vm->interrupt_bitmap);
         free(vm->core_released);
@@ -1558,6 +1613,9 @@ VM *vm_create(size_t memory_size,
         free(vm->fb_front);
         free(vm->fb);
         free(vm->memory);
+        pthread_mutex_destroy(&vm->runtime_stats_lock);
+        pthread_mutex_destroy(&vm->shared_lock);
+        free(vm->interrupt_pending_summary);
         free(vm->interrupt_enable_bitmap);
         free(vm->interrupt_bitmap);
         free(vm->core_released);
@@ -1569,6 +1627,7 @@ VM *vm_create(size_t memory_size,
     memset(vm->fb, 0, FB_SIZE);
     memset(vm->fb_front, 0, FB_SIZE);
     for (size_t row = 0; row < FB_HEIGHT; row++) {
+        atomic_init(&vm->fb_row_dirty[row], 1u);
         if (pthread_mutex_init(&vm->fb_row_locks[row], NULL) != 0) {
             for (size_t done = 0; done < row; done++) {
                 pthread_mutex_destroy(&vm->fb_row_locks[done]);
@@ -1576,6 +1635,9 @@ VM *vm_create(size_t memory_size,
             free(vm->fb_front);
             free(vm->fb);
             free(vm->memory);
+            pthread_mutex_destroy(&vm->runtime_stats_lock);
+            pthread_mutex_destroy(&vm->shared_lock);
+            free(vm->interrupt_pending_summary);
             free(vm->interrupt_enable_bitmap);
             free(vm->interrupt_bitmap);
             free(vm->core_released);
@@ -1585,11 +1647,10 @@ VM *vm_create(size_t memory_size,
             return NULL;
         }
     }
-    printf("vm->fb = %p\n", (void *) vm->fb);
-    printf("fb_base = 0x%zx\n", fb_base);
-    printf("fb address mod 4 = %zu\n", ((size_t) vm->fb) % 4);
-
-    printf("Initializing MMIO.... \n");
+    VM_RUNTIME_LOG("vm->fb = %p\n", (void *)vm->fb);
+    VM_RUNTIME_LOG("fb_base = 0x%zx\n", fb_base);
+    VM_RUNTIME_LOG("fb address mod 4 = %zu\n", ((size_t)vm->fb) % 4);
+    VM_RUNTIME_LOG("Initializing MMIO....\n");
     vm->mmio_count = 0;
     memset(vm->mmio_devices, 0, sizeof(vm->mmio_devices));
     vm->disk_size_bytes = DISK_SIZE;
@@ -1599,6 +1660,14 @@ VM *vm_create(size_t memory_size,
     register_iommu_mmio(vm);
     register_mmu_mmio(vm);
     register_sysinfo_mmio(vm);
+    register_pcie_mmio(vm);
+    vm_build_mmio_page_map(vm);
+    if (gpu_device_init(vm) != 0) {
+        vm_error("Couldn't initialize optional PCI display device");
+    }
+    if (audio_device_init(vm) != 0) {
+        vm_error("Couldn't initialize optional PCI audio device");
+    }
     size_t prog_bytes = program_size * sizeof(uint64_t);
     uint32_t text_base = PROGRAM_BASE;
     uint32_t data_base = PROGRAM_BASE + (uint32_t) prog_bytes;
@@ -1611,8 +1680,8 @@ VM *vm_create(size_t memory_size,
         bss_base = layout->bss_base;
         bss_size = layout->bss_size;
         if (layout->text_size != 0 && layout->text_size != prog_bytes) {
-            printf("Warning: layout TEXT_SIZE (%u) != program size (%zu)\n",
-                   layout->text_size, prog_bytes);
+            fprintf(stderr, "Warning: layout TEXT_SIZE (%u) != program size (%zu)\n",
+                    layout->text_size, prog_bytes);
         }
     }
 
@@ -1676,13 +1745,13 @@ VM *vm_create(size_t memory_size,
                     bad++;
                 }
             }
-            printf("BSS clear: base=0x%08x size=%u first=%u last=%u bad_in_first_%zu=%zu\n",
-                   bss_base,
-                   bss_size,
-                   vm->memory[bss_base],
-                   vm->memory[bss_base + bss_size - 1],
-                   sample,
-                   bad);
+            VM_RUNTIME_LOG("BSS clear: base=0x%08x size=%u first=%u last=%u bad_in_first_%zu=%zu\n",
+                           bss_base,
+                           bss_size,
+                           vm->memory[bss_base],
+                           vm->memory[bss_base + bss_size - 1],
+                           sample,
+                           bad);
         }
     }
 
@@ -1710,15 +1779,15 @@ VM *vm_create(size_t memory_size,
         vm->cpus[i].active_interrupt_no = IVT_SIZE;
         vm->cpus[i].irq_masked = 0;
         atomic_init(&vm->core_released[i], (i == 0));
-        fprintf(stderr, "[cpu%u] start ip=0x%08x csp=%u dsp=%u isp=%u r30=0x%08x r31=0x%08x call_base=0x%08x\n",
-                (unsigned)i,
-                (unsigned)vm->cpus[i].ip,
-                (unsigned)vm->cpus[i].csp,
-                (unsigned)vm->cpus[i].dsp,
-                (unsigned)vm->cpus[i].isp,
-                (unsigned)vm->cpus[i].regs[30],
-                (unsigned)vm->cpus[i].regs[31],
-                (unsigned)vm->cpus[i].call_stack_base);
+        VM_RUNTIME_LOG("[cpu%u] start ip=0x%08x csp=%u dsp=%u isp=%u r30=0x%08x r31=0x%08x call_base=0x%08x\n",
+                       (unsigned)i,
+                       (unsigned)vm->cpus[i].ip,
+                       (unsigned)vm->cpus[i].csp,
+                       (unsigned)vm->cpus[i].dsp,
+                       (unsigned)vm->cpus[i].isp,
+                       (unsigned)vm->cpus[i].regs[30],
+                       (unsigned)vm->cpus[i].regs[31],
+                       (unsigned)vm->cpus[i].call_stack_base);
         /* For APs that weren't explicitly started, gate at the
          * instruction loop so they never fetch from IP=0. */
     }
@@ -1753,6 +1822,9 @@ void vm_destroy(VM *vm) {
 
     vm_debug_destroy(vm);
     disk_close(vm);
+    audio_device_shutdown(vm);
+    gpu_device_shutdown(vm);
+    pthread_mutex_destroy(&vm->runtime_stats_lock);
     pthread_mutex_destroy(&vm->shared_lock);
     for (size_t row = 0; row < FB_HEIGHT; row++) {
         pthread_mutex_destroy(&vm->fb_row_locks[row]);
@@ -1761,6 +1833,8 @@ void vm_destroy(VM *vm) {
         free(vm->interrupt_bitmap);
     if (vm->interrupt_enable_bitmap)
         free(vm->interrupt_enable_bitmap);
+    if (vm->interrupt_pending_summary)
+        free(vm->interrupt_pending_summary);
     if (vm->core_released)
         free(vm->core_released);
     if (vm->cpus)
@@ -1771,12 +1845,15 @@ void vm_destroy(VM *vm) {
         free(vm->fb);
     if (vm->fb_front)
         free(vm->fb_front);
+    if (vm->pcie)
+        free(vm->pcie);
     free(vm);
 }
 
 typedef enum {
     VM_CLI_RUN,
     VM_CLI_SELFTEST,
+    VM_CLI_BENCHMARK,
     VM_CLI_HELP
 } VmCliCommand;
 
@@ -1785,7 +1862,8 @@ typedef struct {
     const char *program_path;
     const char *net_mode;
     int smp_cores;
-    int serial_console;
+    uint32_t cpu_mhz;
+    int serial_window;
     int serial_stdin;
 } VmCliOptions;
 
@@ -1794,7 +1872,8 @@ static void vm_cli_options_init(VmCliOptions *options) {
     options->program_path = "boot.bin";
     options->net_mode = "nat";
     options->smp_cores = 1;
-    options->serial_console = 0;
+    options->cpu_mhz = VM_DEFAULT_CPU_MHZ;
+    options->serial_window = 1;
     options->serial_stdin = 0;
 }
 
@@ -1804,6 +1883,7 @@ static void print_usage(const char *prog) {
     printf("Usage:\n");
     printf("  %s run [program.bin] [options]\n", prog);
     printf("  %s test\n", prog);
+    printf("  %s benchmark\n", prog);
     printf("  %s help\n", prog);
     printf("\n");
     printf("Common examples:\n");
@@ -1811,12 +1891,16 @@ static void print_usage(const char *prog) {
     printf("  %s run bios/boot.bin --cores 2\n", prog);
     printf("  %s run bios/boot.bin --console\n", prog);
     printf("  %s test\n", prog);
+    printf("  %s benchmark\n", prog);
     printf("\n");
     printf("Run options:\n");
     printf("  program.bin              guest program image (default: boot.bin)\n");
     printf("  --bin <file>             legacy spelling for program.bin\n");
     printf("  --cores, --smp <n>       CPU worker thread count in [1, 64] (default: 1)\n");
-    printf("  --console                attach terminal stdin while keeping SDL/VNC enabled\n");
+    printf("  --cpu-mhz <n>            per-vCPU execution cap in [1, 10000] MHz (default: %u)\n",
+           VM_DEFAULT_CPU_MHZ);
+    printf("  --console                show guest serial in its own SDL window (default)\n");
+    printf("  --no-serial-window       send guest serial output to the host terminal\n");
     printf("  --headless               use legacy serial stdin mode without SDL display\n");
     printf("  --net <mode>             ethernet backend: null, nat, or udp:<bind-port>:<peer-port>\n");
     printf("\n");
@@ -1833,6 +1917,19 @@ static int parse_positive_int(const char *s, int *out) {
     return 1;
 }
 
+static int parse_cpu_mhz(const char *s, uint32_t *out) {
+    char *end = NULL;
+    unsigned long value;
+    errno = 0;
+    value = strtoul(s, &end, 10);
+    if (errno != 0 || end == s || *end != '\0' || value < 1u ||
+        value > VM_MAX_CPU_MHZ) {
+        return 0;
+    }
+    *out = (uint32_t)value;
+    return 1;
+}
+
 static int parse_cli_options(int argc, char **argv, VmCliOptions *options) {
     int argi = 1;
     int program_path_set = 0;
@@ -1846,6 +1943,10 @@ static int parse_cli_options(int argc, char **argv, VmCliOptions *options) {
         argi++;
     } else if (strcmp(argv[argi], "test") == 0 || strcmp(argv[argi], "selftest") == 0) {
         options->command = VM_CLI_SELFTEST;
+        argi++;
+    } else if (strcmp(argv[argi], "benchmark") == 0 ||
+               strcmp(argv[argi], "bench") == 0) {
+        options->command = VM_CLI_BENCHMARK;
         argi++;
     } else if (strcmp(argv[argi], "help") == 0 ||
                strcmp(argv[argi], "--help") == 0 ||
@@ -1868,13 +1969,24 @@ static int parse_cli_options(int argc, char **argv, VmCliOptions *options) {
                 return 0;
             }
             i++;
+        } else if (strcmp(argv[i], "--cpu-mhz") == 0) {
+            if (i + 1 >= argc || !parse_cpu_mhz(argv[i + 1], &options->cpu_mhz)) {
+                fprintf(stderr, "Invalid CPU clock. Expected MHz in [1, %u].\n",
+                        VM_MAX_CPU_MHZ);
+                return 0;
+            }
+            i++;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             options->command = VM_CLI_HELP;
             return 1;
         } else if (strcmp(argv[i], "--selftest") == 0) {
             options->command = VM_CLI_SELFTEST;
-        } else if (strcmp(argv[i], "--console") == 0 || strcmp(argv[i], "--serial-console") == 0) {
-            options->serial_console = 1;
+        } else if (strcmp(argv[i], "--console") == 0 ||
+                   strcmp(argv[i], "--serial-console") == 0 ||
+                   strcmp(argv[i], "--serial-window") == 0) {
+            options->serial_window = 1;
+        } else if (strcmp(argv[i], "--no-serial-window") == 0) {
+            options->serial_window = 0;
         } else if (strcmp(argv[i], "--headless") == 0 || strcmp(argv[i], "--serial-stdin") == 0) {
             options->serial_stdin = 1;
         } else if (strcmp(argv[i], "--net") == 0) {
@@ -1896,13 +2008,14 @@ static int parse_cli_options(int argc, char **argv, VmCliOptions *options) {
 }
 
 static void print_launch_summary(const VmCliOptions *options) {
-    printf("Launching Lamp VM\n");
-    printf("  program: %s\n", options->program_path);
-    printf("  cores:   %d\n", options->smp_cores);
-    printf("  console: %s\n",
-           options->serial_stdin ? "headless serial stdin" :
-           (options->serial_console ? "terminal + SDL/VNC" : "SDL/VNC"));
-    printf("  network: %s\n", options->net_mode);
+    VM_RUNTIME_LOG("Launching Lamp VM\n");
+    VM_RUNTIME_LOG("  program: %s\n", options->program_path);
+    VM_RUNTIME_LOG("  cores:   %d\n", options->smp_cores);
+    VM_RUNTIME_LOG("  clock:   %u MHz nominal\n", options->cpu_mhz);
+    VM_RUNTIME_LOG("  console: %s\n",
+                   options->serial_stdin ? "headless serial stdin" :
+                   (options->serial_window ? "VM display + serial SDL windows" : "VM display + serial stdout"));
+    VM_RUNTIME_LOG("  network: %s\n", options->net_mode);
 }
 
 static void init_ethernet_backend_from_cli(VM *vm, const char *net_mode) {
@@ -1933,9 +2046,9 @@ static void init_ethernet_backend_from_cli(VM *vm, const char *net_mode) {
 }
 
 int main(int argc, char **argv) {
-    printf("Lamp VM version 1.0.0-rc1 \n");
+    VM_RUNTIME_LOG("Lamp VM version 1.0.0-rc1\n");
 #ifdef DEBUG_BUILD
-    printf("This copy was built with debug flag. It may causing huge performance impact. \n");
+    VM_RUNTIME_LOG("This copy was built with debug flags and may be slower.\n");
 #endif
     VmCliOptions options;
     if (!parse_cli_options(argc, argv, &options)) {
@@ -1949,11 +2062,10 @@ int main(int argc, char **argv) {
     if (options.command == VM_CLI_SELFTEST) {
         return run_selftests();
     }
-    if (options.serial_console && options.smp_cores > 1) {
-        printf("Serial console mode uses BSP-only execution; ignoring --smp %d for console stability.\n",
-               options.smp_cores);
-        options.smp_cores = 1;
+    if (options.command == VM_CLI_BENCHMARK) {
+        return run_benchmark();
     }
+    if (options.serial_stdin) options.serial_window = 0;
     print_launch_summary(&options);
 
     size_t program_size = 0;
@@ -1963,49 +2075,47 @@ int main(int argc, char **argv) {
     ProgramLayout layout;
 
     if (!load_program_single(options.program_path, &program, &program_size, &data, &data_size, &layout)) {
-        printf("Failed to load program from %s\n", options.program_path);
+        fprintf(stderr, "Failed to load program from %s\n", options.program_path);
         return 1;
     }
 
-    printf("Loaded program from %s, %zu instructions.\n", options.program_path, program_size);
-    printf("Loaded data: %zu bytes.\n", data_size);
-    printf("Layout: TEXT_BASE=0x%08X TEXT_SIZE=%u DATA_BASE=0x%08X DATA_SIZE=%u BSS_BASE=0x%08X BSS_SIZE=%u\n",
-           layout.text_base, layout.text_size,
-           layout.data_base, layout.data_size,
-           layout.bss_base, layout.bss_size);
+    VM_RUNTIME_LOG("Loaded program from %s, %zu instructions.\n", options.program_path, program_size);
+    VM_RUNTIME_LOG("Loaded data: %zu bytes.\n", data_size);
+    VM_RUNTIME_LOG("Layout: TEXT_BASE=0x%08X TEXT_SIZE=%u DATA_BASE=0x%08X DATA_SIZE=%u BSS_BASE=0x%08X BSS_SIZE=%u\n",
+                   layout.text_base, layout.text_size,
+                   layout.data_base, layout.data_size,
+                   layout.bss_base, layout.bss_size);
 
     VM *vm = vm_create(MEM_SIZE, program, program_size, data, data_size, &layout, options.smp_cores);
     if (!vm) {
-        printf("Failed to create VM.\n");
+        fprintf(stderr, "Failed to create VM.\n");
         free(program);
         free(data);
         return 1;
     }
+    vm->cpu_frequency_hz = (uint64_t)options.cpu_mhz * 1000000ull;
     disk_init(vm, "./disk.img");
 
     init_ethernet_backend_from_cli(vm, options.net_mode);
 
     init_ivt(vm);
     if (options.smp_cores > 1) {
-        printf("SMP mode enabled: %d cores (per-core architectural state, shared memory).\n", options.smp_cores);
+        VM_RUNTIME_LOG("SMP mode enabled: %d cores.\n", options.smp_cores);
     }
-    printf("Loaded VM. \n Call Stack size: %d\n Data Stack size: %d \n Memory Size: %lu\n Memory "
-           "Head: %p\n",
-           CALL_STACK_SIZE,
-           DATA_STACK_SIZE,
-           MEM_SIZE,
-           (void *) vm->memory);
+    VM_RUNTIME_LOG("Loaded VM: call stack=%d data stack=%d memory=%lu head=%p\n",
+                   CALL_STACK_SIZE, DATA_STACK_SIZE, MEM_SIZE, (void *)vm->memory);
     init_screen();
-    printf("VNC function is still in preview, use it with caution.\n");
+    VM_RUNTIME_LOG("VNC preview server enabled.\n");
     vnc_run(vm);
+    (void)audio_host_start(vm);
     if (options.serial_stdin) {
-        printf("Serial stdin mode enabled (headless).\n");
+        VM_RUNTIME_LOG("Serial stdin mode enabled (headless).\n");
         vm_run_serial(vm);
     } else {
-        if (options.serial_console) {
-            printf("Serial console mode enabled (terminal stdin + SDL/VNC).\n");
+        if (options.serial_window) {
+            VM_RUNTIME_LOG("Separate VM Display and VM Serial windows enabled.\n");
         }
-        vm_run(vm, options.serial_console);
+        vm_run(vm, options.serial_window);
     }
 #ifdef DBEUG
     vm_dump(vm, 1024);
@@ -2016,9 +2126,10 @@ int main(int argc, char **argv) {
         total_execution_times += atomic_load_explicit(&vm->cpus[i].execution_times, memory_order_relaxed);
     }
     vnc_exit();
+    audio_host_stop(vm);
     ether_shutdown(vm);
-    printf("Execution complete in %lu cycles.\n",
-           (unsigned long)total_execution_times);
+    VM_RUNTIME_LOG("Execution complete in %lu cycles.\n",
+                   (unsigned long)total_execution_times);
     vm_debug_print_stats(vm);
     vm_destroy(vm);
     free(program);

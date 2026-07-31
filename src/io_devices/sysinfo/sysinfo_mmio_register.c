@@ -1,4 +1,6 @@
 #include "sysinfo_mmio_register.h"
+#include "../../runtime_log.h"
+#include "../../runtime_stats.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -22,18 +24,23 @@ static uint32_t sysinfo_feature_bits(const VM *vm) {
                     SYSINFO_FEATURE_TIMER_IRQ |
                     SYSINFO_FEATURE_INTC_MMIO |
                     SYSINFO_FEATURE_IOMMU_MMIO |
-                    SYSINFO_FEATURE_MMU_PAGING;
+                    SYSINFO_FEATURE_MMU_PAGING |
+                    SYSINFO_FEATURE_RUNTIME_STATS;
     if (vm->smp_cores > 1) {
         bits |= SYSINFO_FEATURE_SMP;
     }
     if (vm->ether) {
         bits |= SYSINFO_FEATURE_ETHER;
     }
+    if (vm->pcie) {
+        bits |= SYSINFO_FEATURE_PCIE;
+    }
     return bits;
 }
 
 static uint32_t sysinfo_read32(VM *vm, uint32_t addr) {
     const uint32_t offset = addr - SYSINFO_BASE;
+    uint64_t value64;
     if (offset == SYSINFO_REG_MAGIC) {
         return SYSINFO_MAGIC;
     }
@@ -97,6 +104,50 @@ static uint32_t sysinfo_read32(VM *vm, uint32_t addr) {
     if (offset == SYSINFO_REG_BOOT_REALTIME_NS_HI) {
         return (uint32_t)((vm->start_realtime_ns >> 32) & 0xFFFFFFFFu);
     }
+    if (offset == SYSINFO_REG_CPU_FREQ_HZ_LO ||
+        offset == SYSINFO_REG_CPU_CYCLES_LO ||
+        offset == SYSINFO_REG_EXEC_COUNT_LO ||
+        offset == SYSINFO_REG_EXEC_RATE_HZ_LO ||
+        offset == SYSINFO_REG_UPTIME_NS_LO ||
+        offset == SYSINFO_REG_HOST_RSS_BYTES_LO) {
+        vm_runtime_stats_sample(vm, &vm->sysinfo_stats_latch);
+    }
+    switch (offset) {
+        case SYSINFO_REG_CPU_FREQ_HZ_LO:
+        case SYSINFO_REG_CPU_FREQ_HZ_HI:
+            value64 = vm->sysinfo_stats_latch.cpu_frequency_hz;
+            break;
+        case SYSINFO_REG_CPU_CYCLES_LO:
+        case SYSINFO_REG_CPU_CYCLES_HI:
+            value64 = vm->sysinfo_stats_latch.virtual_cycles;
+            break;
+        case SYSINFO_REG_EXEC_COUNT_LO:
+        case SYSINFO_REG_EXEC_COUNT_HI:
+            value64 = vm->sysinfo_stats_latch.executed_instructions;
+            break;
+        case SYSINFO_REG_EXEC_RATE_HZ_LO:
+        case SYSINFO_REG_EXEC_RATE_HZ_HI:
+            value64 = vm->sysinfo_stats_latch.execution_rate_hz;
+            break;
+        case SYSINFO_REG_UPTIME_NS_LO:
+        case SYSINFO_REG_UPTIME_NS_HI:
+            value64 = vm->sysinfo_stats_latch.uptime_ns;
+            break;
+        case SYSINFO_REG_HOST_RSS_BYTES_LO:
+        case SYSINFO_REG_HOST_RSS_BYTES_HI:
+            value64 = vm->sysinfo_stats_latch.host_resident_bytes;
+            break;
+        case SYSINFO_REG_RUNTIME_VERSION:
+            return SYSINFO_RUNTIME_VERSION;
+        default:
+            value64 = 0u;
+            break;
+    }
+    if (offset >= SYSINFO_REG_CPU_FREQ_HZ_LO &&
+        offset <= SYSINFO_REG_HOST_RSS_BYTES_HI) {
+        return (offset & 4u) == 0u ? (uint32_t)(value64 >> 32) :
+                                     (uint32_t)value64;
+    }
 
     fprintf(stderr, "Unknown SYSINFO MMIO register offset: 0x%08x\n", offset);
     return 0;
@@ -118,6 +169,6 @@ void register_sysinfo_mmio(VM *vm) {
 
     if (vm->mmio_count < MAX_MMIO_DEVICES) {
         vm->mmio_devices[vm->mmio_count++] = &sysinfo_dev;
-        printf("Registered VM SysInfo to MMIO ID %d\n", vm->mmio_count);
+        VM_RUNTIME_LOG("Registered VM SysInfo to MMIO ID %d\n", vm->mmio_count);
     }
 }

@@ -16,6 +16,14 @@ static inline MMIO_Device *find_mmio(VM *vm, uint32_t addr) {
         return cached_dev;
     }
 
+    if (vm->mmio_page_map_ready != 0u) {
+        const uint32_t page = addr >> VM_MMIO_PAGE_SHIFT;
+        const uint8_t mask = (uint8_t)(1u << (page & 7u));
+        if ((vm->mmio_page_map[page >> 3u] & mask) == 0u) {
+            return NULL;
+        }
+    }
+
     for (int i = 0; i < vm->mmio_count; i++) {
         MMIO_Device *dev = vm->mmio_devices[i];
         if (addr >= dev->start && addr <= dev->end) {

@@ -1,8 +1,10 @@
 #include "intc_mmio_register.h"
+#include "../../runtime_log.h"
 
 #include <stdio.h>
 
 #include "../../interrupt.h"
+#include "../../io.h"
 
 static inline int intc_current_core_id(VM *vm) {
     VCPU *cpu = vm_current_cpu(vm);
@@ -82,6 +84,12 @@ static void intc_write32(VM *vm, uint32_t addr, uint32_t value) {
 
     if (offset == INTC_REG_EOI) {
         vm_interrupt_eoi(vm, core_id, value);
+        if (value == INT_KEYBOARD || value == INT_MOUSE) {
+            /* 8042 IRQs are level-like. Re-evaluate the output-buffer front
+             * after clearing the latched pending bit so an event arriving at
+             * the end of the handler cannot be lost. */
+            vm_ps2_reassert_irq(vm);
+        }
         return;
     }
 
@@ -98,6 +106,6 @@ void register_intc_mmio(VM *vm) {
 
     if (vm->mmio_count < MAX_MMIO_DEVICES) {
         vm->mmio_devices[vm->mmio_count++] = &intc_dev;
-        printf("Registered VM Interrupt Controller to MMIO ID %d\n", vm->mmio_count);
+        VM_RUNTIME_LOG("Registered VM Interrupt Controller to MMIO ID %d\n", vm->mmio_count);
     }
 }

@@ -36,6 +36,45 @@ static inline uint64_t irq_bit_mask(uint32_t int_no) {
     return 1ULL << (int_no & 63);
 }
 
+static inline uint_fast32_t irq_summary_word_mask(uint32_t word) {
+    return (uint_fast32_t)1u << word;
+}
+
+static inline void irq_mark_pending_word(VM *vm, int core_id, uint32_t word) {
+    if (!vm || !vm->interrupt_pending_summary) {
+        return;
+    }
+    atomic_fetch_or_explicit(&vm->interrupt_pending_summary[core_id],
+                             irq_summary_word_mask(word),
+                             memory_order_release);
+}
+
+static void irq_refresh_pending_word(VM *vm, int core_id, uint32_t word) {
+    const size_t idx = (size_t)core_id * (size_t)IRQ_BITMAP_WORDS + word;
+    const uint_fast32_t summary_mask = irq_summary_word_mask(word);
+    if (!vm || !vm->interrupt_bitmap || !vm->interrupt_pending_summary) {
+        return;
+    }
+
+    if (atomic_load_explicit(&vm->interrupt_bitmap[idx], memory_order_acquire) != 0u) {
+        atomic_fetch_or_explicit(&vm->interrupt_pending_summary[core_id],
+                                 summary_mask,
+                                 memory_order_release);
+        return;
+    }
+
+    atomic_fetch_and_explicit(&vm->interrupt_pending_summary[core_id],
+                              (uint_fast32_t)~summary_mask,
+                              memory_order_acq_rel);
+    /* A producer may have raised an IRQ between the empty check and summary
+     * clear. Rechecking the source word prevents a lost fast-path wakeup. */
+    if (atomic_load_explicit(&vm->interrupt_bitmap[idx], memory_order_acquire) != 0u) {
+        atomic_fetch_or_explicit(&vm->interrupt_pending_summary[core_id],
+                                 summary_mask,
+                                 memory_order_release);
+    }
+}
+
 static inline uint32_t irq_chunk_shift32(uint32_t reg_index32) {
     return (reg_index32 & 1u) ? 32u : 0u;
 }
@@ -117,6 +156,9 @@ void vm_interrupt_raise_pending32(VM *vm, int core_id, uint32_t reg_index, uint3
     const uint32_t shift = irq_chunk_shift32(reg_index);
     const uint_fast64_t mask = ((uint_fast64_t)value) << shift;
     atomic_fetch_or(&vm->interrupt_bitmap[idx], mask);
+    if (value != 0u) {
+        irq_mark_pending_word(vm, core_id, reg_index >> 1);
+    }
 }
 
 uint32_t vm_interrupt_read_enable32(VM *vm, int core_id, uint32_t reg_index) {
@@ -169,6 +211,7 @@ void vm_interrupt_eoi(VM *vm, int core_id, uint32_t int_no) {
     const size_t idx = irq_word_index(core_id, int_no);
     const uint64_t mask = irq_bit_mask(int_no);
     atomic_fetch_and(&vm->interrupt_bitmap[idx], (uint_fast64_t)(~mask));
+    irq_refresh_pending_word(vm, core_id, int_no >> 6);
 }
 
 void vm_enter_interrupt(VM *vm, uint32_t int_no) {
@@ -302,8 +345,7 @@ void vm_iret(VM *vm) {
     cpu->active_interrupt_no = IVT_SIZE;
 }
 
-void vm_handle_interrupts(VM *vm) {
-    VCPU *cpu = vm_current_cpu(vm);
+void vm_handle_interrupts(VM *vm, VCPU *cpu) {
     if (!cpu)
         return;
     if (cpu->in_interrupt)
@@ -316,6 +358,11 @@ void vm_handle_interrupts(VM *vm) {
     const int core_id = cpu->core_id;
     if (!irq_valid_core(vm, core_id))
         return;
+    if (vm->interrupt_pending_summary &&
+        atomic_load_explicit(&vm->interrupt_pending_summary[core_id],
+                             memory_order_acquire) == 0u) {
+        return;
+    }
     const size_t base = (size_t)core_id * (size_t)IRQ_BITMAP_WORDS;
 
     uint32_t best_int_no = IVT_SIZE;
@@ -372,6 +419,10 @@ void init_ivt(VM *vm) {
                              (uint_fast64_t)UINT64_MAX);
             }
         }
+        if (vm->interrupt_pending_summary) {
+            atomic_store_explicit(&vm->interrupt_pending_summary[c], 0u,
+                                  memory_order_release);
+        }
     }
     for (int c = 0; c < vm->smp_cores; c++) {
         vm->cpus[c].in_interrupt = 0;
@@ -404,4 +455,5 @@ void trigger_interrupt_target(VM *vm, int core_id, uint32_t int_no) {
     const size_t idx = irq_word_index(core_id, int_no);
     const uint64_t mask = irq_bit_mask(int_no);
     atomic_fetch_or(&vm->interrupt_bitmap[idx], (uint_fast64_t)mask);
+    irq_mark_pending_word(vm, core_id, int_no >> 6);
 }

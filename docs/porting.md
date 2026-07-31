@@ -23,10 +23,10 @@ Already available:
 - tty line discipline (`ECHO/ICANON/ISIG`) and ext4 file `open/read/write`
 - terminal compatibility ioctl subset (`TCGETS/TCSETS/TIOCGWINSZ`) for `isatty`/termios probing
 
-Major missing pieces for BusyBox `sh`:
+Major remaining pieces for a fuller BusyBox `sh` environment:
 
-- no userspace signal handler delivery/trampoline yet
-- no libc/runtime target for user programs yet
+- no process groups, sessions, or foreground tty job control yet
+- signals do not yet interrupt blocking syscalls and `SA_RESTART` is not active
 
 ## Architecture Decisions
 
@@ -195,7 +195,11 @@ Current implementation snapshot:
 - syscall IDs wired: `sigaction=40`, `sigprocmask=41`, `kill=42`
 - signal dispositions and masks are tracked per task; `vfork` children inherit dispositions/mask
 - `kill(pid, sig)` implements existence checks, ignored signals, and default terminate behavior for concrete task pids
-- userspace handler delivery is not wired yet, so caught handlers are recorded but not invoked
+- caught handlers are delivered through a versioned user signal frame; libc's
+  restorer invokes `sigreturn` to restore the interrupted context
+- blocked signals remain pending and are delivered after unmasking
+- blocking syscalls are not interrupted yet, and process groups/job control
+  remain future work
 - `fdtest` covers ignored self-signal, invalid uncatchable actions, mask block/unblock, missing pid, and child termination
 - syscall IDs wired for the next POSIX filesystem surface: `umask=43`, `rename=44`, `unlink=45`, `mkdir=46`, `rmdir=47`, `link=48`, `symlink=49`, `readlink=50`
 - `umask` is tracked per task and inherited by `sched_spawn`/`vfork`; mutation/link syscalls currently validate user pointers/paths and return stable read-only or non-symlink errno until ext4 mutation support lands

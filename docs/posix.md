@@ -16,6 +16,7 @@ Implemented now:
 - tty mode syscalls: `tty_getmode`, `tty_setmode`, `ioctl(TCGETS/TCSETS/TIOCGWINSZ)`
 - filesystem/network surface:
   - `open` for `/dev/null`, `/dev/zero`, `/dev/tty`
+  - read-only `open/read/stat/getdents` for `/proc`
   - `open/read/write/unlink` for ext4 regular files
   - `socket/connect/send/recv` for the current IPv4 TCP path
 
@@ -24,7 +25,7 @@ Not implemented yet:
 - full ext4 directory mutation (`mkdir/rmdir/rename/link/symlink`) and block/inode reclamation on unlink
 - sparse write and deep extent-tree growth (`depth > 0`) in write path
 - complete TCP behavior beyond the current client-oriented NAT path
-- userspace signal handler delivery/trampolines
+- signal interruption of blocking syscalls, `siginfo_t`, and alternate stacks
 - process groups/sessions and job-control foreground groups
 
 ## Syscall ABI
@@ -45,6 +46,7 @@ Current fd types:
 - stdio: `stdin(0)`, `stdout(1)`, `stderr(2)`
 - special dev fds from `open`: `/dev/null`, `/dev/zero`, `/dev/tty`
 - regular file fds from ext4 `open(path, ...)`
+- generated read-only regular/directory fds from procfs
 - pipe read/write endpoint fds from `pipe()`
 - socket fds from `socket()`
 
@@ -76,13 +78,13 @@ Current fd types:
 
 `stat/fstat` support:
 
-- path stat covers ext4 regular files/directories and `/dev/null`, `/dev/zero`, `/dev/tty`
+- path stat covers ext4 and procfs regular files/directories plus `/dev/null`, `/dev/zero`, `/dev/tty`
 - fd stat covers regular files, stdio/tty/dev fds, and socket fds
 - returned fields are the current 32-bit ABI subset: dev, ino, mode, nlink, uid, gid, rdev, size, blksize, blocks
 
 `getdents` support:
 
-- ext4 directory fds opened read-only can be enumerated
+- ext4 and `/proc` directory fds opened read-only can be enumerated
 - each returned entry uses the fixed 32-bit `lamp_dirent` ABI record
 - ordinary `read()` on a directory fd still returns `-1/EISDIR`
 
@@ -114,7 +116,13 @@ signal support:
 - `sigaction(sig, act, oldact)` records per-task 32-bit dispositions and masks
 - `sigprocmask(how, set, oldset)` supports `SIG_BLOCK`, `SIG_UNBLOCK`, and `SIG_SETMASK`; `SIGKILL/SIGSTOP` are never masked
 - `kill(pid, sig)` supports concrete task pids/tids, signal `0` existence checks, ignored dispositions, and default terminate behavior
-- caught userspace handlers are stored but not delivered yet
+- caught, unmasked signals are delivered on the next return from an IRQ/syscall
+  to userspace
+- handler entry uses `r0=signo`; libc supplies a restorer that invokes the
+  internal `sigreturn` syscall and restores the complete interrupted context
+- the delivered signal and `sa_mask` remain blocked until `sigreturn`
+- signals do not yet interrupt a task sleeping inside a blocking syscall, and
+  `SA_RESTART` is recorded but not acted upon
 - process groups, sessions, and tty foreground-group delivery are not implemented yet
 
 Access mode and readiness:
@@ -180,6 +188,8 @@ Canonical read visibility:
 - `/dev/null`
 - `/dev/zero`
 - `/dev/tty`
+- `/proc`, `/proc/cpuinfo`, `/proc/meminfo`, `/proc/uptime`, `/proc/stat`,
+  `/proc/version`, `/proc/loadavg`, and `/proc/lampvm` (read-only)
 - absolute ext4 path (`/foo/bar`)
 
 ext4 open notes:
@@ -215,6 +225,8 @@ Coverage currently includes:
 - `dup/close/fcntl/read/poll/select` baseline
 - regular-file `lseek` and non-seekable fd `ESPIPE`
 - `sigaction/sigprocmask/kill` minimum default/ignored signal paths
+- userspace handler delivery, blocked-pending delivery after unmask, context
+  restoration, and repeated delivery (`user/tests/signal_delivery.c`)
 - `stat/fstat` file type and size behavior
 - ext4 directory `open/getdents` behavior
 - `access` existence/mode/error behavior
