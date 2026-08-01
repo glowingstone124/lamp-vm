@@ -458,7 +458,8 @@ Full memory fence.
 
 Hint instruction for spin-wait loops.
 
-- May yield host thread execution
+- Acts as a lightweight host CPU spin-wait hint; it does not force an OS
+  scheduler context switch.
 
 ---
 

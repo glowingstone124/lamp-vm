@@ -5,6 +5,7 @@
 
 #include "selftest.h"
 #include "vm.h"
+#include "engines/engine.h"
 #include "loadbin.h"
 #include "interrupt.h"
 #include "memory.h"
@@ -30,6 +31,25 @@ extern VM *vm_create(size_t memory_size,
                      const ProgramLayout *layout,
                      int smp_cores);
 extern void vm_destroy(VM *vm);
+
+static VmExecutionEngine g_selftest_engine = VM_ENGINE_CLASSIC;
+
+static VM *selftest_vm_create(size_t memory_size,
+                              const uint64_t *program,
+                              size_t program_size,
+                              const uint8_t *data,
+                              size_t data_size,
+                              const ProgramLayout *layout,
+                              int smp_cores) {
+    VM *vm = vm_create(memory_size, program, program_size,
+                       data, data_size, layout, smp_cores);
+    if (vm) {
+        vm->execution_engine = g_selftest_engine;
+    }
+    return vm;
+}
+
+#define vm_create selftest_vm_create
 
 static int run_selftest_startap_cpuid(void) {
     const vm_addr_t flag_addr = 0x3000;
@@ -162,6 +182,120 @@ static int run_selftest_mmu_percpu_root(void) {
     uint32_t bsp_root = vm_read32(vm, bsp_root_addr);
     uint32_t ap_root = vm_read32(vm, ap_root_addr);
     ok = ok && (bsp_root == 0x00111000u) && (ap_root == 0x00222000u);
+    vm_destroy(vm);
+    return ok;
+}
+
+static int run_selftest_mmu_global_tlb_flush(void) {
+    enum {
+        root_pa = 0x4000u,
+        l2_pa = 0x5000u,
+        first_pa = 0x6000u,
+        second_pa = 0x7000u,
+        va = 0x00123040u,
+    };
+    const uint32_t pde = (va >> 22) & 0x3FFu;
+    const uint32_t pte = (va >> 12) & 0x3FFu;
+    const uint32_t page_offset = va & 0xFFFu;
+    const uint32_t perms = MMU_PTE_P | MMU_PTE_W | MMU_PTE_X;
+    uint64_t program[] = {
+        INST(OP_HALT, 0, 0, 0, 0),
+    };
+    VM *vm = vm_create(MEM_SIZE, program,
+                       sizeof(program) / sizeof(program[0]),
+                       NULL, 0, NULL, 2);
+    uint32_t pa0 = 0u;
+    uint32_t pa1 = 0u;
+    int ok;
+
+    if (!vm) {
+        return 0;
+    }
+    store_le32(&vm->memory[root_pa + pde * 4u], l2_pa | perms);
+    store_le32(&vm->memory[l2_pa + pte * 4u], first_pa | perms);
+    for (int core = 0; core < 2; core++) {
+        vm->mmu.root[core] = root_pa;
+        vm->mmu.ctrl[core] = MMU_CTRL_ENABLE;
+        vm_mmu_flush_tlb(vm, (uint32_t)core);
+    }
+
+    ok = vm_mmu_translate_access_cpu(vm, &vm->cpus[0], va,
+                                     VM_MMU_ACC_READ, &pa0) &&
+         vm_mmu_translate_access_cpu(vm, &vm->cpus[1], va,
+                                     VM_MMU_ACC_READ, &pa1) &&
+         pa0 == first_pa + page_offset &&
+         pa1 == first_pa + page_offset;
+
+    store_le32(&vm->memory[l2_pa + pte * 4u], second_pa | perms);
+    ok = ok && vm_mmu_translate_access_cpu(vm, &vm->cpus[0], va,
+                                           VM_MMU_ACC_READ, &pa0) &&
+         vm_mmu_translate_access_cpu(vm, &vm->cpus[1], va,
+                                     VM_MMU_ACC_READ, &pa1) &&
+         pa0 == first_pa + page_offset &&
+         pa1 == first_pa + page_offset;
+
+    vm_mmu_flush_all_tlbs(vm);
+    ok = ok && vm_mmu_translate_access_cpu(vm, &vm->cpus[0], va,
+                                           VM_MMU_ACC_READ, &pa0) &&
+         vm_mmu_translate_access_cpu(vm, &vm->cpus[1], va,
+                                     VM_MMU_ACC_READ, &pa1) &&
+         pa0 == second_pa + page_offset &&
+         pa1 == second_pa + page_offset;
+    vm_destroy(vm);
+    return ok;
+}
+
+static int run_selftest_cached_fetch_invalidation(void) {
+    enum {
+        root_pa = 0x4000u,
+        l2_pa = 0x5000u,
+        first_pa = 0x6000u,
+        second_pa = 0x7000u,
+        va = 0x00123000u,
+    };
+    const uint32_t pde = (va >> 22) & 0x3FFu;
+    const uint32_t pte = (va >> 12) & 0x3FFu;
+    const uint32_t perms = MMU_PTE_P | MMU_PTE_W | MMU_PTE_X;
+    uint64_t program[] = {
+        INST(OP_HALT, 0, 0, 0, 0),
+    };
+    VM *vm = vm_create(MEM_SIZE, program,
+                       sizeof(program) / sizeof(program[0]),
+                       NULL, 0, NULL, 1);
+    uint64_t first_inst = INST(OP_MOVI, 1, 0, 0, 1);
+    uint64_t second_inst = INST(OP_MOVI, 1, 0, 0, 2);
+    int ok;
+
+    if (!vm) {
+        return 0;
+    }
+    vm->execution_engine = VM_ENGINE_CACHED;
+    store_le64(&vm->memory[first_pa], first_inst);
+    store_le64(&vm->memory[second_pa], second_inst);
+    store_le32(&vm->memory[root_pa + pde * 4u], l2_pa | perms);
+    store_le32(&vm->memory[l2_pa + pte * 4u], first_pa | perms);
+    vm->mmu.root[0] = root_pa;
+    vm->mmu.ctrl[0] = MMU_CTRL_ENABLE;
+    vm_mmu_flush_tlb(vm, 0u);
+    vm->cpus[0].ip = va;
+    (void)vm_engine_execute_cached(vm, &vm->cpus[0]);
+    ok = vm->cpus[0].regs[1] == 1u;
+
+    /* Changing the instruction bytes at the same physical address must be
+     * observed even without a mapping change. */
+    store_le64(&vm->memory[first_pa], second_inst);
+    vm->cpus[0].ip = va;
+    (void)vm_engine_execute_cached(vm, &vm->cpus[0]);
+    ok = ok && vm->cpus[0].regs[1] == 2u;
+
+    /* Restoring the old bytes through a different mapping must not reuse the
+     * cached host address after a global MMU epoch change. */
+    store_le64(&vm->memory[first_pa], first_inst);
+    store_le32(&vm->memory[l2_pa + pte * 4u], second_pa | perms);
+    vm_mmu_flush_all_tlbs(vm);
+    vm->cpus[0].ip = va;
+    (void)vm_engine_execute_cached(vm, &vm->cpus[0]);
+    ok = ok && vm->cpus[0].regs[1] == 2u;
     vm_destroy(vm);
     return ok;
 }
@@ -1284,7 +1418,8 @@ static int run_selftest_cpu_pacing(void) {
     return ok;
 }
 
-int run_selftests(void) {
+static int run_selftests_for_engine(VmExecutionEngine engine) {
+    g_selftest_engine = engine;
     int ok1 = run_selftest_startap_cpuid();
     int ok2 = run_selftest_ipi();
     int ok3 = run_selftest_mmu_percpu_root();
@@ -1307,7 +1442,11 @@ int run_selftests(void) {
     int ok20 = run_selftest_pci_audio_dma();
     int ok21 = run_selftest_runtime_stats();
     int ok22 = run_selftest_cpu_pacing();
+    int ok23 = run_selftest_mmu_global_tlb_flush();
 
+    printf("[selftest] engine=%s\n",
+           engine == VM_ENGINE_CACHED ? "cached" :
+           (engine == VM_ENGINE_THREADED ? "threaded" : "classic"));
     printf("[selftest] startap_cpuid: %s\n", ok1 ? "PASS" : "FAIL");
     printf("[selftest] ipi: %s\n", ok2 ? "PASS" : "FAIL");
     printf("[selftest] mmu_percpu_root: %s\n", ok3 ? "PASS" : "FAIL");
@@ -1330,10 +1469,32 @@ int run_selftests(void) {
     printf("[selftest] pci_audio_dma: %s\n", ok20 ? "PASS" : "FAIL");
     printf("[selftest] runtime_stats: %s\n", ok21 ? "PASS" : "FAIL");
     printf("[selftest] cpu_pacing: %s\n", ok22 ? "PASS" : "FAIL");
-    return (ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12 && ok13 && ok14 && ok15 && ok16 && ok17 && ok18 && ok19 && ok20 && ok21 && ok22) ? 0 : 1;
+    printf("[selftest] mmu_global_tlb_flush: %s\n", ok23 ? "PASS" : "FAIL");
+    return (ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12 && ok13 && ok14 && ok15 && ok16 && ok17 && ok18 && ok19 && ok20 && ok21 && ok22 && ok23) ? 0 : 1;
 }
 
-static int run_interpreter_benchmark_mode(const char *label, int enable_mmu) {
+int run_selftests(void) {
+    const int classic_ok =
+        run_selftests_for_engine(VM_ENGINE_CLASSIC) == 0;
+    const int cached_ok =
+        run_selftests_for_engine(VM_ENGINE_CACHED) == 0;
+    const int threaded_ok =
+        run_selftests_for_engine(VM_ENGINE_THREADED) == 0;
+    const int invalidation_ok = run_selftest_cached_fetch_invalidation();
+    printf("[selftest] cached_fetch_invalidation: %s\n",
+           invalidation_ok ? "PASS" : "FAIL");
+    g_selftest_engine = VM_ENGINE_CLASSIC;
+    return (classic_ok && cached_ok && threaded_ok && invalidation_ok) ? 0 : 1;
+}
+
+static const char *benchmark_engine_name(VmExecutionEngine engine) {
+    return engine == VM_ENGINE_CACHED ? "cached" :
+           (engine == VM_ENGINE_THREADED ? "threaded" : "classic");
+}
+
+static int run_interpreter_benchmark_mode(const char *label,
+                                          int enable_mmu,
+                                          VmExecutionEngine engine) {
     enum {
         BENCHMARK_ITERATIONS = 10000000u,
         BENCHMARK_MMU_ROOT = 0x4000u,
@@ -1364,6 +1525,7 @@ static int run_interpreter_benchmark_mode(const char *label, int enable_mmu) {
     /* Zero disables the virtual clock limiter so this measures the host-side
      * single-core interpreter ceiling rather than the configured vCPU clock. */
     vm->cpu_frequency_hz = 0u;
+    vm->execution_engine = engine;
     init_ivt(vm);
     if (enable_mmu) {
         const uint32_t page = (uint32_t)PROGRAM_BASE & ~0xFFFu;
@@ -1387,8 +1549,9 @@ static int run_interpreter_benchmark_mode(const char *label, int enable_mmu) {
         ? ((double)executed * 1000.0) / (double)elapsed_ns
         : 0.0;
 
-    printf("[benchmark] single-core %-8s: %.1f MIPS "
+    printf("[benchmark] %-7s single-core %-8s: %.1f MIPS "
            "(%llu instructions, %.1f ms)\n",
+           benchmark_engine_name(engine),
            label,
            mips,
            (unsigned long long)executed,
@@ -1408,7 +1571,9 @@ static int run_interpreter_benchmark_mode(const char *label, int enable_mmu) {
     return 0;
 }
 
-static int run_memory_benchmark_mode(const char *label, int enable_mmu) {
+static int run_memory_benchmark_mode(const char *label,
+                                     int enable_mmu,
+                                     VmExecutionEngine engine) {
     enum {
         BENCHMARK_ITERATIONS = 5000000u,
         BENCHMARK_MMU_ROOT = 0x4000u,
@@ -1441,6 +1606,7 @@ static int run_memory_benchmark_mode(const char *label, int enable_mmu) {
         return 1;
     }
     vm->cpu_frequency_hz = 0u;
+    vm->execution_engine = engine;
     init_ivt(vm);
     if (enable_mmu) {
         const uint32_t code_page = (uint32_t)PROGRAM_BASE & ~0xFFFu;
@@ -1467,8 +1633,9 @@ static int run_memory_benchmark_mode(const char *label, int enable_mmu) {
     mips = elapsed_ns != 0u
         ? ((double)executed * 1000.0) / (double)elapsed_ns
         : 0.0;
-    printf("[benchmark] single-core %-8s: %.1f MIPS "
+    printf("[benchmark] %-7s single-core %-8s: %.1f MIPS "
            "(%llu instructions, %.1f ms)\n",
+           benchmark_engine_name(engine),
            label,
            mips,
            (unsigned long long)executed,
@@ -1482,10 +1649,18 @@ static int run_memory_benchmark_mode(const char *label, int enable_mmu) {
 }
 
 int run_benchmark(void) {
-    const int flat_ok = run_interpreter_benchmark_mode("flat", 0);
-    const int mmu_ok = run_interpreter_benchmark_mode("MMU", 1);
-    const int memory_ok = run_memory_benchmark_mode("memory", 0);
-    const int memory_mmu_ok = run_memory_benchmark_mode("memory+MMU", 1);
-    return (flat_ok == 0 && mmu_ok == 0 &&
-            memory_ok == 0 && memory_mmu_ok == 0) ? 0 : 1;
+    int ok = 1;
+    const VmExecutionEngine engines[] = {
+        VM_ENGINE_CLASSIC,
+        VM_ENGINE_CACHED,
+        VM_ENGINE_THREADED,
+    };
+    for (size_t i = 0u; i < sizeof(engines) / sizeof(engines[0]); i++) {
+        const VmExecutionEngine engine = engines[i];
+        ok = ok && run_interpreter_benchmark_mode("flat", 0, engine) == 0;
+        ok = ok && run_interpreter_benchmark_mode("MMU", 1, engine) == 0;
+        ok = ok && run_memory_benchmark_mode("memory", 0, engine) == 0;
+        ok = ok && run_memory_benchmark_mode("memory+MMU", 1, engine) == 0;
+    }
+    return ok ? 0 : 1;
 }

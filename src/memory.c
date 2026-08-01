@@ -18,9 +18,14 @@ static inline void memcheck_align(VM *vm, vm_addr_t addr, size_t align, const ch
 }
 #endif
 
-static int vm_translate_or_panic(VM *vm, vm_addr_t addr, uint32_t access, const char *op, uint32_t *pa_out) {
+static int vm_translate_or_panic_cpu(VM *vm,
+                                     VCPU *cpu,
+                                     vm_addr_t addr,
+                                     uint32_t access,
+                                     const char *op,
+                                     uint32_t *pa_out) {
     uint32_t pa;
-    if (!vm_mmu_translate_access(vm, addr, access, &pa)) {
+    if (!vm_mmu_translate_access_cpu(vm, cpu, addr, access, &pa)) {
         panic(panic_format("%s page fault va: 0x%08x status=0x%08x info=0x%08x root_lo=0x%08x",
                            op,
                            addr,
@@ -34,21 +39,23 @@ static int vm_translate_or_panic(VM *vm, vm_addr_t addr, uint32_t access, const 
     return 1;
 }
 
-static int vm_translate_span_or_panic(VM *vm,
+static int vm_translate_span_or_panic_cpu(VM *vm,
+                                      VCPU *cpu,
                                       vm_addr_t addr,
                                       uint32_t len,
                                       uint32_t access,
                                       const char *op,
                                       uint32_t *pa_out) {
     for (uint32_t i = 0u; i < len; i++) {
-        if (!vm_translate_or_panic(vm, addr + i, access, op, &pa_out[i])) {
+        if (!vm_translate_or_panic_cpu(vm, cpu, addr + i, access, op, &pa_out[i])) {
             return 0;
         }
     }
     return 1;
 }
 
-static int vm_translate_contiguous_span_or_panic(VM *vm,
+static int vm_translate_contiguous_span_or_panic_cpu(VM *vm,
+                                                 VCPU *cpu,
                                                  vm_addr_t addr,
                                                  uint32_t len,
                                                  uint32_t access,
@@ -66,7 +73,7 @@ static int vm_translate_contiguous_span_or_panic(VM *vm,
     if (((addr & 0xFFFu) + len) > 0x1000u) {
         return 0;
     }
-    if (!vm_translate_or_panic(vm, addr, access, op, &pa)) {
+    if (!vm_translate_or_panic_cpu(vm, cpu, addr, access, op, &pa)) {
         return 0;
     }
     *pa_out = pa;
@@ -132,6 +139,7 @@ static void vm_fb_write32_locked(VM *vm, size_t fb_index, uint32_t value) {
 }
 
 static _Atomic uint32_t *atomic32_ptr_from_va_or_panic(VM *vm,
+                                                        VCPU *cpu,
                                                         vm_addr_t addr,
                                                         uint32_t access,
                                                         const char *op_name) {
@@ -141,8 +149,8 @@ static _Atomic uint32_t *atomic32_ptr_from_va_or_panic(VM *vm,
         panic(panic_format("%s unaligned address: 0x%08x", op_name, addr), vm);
         return NULL;
     }
-    if (!vm_translate_contiguous_span_or_panic(vm, addr, 4u, access, op_name, &pa_base)) {
-        if (!vm_translate_span_or_panic(vm, addr, 4u, access, op_name, pa)) {
+    if (!vm_translate_contiguous_span_or_panic_cpu(vm, cpu, addr, 4u, access, op_name, &pa_base)) {
+        if (!vm_translate_span_or_panic_cpu(vm, cpu, addr, 4u, access, op_name, pa)) {
             return NULL;
         }
         if (!vm_span_is_contiguous(pa, 4u)) {
@@ -166,10 +174,10 @@ static _Atomic uint32_t *atomic32_ptr_from_va_or_panic(VM *vm,
     return (_Atomic uint32_t *)(void *)(&vm->memory[pa_base]);
 }
 
-uint8_t vm_read8(VM *vm, vm_addr_t addr) {
+uint8_t vm_read8_cpu(VM *vm, VCPU *cpu, vm_addr_t addr) {
     uint32_t pa;
     size_t fb_index = 0;
-    if (!vm_translate_or_panic(vm, addr, VM_MMU_ACC_READ, "READ8", &pa)) {
+    if (!vm_translate_or_panic_cpu(vm, cpu, addr, VM_MMU_ACC_READ, "READ8", &pa)) {
         return 0u;
     }
     if (fb_byte_index(vm, pa, &fb_index)) {
@@ -186,13 +194,17 @@ uint8_t vm_read8(VM *vm, vm_addr_t addr) {
     return vm->memory[pa];
 }
 
-uint32_t vm_read32(VM *vm, vm_addr_t addr) {
+uint8_t vm_read8(VM *vm, vm_addr_t addr) {
+    return vm_read8_cpu(vm, vm_current_cpu(vm), addr);
+}
+
+uint32_t vm_read32_cpu(VM *vm, VCPU *cpu, vm_addr_t addr) {
     uint32_t pa_base;
     uint32_t pa[4];
 #ifdef VM_MEMCHECK
     memcheck_align(vm, addr, 4, "READ32");
 #endif
-    if (vm_translate_contiguous_span_or_panic(vm, addr, 4u, VM_MMU_ACC_READ, "READ32", &pa_base)) {
+    if (vm_translate_contiguous_span_or_panic_cpu(vm, cpu, addr, 4u, VM_MMU_ACC_READ, "READ32", &pa_base)) {
         size_t fb_index = 0u;
         if (fb_byte_index(vm, pa_base, &fb_index)) {
             return vm_fb_read32_locked(vm, fb_index);
@@ -205,12 +217,13 @@ uint32_t vm_read32(VM *vm, vm_addr_t addr) {
             return v;
         }
         if (!in_ram(vm, pa_base, 4u)) {
-            panic(panic_format("READ32 out of bounds: 0x%08x", pa_base), vm);
+            panic(panic_format("READ32 out of bounds: va=0x%08x pa=0x%08x",
+                               addr, pa_base), vm);
             return 0u;
         }
         return load_le32(&vm->memory[pa_base]);
     }
-    if (!vm_translate_span_or_panic(vm, addr, 4u, VM_MMU_ACC_READ, "READ32", pa)) {
+    if (!vm_translate_span_or_panic_cpu(vm, cpu, addr, 4u, VM_MMU_ACC_READ, "READ32", pa)) {
         return 0u;
     }
 
@@ -227,7 +240,8 @@ uint32_t vm_read32(VM *vm, vm_addr_t addr) {
             return v;
         }
         if (!in_ram(vm, pa[0], 4u)) {
-            panic(panic_format("READ32 out of bounds: 0x%08x", pa[0]), vm);
+            panic(panic_format("READ32 out of bounds: va=0x%08x pa=0x%08x",
+                               addr, pa[0]), vm);
             return 0u;
         }
         return load_le32(&vm->memory[pa[0]]);
@@ -248,12 +262,16 @@ uint32_t vm_read32(VM *vm, vm_addr_t addr) {
     return v;
 }
 
-uint64_t vm_read64(VM *vm, vm_addr_t addr) {
+uint32_t vm_read32(VM *vm, vm_addr_t addr) {
+    return vm_read32_cpu(vm, vm_current_cpu(vm), addr);
+}
+
+uint64_t vm_read64_cpu(VM *vm, VCPU *cpu, vm_addr_t addr) {
     uint32_t pa_base;
 #ifdef VM_MEMCHECK
     memcheck_align(vm, addr, 8, "READ64");
 #endif
-    if (vm_translate_contiguous_span_or_panic(vm, addr, 8u, VM_MMU_ACC_READ, "READ64", &pa_base)) {
+    if (vm_translate_contiguous_span_or_panic_cpu(vm, cpu, addr, 8u, VM_MMU_ACC_READ, "READ64", &pa_base)) {
         if (!find_mmio(vm, pa_base)) {
             if (!in_ram(vm, pa_base, 8u)) {
                 panic(panic_format("READ64 out of bounds: 0x%08x", pa_base), vm);
@@ -262,49 +280,54 @@ uint64_t vm_read64(VM *vm, vm_addr_t addr) {
             return load_le64(&vm->memory[pa_base]);
         }
     }
-    uint64_t lo = vm_read32(vm, addr);
-    uint64_t hi = vm_read32(vm, addr + 4);
+    uint64_t lo = vm_read32_cpu(vm, cpu, addr);
+    uint64_t hi = vm_read32_cpu(vm, cpu, addr + 4);
     return lo | (hi << 32);
 }
 
-uint32_t vm_atomic_load32_acquire(VM *vm, vm_addr_t addr) {
-    _Atomic uint32_t *ptr = atomic32_ptr_from_va_or_panic(vm, addr, VM_MMU_ACC_READ, "LDAR");
+uint64_t vm_read64(VM *vm, vm_addr_t addr) {
+    return vm_read64_cpu(vm, vm_current_cpu(vm), addr);
+}
+
+uint32_t vm_atomic_load32_acquire_cpu(VM *vm, VCPU *cpu, vm_addr_t addr) {
+    _Atomic uint32_t *ptr = atomic32_ptr_from_va_or_panic(vm, cpu, addr, VM_MMU_ACC_READ, "LDAR");
     if (!ptr) {
         return 0;
     }
     return atomic_load_explicit(ptr, memory_order_acquire);
 }
 
-void vm_atomic_store32_release(VM *vm, vm_addr_t addr, uint32_t value) {
-    _Atomic uint32_t *ptr = atomic32_ptr_from_va_or_panic(vm, addr, VM_MMU_ACC_WRITE, "STLR");
+void vm_atomic_store32_release_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint32_t value) {
+    _Atomic uint32_t *ptr = atomic32_ptr_from_va_or_panic(vm, cpu, addr, VM_MMU_ACC_WRITE, "STLR");
     if (!ptr) {
         return;
     }
     atomic_store_explicit(ptr, value, memory_order_release);
 }
 
-uint32_t vm_atomic_exchange32_seqcst(VM *vm, vm_addr_t addr, uint32_t value) {
-    _Atomic uint32_t *ptr = atomic32_ptr_from_va_or_panic(vm, addr, VM_MMU_ACC_READ | VM_MMU_ACC_WRITE, "XCHG");
+uint32_t vm_atomic_exchange32_seqcst_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint32_t value) {
+    _Atomic uint32_t *ptr = atomic32_ptr_from_va_or_panic(vm, cpu, addr, VM_MMU_ACC_READ | VM_MMU_ACC_WRITE, "XCHG");
     if (!ptr) {
         return 0;
     }
     return atomic_exchange_explicit(ptr, value, memory_order_seq_cst);
 }
 
-uint32_t vm_atomic_fetch_add32_seqcst(VM *vm, vm_addr_t addr, uint32_t value) {
-    _Atomic uint32_t *ptr = atomic32_ptr_from_va_or_panic(vm, addr, VM_MMU_ACC_READ | VM_MMU_ACC_WRITE, "XADD");
+uint32_t vm_atomic_fetch_add32_seqcst_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint32_t value) {
+    _Atomic uint32_t *ptr = atomic32_ptr_from_va_or_panic(vm, cpu, addr, VM_MMU_ACC_READ | VM_MMU_ACC_WRITE, "XADD");
     if (!ptr) {
         return 0;
     }
     return atomic_fetch_add_explicit(ptr, value, memory_order_seq_cst);
 }
 
-uint32_t vm_atomic_compare_exchange32_seqcst(VM *vm,
+uint32_t vm_atomic_compare_exchange32_seqcst_cpu(VM *vm,
+                                             VCPU *cpu,
                                              vm_addr_t addr,
                                              uint32_t expected,
                                              uint32_t desired,
                                              int *success) {
-    _Atomic uint32_t *ptr = atomic32_ptr_from_va_or_panic(vm, addr, VM_MMU_ACC_READ | VM_MMU_ACC_WRITE, "CAS");
+    _Atomic uint32_t *ptr = atomic32_ptr_from_va_or_panic(vm, cpu, addr, VM_MMU_ACC_READ | VM_MMU_ACC_WRITE, "CAS");
     if (!ptr) {
         if (success) {
             *success = 0;
@@ -323,10 +346,35 @@ uint32_t vm_atomic_compare_exchange32_seqcst(VM *vm,
     return observed;
 }
 
-void vm_write8(VM *vm, vm_addr_t addr, uint8_t value) {
+uint32_t vm_atomic_load32_acquire(VM *vm, vm_addr_t addr) {
+    return vm_atomic_load32_acquire_cpu(vm, vm_current_cpu(vm), addr);
+}
+
+void vm_atomic_store32_release(VM *vm, vm_addr_t addr, uint32_t value) {
+    vm_atomic_store32_release_cpu(vm, vm_current_cpu(vm), addr, value);
+}
+
+uint32_t vm_atomic_exchange32_seqcst(VM *vm, vm_addr_t addr, uint32_t value) {
+    return vm_atomic_exchange32_seqcst_cpu(vm, vm_current_cpu(vm), addr, value);
+}
+
+uint32_t vm_atomic_fetch_add32_seqcst(VM *vm, vm_addr_t addr, uint32_t value) {
+    return vm_atomic_fetch_add32_seqcst_cpu(vm, vm_current_cpu(vm), addr, value);
+}
+
+uint32_t vm_atomic_compare_exchange32_seqcst(VM *vm,
+                                             vm_addr_t addr,
+                                             uint32_t expected,
+                                             uint32_t desired,
+                                             int *success) {
+    return vm_atomic_compare_exchange32_seqcst_cpu(vm, vm_current_cpu(vm), addr,
+                                                   expected, desired, success);
+}
+
+void vm_write8_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint8_t value) {
     uint32_t pa;
     size_t fb_index = 0;
-    if (!vm_translate_or_panic(vm, addr, VM_MMU_ACC_WRITE, "WRITE8", &pa)) {
+    if (!vm_translate_or_panic_cpu(vm, cpu, addr, VM_MMU_ACC_WRITE, "WRITE8", &pa)) {
         return;
     }
     if (fb_byte_index(vm, pa, &fb_index)) {
@@ -346,13 +394,17 @@ void vm_write8(VM *vm, vm_addr_t addr, uint8_t value) {
     vm->memory[pa] = value;
 }
 
-void vm_write32(VM *vm, vm_addr_t addr, uint32_t value) {
+void vm_write8(VM *vm, vm_addr_t addr, uint8_t value) {
+    vm_write8_cpu(vm, vm_current_cpu(vm), addr, value);
+}
+
+void vm_write32_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint32_t value) {
     uint32_t pa_base;
     uint32_t pa[4];
 #ifdef VM_MEMCHECK
     memcheck_align(vm, addr, 4, "WRITE32");
 #endif
-    if (vm_translate_contiguous_span_or_panic(vm, addr, 4u, VM_MMU_ACC_WRITE, "WRITE32", &pa_base)) {
+    if (vm_translate_contiguous_span_or_panic_cpu(vm, cpu, addr, 4u, VM_MMU_ACC_WRITE, "WRITE32", &pa_base)) {
         size_t fb_index = 0u;
         if (fb_byte_index(vm, pa_base, &fb_index)) {
             vm_fb_write32_locked(vm, fb_index, value);
@@ -372,7 +424,7 @@ void vm_write32(VM *vm, vm_addr_t addr, uint32_t value) {
         store_le32(&vm->memory[pa_base], value);
         return;
     }
-    if (!vm_translate_span_or_panic(vm, addr, 4u, VM_MMU_ACC_WRITE, "WRITE32", pa)) {
+    if (!vm_translate_span_or_panic_cpu(vm, cpu, addr, 4u, VM_MMU_ACC_WRITE, "WRITE32", pa)) {
         return;
     }
 
@@ -410,12 +462,16 @@ void vm_write32(VM *vm, vm_addr_t addr, uint32_t value) {
     }
 }
 
-void vm_write64(VM *vm, vm_addr_t addr, uint64_t value) {
+void vm_write32(VM *vm, vm_addr_t addr, uint32_t value) {
+    vm_write32_cpu(vm, vm_current_cpu(vm), addr, value);
+}
+
+void vm_write64_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint64_t value) {
     uint32_t pa_base;
 #ifdef VM_MEMCHECK
     memcheck_align(vm, addr, 8, "WRITE64");
 #endif
-    if (vm_translate_contiguous_span_or_panic(vm, addr, 8u, VM_MMU_ACC_WRITE, "WRITE64", &pa_base)) {
+    if (vm_translate_contiguous_span_or_panic_cpu(vm, cpu, addr, 8u, VM_MMU_ACC_WRITE, "WRITE64", &pa_base)) {
         if (!find_mmio(vm, pa_base)) {
             if (!in_ram(vm, pa_base, 8u)) {
                 panic(panic_format("WRITE64 out of bounds: 0x%08x", pa_base), vm);
@@ -425,19 +481,30 @@ void vm_write64(VM *vm, vm_addr_t addr, uint64_t value) {
             return;
         }
     }
-    vm_write32(vm, addr, (uint32_t)(value & 0xFFFFFFFFu));
-    vm_write32(vm, addr + 4u, (uint32_t)((value >> 32) & 0xFFFFFFFFu));
+    vm_write32_cpu(vm, cpu, addr, (uint32_t)(value & 0xFFFFFFFFu));
+    vm_write32_cpu(vm, cpu, addr + 4u, (uint32_t)((value >> 32) & 0xFFFFFFFFu));
 }
 
-uint32_t vm_fetch64_exec(VM *vm, vm_addr_t addr, uint64_t *out_inst) {
+void vm_write64(VM *vm, vm_addr_t addr, uint64_t value) {
+    vm_write64_cpu(vm, vm_current_cpu(vm), addr, value);
+}
+
+uint32_t vm_fetch64_exec_cpu_ex(VM *vm,
+                                VCPU *cpu,
+                                vm_addr_t addr,
+                                uint64_t *out_inst,
+                                uint32_t *host_pa_out) {
     uint32_t pa_base;
     uint32_t pa[8];
     uint64_t inst = 0u;
+    if (host_pa_out) {
+        *host_pa_out = UINT32_MAX;
+    }
     if (!out_inst) {
         return 0u;
     }
 
-    if (vm_translate_contiguous_span_or_panic(vm, addr, 8u, VM_MMU_ACC_EXEC, "IFETCH", &pa_base)) {
+    if (vm_translate_contiguous_span_or_panic_cpu(vm, cpu, addr, 8u, VM_MMU_ACC_EXEC, "IFETCH", &pa_base)) {
         if (find_mmio(vm, pa_base)) {
             panic(panic_format("IFETCH from MMIO: 0x%08x", addr), vm);
             return 0u;
@@ -448,9 +515,12 @@ uint32_t vm_fetch64_exec(VM *vm, vm_addr_t addr, uint64_t *out_inst) {
         }
         memcpy(&inst, &vm->memory[pa_base], sizeof(inst));
         *out_inst = inst;
+        if (host_pa_out) {
+            *host_pa_out = pa_base;
+        }
         return 1u;
     }
-    if (!vm_translate_span_or_panic(vm, addr, 8u, VM_MMU_ACC_EXEC, "IFETCH", pa)) {
+    if (!vm_translate_span_or_panic_cpu(vm, cpu, addr, 8u, VM_MMU_ACC_EXEC, "IFETCH", pa)) {
         return 0u;
     }
 
@@ -465,6 +535,9 @@ uint32_t vm_fetch64_exec(VM *vm, vm_addr_t addr, uint64_t *out_inst) {
         }
         memcpy(&inst, &vm->memory[pa[0]], sizeof(inst));
         *out_inst = inst;
+        if (host_pa_out) {
+            *host_pa_out = pa[0];
+        }
         return 1u;
     }
 
@@ -481,4 +554,12 @@ uint32_t vm_fetch64_exec(VM *vm, vm_addr_t addr, uint64_t *out_inst) {
     }
     *out_inst = inst;
     return 1u;
+}
+
+uint32_t vm_fetch64_exec_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint64_t *out_inst) {
+    return vm_fetch64_exec_cpu_ex(vm, cpu, addr, out_inst, NULL);
+}
+
+uint32_t vm_fetch64_exec(VM *vm, vm_addr_t addr, uint64_t *out_inst) {
+    return vm_fetch64_exec_cpu(vm, vm_current_cpu(vm), addr, out_inst);
 }

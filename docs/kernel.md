@@ -173,6 +173,9 @@ Note:
 - VM exposes MMU MMIO at `0x0074F000` and advertises `MMU_PAGING` in BootInfo/SYSINFO features.
 - MMU control/root/fault registers are now modeled per-CPU (SMP-safe address-space control surface).
 - Kernel programs a 2-level 4KB paging structure and enables MMU on BSP and AP cores.
+- Page-table updates are serialized and issue the MMU global TLB-epoch flush,
+  so permission tightening (notably the ELF loader's temporary W+X to final
+  RX/R transition) becomes visible to every vCPU before execution continues.
 - Current mapping policy is identity map for kernel physical window (`0..KERNEL_MEM_SIZE + FB_SIZE`).
 - Initial page permissions are hardened to Unix-like baseline:
   - `.text`: `RX`

@@ -37,12 +37,10 @@ static inline int mmu_phys_range_ok(const VM *vm, uint32_t pa, uint32_t len) {
     return (len <= ((uint32_t)vm->memory_size - pa)) ? 1 : 0;
 }
 
-static inline uint32_t mmu_core_id(VM *vm) {
-    VCPU *cpu;
+static inline uint32_t mmu_core_id_for_cpu(VM *vm, const VCPU *cpu) {
     if (!vm) {
         return 0u;
     }
-    cpu = vm_current_cpu(vm);
     if (!cpu || cpu->core_id < 0 || cpu->core_id >= (int)MMU_MAX_CORES) {
         return 0u;
     }
@@ -50,6 +48,10 @@ static inline uint32_t mmu_core_id(VM *vm) {
         return 0u;
     }
     return (uint32_t)cpu->core_id;
+}
+
+static inline uint32_t mmu_core_id(VM *vm) {
+    return mmu_core_id_for_cpu(vm, vm_current_cpu(vm));
 }
 
 static inline void mmu_set_fault(VM *vm, uint32_t core_id, uint32_t vaddr, uint32_t access, uint32_t reason) {
@@ -154,20 +156,39 @@ void vm_mmu_flush_tlb(VM *vm, uint32_t core_id) {
     if (!vm || !vm->cpus || core_id >= (uint32_t)vm->smp_cores) {
         return;
     }
-    memset(vm->cpus[core_id].tlb, 0, sizeof(vm->cpus[core_id].tlb));
+    /* Only the owning vCPU writes its TLB entries.  Invalidating through an
+     * epoch avoids racing memset() against another host CPU performing a TLB
+     * lookup and gives translated-code caches the same invalidation source. */
+    atomic_fetch_add_explicit(&vm->cpus[core_id].mmu_epoch,
+                              1u,
+                              memory_order_release);
 }
 
-int vm_mmu_translate_access(VM *vm, uint32_t vaddr, uint32_t access, uint32_t *pa_out) {
+void vm_mmu_flush_all_tlbs(VM *vm) {
+    if (!vm || !vm->cpus) {
+        return;
+    }
+    for (int core_id = 0; core_id < vm->smp_cores; core_id++) {
+        vm_mmu_flush_tlb(vm, (uint32_t)core_id);
+    }
+}
+
+int vm_mmu_translate_access_cpu(VM *vm,
+                                VCPU *cpu,
+                                uint32_t vaddr,
+                                uint32_t access,
+                                uint32_t *pa_out) {
     uint32_t core_id;
     uint32_t root;
     uint32_t vpn;
     uint32_t tlb_index;
     uint32_t required_perms;
+    uint64_t epoch;
     VM_TlbEntry *entry;
     if (!vm || !pa_out) {
         return 0;
     }
-    core_id = mmu_core_id(vm);
+    core_id = mmu_core_id_for_cpu(vm, cpu);
     if ((vm->mmu.ctrl[core_id] & MMU_CTRL_ENABLE) == 0u) {
         *pa_out = vaddr;
         return 1;
@@ -177,8 +198,10 @@ int vm_mmu_translate_access(VM *vm, uint32_t vaddr, uint32_t access, uint32_t *p
     vpn = vaddr >> 12;
     tlb_index = vpn & (VM_MMU_TLB_ENTRIES - 1u);
     required_perms = mmu_access_required_perms(access);
+    epoch = atomic_load_explicit(&cpu->mmu_epoch, memory_order_acquire);
     entry = &vm->cpus[core_id].tlb[tlb_index];
     if (entry->valid != 0u &&
+        entry->epoch == epoch &&
         entry->vpn == vpn &&
         entry->root == root &&
         (entry->perms & required_perms) == required_perms) {
@@ -197,9 +220,14 @@ int vm_mmu_translate_access(VM *vm, uint32_t vaddr, uint32_t access, uint32_t *p
         entry->ppn = pa & 0xFFFFF000u;
         entry->root = root;
         entry->perms = perms;
+        entry->epoch = epoch;
         *pa_out = pa;
         return 1;
     }
+}
+
+int vm_mmu_translate_access(VM *vm, uint32_t vaddr, uint32_t access, uint32_t *pa_out) {
+    return vm_mmu_translate_access_cpu(vm, vm_current_cpu(vm), vaddr, access, pa_out);
 }
 
 static uint32_t mmu_read32(VM *vm, uint32_t addr) {
@@ -207,7 +235,7 @@ static uint32_t mmu_read32(VM *vm, uint32_t addr) {
     const uint32_t offset = addr - MMU_BASE;
     switch (offset) {
         case MMU_REG_CAP:
-            return (2u) | (2u << 8) | (12u << 16) | ((MMU_MAX_CORES & 0xFFu) << 24);
+            return (3u) | (2u << 8) | (12u << 16) | ((MMU_MAX_CORES & 0xFFu) << 24);
         case MMU_REG_CTRL:
             return vm->mmu.ctrl[core_id];
         case MMU_REG_ROOT_LO:
@@ -222,6 +250,8 @@ static uint32_t mmu_read32(VM *vm, uint32_t addr) {
             return hi32_u64(vm->mmu.fault_addr[core_id]);
         case MMU_REG_FAULT_INFO:
             return vm->mmu.fault_info[core_id];
+        case MMU_REG_TLB_FLUSH:
+            return 0u;
         default:
             fprintf(stderr, "Unknown MMU MMIO register offset: 0x%08x\n", offset);
             return 0u;
@@ -249,6 +279,13 @@ static void mmu_write32(VM *vm, uint32_t addr, uint32_t value) {
                 vm->mmu.fault_status[core_id] = 0u;
                 vm->mmu.fault_addr[core_id] = 0u;
                 vm->mmu.fault_info[core_id] = 0u;
+            }
+            return;
+        case MMU_REG_TLB_FLUSH:
+            if ((value & MMU_TLB_FLUSH_GLOBAL) != 0u) {
+                vm_mmu_flush_all_tlbs(vm);
+            } else if ((value & MMU_TLB_FLUSH_LOCAL) != 0u) {
+                vm_mmu_flush_tlb(vm, core_id);
             }
             return;
         default:

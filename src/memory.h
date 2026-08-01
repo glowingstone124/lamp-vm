@@ -13,10 +13,29 @@
 
 typedef uint32_t vm_addr_t;
 
+uint8_t vm_read8_cpu(VM *vm, VCPU *cpu, vm_addr_t addr);
+uint32_t vm_read32_cpu(VM *vm, VCPU *cpu, vm_addr_t addr);
+uint64_t vm_read64_cpu(VM *vm, VCPU *cpu, vm_addr_t addr);
 uint8_t vm_read8(VM *vm, vm_addr_t addr);
 uint32_t vm_read32(VM *vm, vm_addr_t addr);
 uint64_t vm_read64(VM *vm, vm_addr_t addr);
+uint32_t vm_fetch64_exec_cpu_ex(VM *vm,
+                                VCPU *cpu,
+                                vm_addr_t addr,
+                                uint64_t *out_inst,
+                                uint32_t *host_pa_out);
+uint32_t vm_fetch64_exec_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint64_t *out_inst);
 uint32_t vm_fetch64_exec(VM *vm, vm_addr_t addr, uint64_t *out_inst);
+uint32_t vm_atomic_load32_acquire_cpu(VM *vm, VCPU *cpu, vm_addr_t addr);
+void vm_atomic_store32_release_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint32_t value);
+uint32_t vm_atomic_exchange32_seqcst_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint32_t value);
+uint32_t vm_atomic_fetch_add32_seqcst_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint32_t value);
+uint32_t vm_atomic_compare_exchange32_seqcst_cpu(VM *vm,
+                                                 VCPU *cpu,
+                                                 vm_addr_t addr,
+                                                 uint32_t expected,
+                                                 uint32_t desired,
+                                                 int *success);
 uint32_t vm_atomic_load32_acquire(VM *vm, vm_addr_t addr);
 void vm_atomic_store32_release(VM *vm, vm_addr_t addr, uint32_t value);
 uint32_t vm_atomic_exchange32_seqcst(VM *vm, vm_addr_t addr, uint32_t value);
@@ -77,4 +96,7 @@ static inline void store_le64(void *p, uint64_t v) {
 void vm_write8(VM *vm, vm_addr_t addr, uint8_t value);
 void vm_write32(VM *vm, vm_addr_t addr, uint32_t value);
 void vm_write64(VM *vm, vm_addr_t addr, uint64_t value);
+void vm_write8_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint8_t value);
+void vm_write32_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint32_t value);
+void vm_write64_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint64_t value);
 #endif // VM_MEMORY_H

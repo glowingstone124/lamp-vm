@@ -104,15 +104,15 @@ static uint32_t irq_bitmap_read32(const atomic_uint_fast64_t *bitmap,
     return (uint32_t)((word >> shift) & 0xFFFFFFFFu);
 }
 
-static inline void isr_push_u32(VM *vm, uint32_t v) {
-    isr_push(vm, (uint64_t)v);
+static inline void isr_push_u32_cpu(VM *vm, VCPU *cpu, uint32_t v) {
+    isr_push_cpu(vm, cpu, (uint64_t)v);
 }
 
-static inline uint32_t isr_pop_u32(VM *vm) {
-    return (uint32_t)isr_pop(vm);
+static inline uint32_t isr_pop_u32_cpu(VM *vm, VCPU *cpu) {
+    return (uint32_t)isr_pop_cpu(vm, cpu);
 }
 
-static void irqprobe_dump_call_top(VM *vm, const VCPU *cpu, const char *tag) {
+static void irqprobe_dump_call_top(VM *vm, VCPU *cpu, const char *tag) {
     if (!vm || !cpu) {
         return;
     }
@@ -131,7 +131,8 @@ static void irqprobe_dump_call_top(VM *vm, const VCPU *cpu, const char *tag) {
         if (idx >= CALL_STACK_SIZE) {
             break;
         }
-        uint64_t v = vm_read64(vm, cpu->call_stack_base + (vm_addr_t)(idx * 8u));
+        uint64_t v = vm_read64_cpu(vm, cpu,
+                                   cpu->call_stack_base + (vm_addr_t)(idx * 8u));
         fprintf(stderr,
                 "[%s] core=%d call[%u]=0x%08x\n",
                 tag,
@@ -214,8 +215,7 @@ void vm_interrupt_eoi(VM *vm, int core_id, uint32_t int_no) {
     irq_refresh_pending_word(vm, core_id, int_no >> 6);
 }
 
-void vm_enter_interrupt(VM *vm, uint32_t int_no) {
-    VCPU *cpu = vm_current_cpu(vm);
+void vm_enter_interrupt_cpu(VM *vm, VCPU *cpu, uint32_t int_no) {
     if (!cpu)
         return;
     if (int_no >= IVT_SIZE)
@@ -224,7 +224,7 @@ void vm_enter_interrupt(VM *vm, uint32_t int_no) {
     if (cpu->in_interrupt)
         return;
 
-    const uint64_t isr_ip = vm_read64(vm, IVT_BASE + int_no * 8);
+    const uint64_t isr_ip = vm_read64_cpu(vm, cpu, IVT_BASE + int_no * 8);
     if (isr_ip == UINT64_MAX)
         return;
 
@@ -265,11 +265,11 @@ void vm_enter_interrupt(VM *vm, uint32_t int_no) {
         g_vfork_irq_probe_remaining[cpu->core_id]--;
     }
 
-    isr_push(vm, (uint64_t)cpu->ip);
-    isr_push(vm, (uint64_t)cpu->flags);
+    isr_push_cpu(vm, cpu, (uint64_t)cpu->ip);
+    isr_push_cpu(vm, cpu, (uint64_t)cpu->flags);
 
     for (uint32_t i = 0; i < REG_COUNT; i++) {
-        isr_push_u32(vm, cpu->regs[i]);
+        isr_push_u32_cpu(vm, cpu, cpu->regs[i]);
     }
 
     /*
@@ -283,8 +283,11 @@ void vm_enter_interrupt(VM *vm, uint32_t int_no) {
     cpu->active_interrupt_no = int_no;
 }
 
-void vm_iret(VM *vm) {
-    VCPU *cpu = vm_current_cpu(vm);
+void vm_enter_interrupt(VM *vm, uint32_t int_no) {
+    vm_enter_interrupt_cpu(vm, vm_current_cpu(vm), int_no);
+}
+
+void vm_iret_cpu(VM *vm, VCPU *cpu) {
     const int traced_vfork_iret =
         cpu &&
         cpu->last_ip >= (size_t)0x00134358u &&
@@ -296,11 +299,11 @@ void vm_iret(VM *vm) {
 
     for (;;) {
         for (int i = (int)REG_COUNT - 1; i >= 0; i--) {
-            cpu->regs[i] = isr_pop_u32(vm);
+            cpu->regs[i] = isr_pop_u32_cpu(vm, cpu);
         }
 
-        cpu->flags = (unsigned int)isr_pop(vm);
-        cpu->ip = (size_t)(vm_addr_t)isr_pop(vm);
+        cpu->flags = (unsigned int)isr_pop_cpu(vm, cpu);
+        cpu->ip = (size_t)(vm_addr_t)isr_pop_cpu(vm, cpu);
 
         if (!ip_is_user((vm_addr_t)cpu->ip) ||
             sp_is_user_stack((uint32_t)cpu->regs[30]) ||
@@ -343,6 +346,10 @@ void vm_iret(VM *vm) {
 
     cpu->in_interrupt = 0;
     cpu->active_interrupt_no = IVT_SIZE;
+}
+
+void vm_iret(VM *vm) {
+    vm_iret_cpu(vm, vm_current_cpu(vm));
 }
 
 void vm_handle_interrupts(VM *vm, VCPU *cpu) {
@@ -401,7 +408,7 @@ void vm_handle_interrupts(VM *vm, VCPU *cpu) {
         }
     }
 
-    vm_enter_interrupt(vm, best_int_no);
+    vm_enter_interrupt_cpu(vm, cpu, best_int_no);
 }
 
 void init_ivt(VM *vm) {

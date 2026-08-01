@@ -186,9 +186,12 @@ typedef struct VM_Debug VM_Debug;
 #define MMU_REG_FAULT_ADDR_LO 0x014u
 #define MMU_REG_FAULT_ADDR_HI 0x018u
 #define MMU_REG_FAULT_INFO 0x01Cu
+#define MMU_REG_TLB_FLUSH 0x020u
 #define MMU_MMIO_SIZE 0x100u
 
 #define MMU_CTRL_ENABLE 0x01u
+#define MMU_TLB_FLUSH_LOCAL 0x01u
+#define MMU_TLB_FLUSH_GLOBAL 0x02u
 
 #define MMU_PTE_P 0x00000001u
 #define MMU_PTE_W 0x00000002u
@@ -237,7 +240,15 @@ typedef struct VM_Debug VM_Debug;
 #define VM_MMU_ACC_USER 0x08u
 #define VM_MMU_TLB_ENTRIES 64u
 #define VM_DECODE_CACHE_ENTRIES 256u
+#define VM_THREADED_BLOCK_CACHE_ENTRIES 64u
+#define VM_THREADED_BLOCK_MAX_OPS 16u
 typedef uint32_t vm_addr_t;
+
+typedef enum {
+    VM_ENGINE_CLASSIC = 0,
+    VM_ENGINE_CACHED = 1,
+    VM_ENGINE_THREADED = 2,
+} VmExecutionEngine;
 
 typedef struct {
     FILE *fp;
@@ -291,6 +302,7 @@ typedef struct {
 } MMIO_Device;
 
 typedef struct {
+    uint64_t epoch;
     uint32_t vpn;
     uint32_t ppn;
     uint32_t root;
@@ -299,15 +311,40 @@ typedef struct {
 } VM_TlbEntry;
 
 typedef struct {
+    uint64_t mmu_epoch;
     vm_addr_t ip;
+    uint32_t host_pa;
+    uint32_t mmio_epoch;
     uint64_t inst;
     int32_t imm;
     uint8_t op;
     uint8_t rd;
     uint8_t rs1;
     uint8_t rs2;
+    uint8_t translated;
     uint8_t valid;
 } VM_DecodeCacheEntry;
+
+typedef struct {
+    vm_addr_t ip;
+    int32_t imm;
+    uint8_t op;
+    uint8_t rd;
+    uint8_t rs1;
+    uint8_t rs2;
+} VM_DecodedOp;
+
+typedef struct {
+    uint64_t mmu_epoch;
+    vm_addr_t start_ip;
+    uint32_t host_pa;
+    uint32_t mmio_epoch;
+    uint8_t count;
+    uint8_t valid;
+    uint16_t reserved;
+    uint64_t raw[VM_THREADED_BLOCK_MAX_OPS];
+    VM_DecodedOp ops[VM_THREADED_BLOCK_MAX_OPS];
+} VM_DecodedBlock;
 
 typedef struct VmRuntimeStats {
     uint64_t cpu_frequency_hz;
@@ -339,8 +376,10 @@ struct VCPU {
     vm_addr_t data_stack_base;
     vm_addr_t isr_stack_base;
     int is_bsp;
+    atomic_uint_fast64_t mmu_epoch;
     VM_TlbEntry tlb[VM_MMU_TLB_ENTRIES];
     VM_DecodeCacheEntry decode_cache[VM_DECODE_CACHE_ENTRIES];
+    VM_DecodedBlock threaded_blocks[VM_THREADED_BLOCK_CACHE_ENTRIES];
 };
 
 extern _Thread_local VCPU *vm_tls_vcpu;
@@ -349,6 +388,7 @@ static inline VCPU *vm_current_cpu(VM *vm);
 
 struct VM{
     _Atomic unsigned int stop_flags;
+    VmExecutionEngine execution_engine;
     uint8_t *memory;
     size_t memory_size;
 
@@ -421,7 +461,8 @@ struct VM{
 
     MMIO_Device *mmio_devices[MAX_MMIO_DEVICES];
     int mmio_count;
-    uint8_t mmio_page_map[VM_MMIO_PAGE_MAP_BYTES];
+    atomic_uchar mmio_page_map[VM_MMIO_PAGE_MAP_BYTES];
+    atomic_uint_fast32_t mmio_epoch;
     uint8_t mmio_page_map_ready;
     MMIO_Device *mmio_cache_dev;
     uint32_t mmio_cache_start;
@@ -473,6 +514,8 @@ static inline VCPU *vm_current_cpu(VM *vm) {
         return NULL;
     return &vm->cpus[0];
 }
+
+void vm_mmio_mark_range(VM *vm, uint32_t start, uint32_t end);
 
 static inline void vm_shared_lock(VM *vm) {
     if (vm)

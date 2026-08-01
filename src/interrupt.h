@@ -6,13 +6,29 @@
 #include "vm.h"
 
 #define BSP_CORE 0
+
+static inline int vm_interrupt_pending_fast(const VM *vm, const VCPU *cpu) {
+    if (!vm || !cpu || cpu->in_interrupt || cpu->irq_masked ||
+        !vm->interrupt_bitmap || cpu->core_id < 0 ||
+        cpu->core_id >= vm->smp_cores) {
+        return 0;
+    }
+    if (!vm->interrupt_pending_summary) {
+        return 1;
+    }
+    return atomic_load_explicit(&vm->interrupt_pending_summary[cpu->core_id],
+                                memory_order_acquire) != 0u;
+}
+
 void vm_handle_interrupts(VM *vm, VCPU *cpu);
 void init_ivt(VM *vm);
 void register_isr(VM *vm, uint32_t int_no, uint64_t isr_ip);
 void trigger_interrupt(VM *vm, uint32_t int_no);
 void trigger_interrupt_target(VM *vm, int core_id, uint32_t int_no);
 
+void vm_enter_interrupt_cpu(VM *vm, VCPU *cpu, uint32_t int_no);
 void vm_enter_interrupt(VM *vm, uint32_t int_no);
+void vm_iret_cpu(VM *vm, VCPU *cpu);
 void vm_iret(VM *vm);
 
 uint32_t vm_interrupt_read_pending32(VM *vm, int core_id, uint32_t reg_index);

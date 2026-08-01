@@ -57,6 +57,10 @@ static void pci_update_bar_window(VM *vm, PciFunction *f, uint32_t bar_index) {
         if (active) {
             w->mmio.start = bar->base;
             w->mmio.end = bar->base + bar->size - 1u;
+            /* The page filter is monotonic: stale positives after BAR moves
+             * are harmless, while marking the new window prevents a false
+             * RAM classification on another vCPU. */
+            vm_mmio_mark_range(vm, w->mmio.start, w->mmio.end);
         } else {
             w->mmio.start = 0xFFFFFFFFu;
             w->mmio.end = 0x00000000u;

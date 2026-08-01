@@ -173,6 +173,9 @@ int ether_init(VM *vm, ether_backend_t *backend) {
     dev.write32 = ether_mmio_write32;
     if (vm->mmio_count < MAX_MMIO_DEVICES) {
         vm->mmio_devices[vm->mmio_count++] = &dev;
+        if (vm->mmio_page_map_ready != 0u) {
+            vm_mmio_mark_range(vm, dev.start, dev.end);
+        }
         VM_RUNTIME_LOG("Registered VM Ether to MMIO ID %d (MAC=%02x:%02x:%02x:%02x:%02x:%02x)\n",
                        vm->mmio_count, e->mac[0], e->mac[1], e->mac[2],
                        e->mac[3], e->mac[4], e->mac[5]);

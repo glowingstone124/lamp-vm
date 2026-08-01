@@ -40,6 +40,9 @@ Assembler/toolchain project:
 Networking bring-up and BusyBox `wget` notes are in `docs/networking.md`.
 Firmware/PCI graphics takeover is described in `docs/graphics.md`; the shared
 DMA-ring and SDL3 PCI audio path is described in `docs/audio.md`.
+The classic, translated-fetch, and decoded direct-threaded engines, plus the
+native JIT roadmap, are documented in
+`docs/execution-engine.md`.
 
 ## Build
 
@@ -77,6 +80,7 @@ Arguments:
 - `help`: show usage and examples
 - `--cores <n>` / `--smp <n>`: CPU worker thread count in `[1, 64]` (default: `1`)
 - `--cpu-mhz <n>`: per-vCPU execution cap in `[1, 10000]` MHz (default: `100`)
+- `--engine <name>`: select `classic`, `cached`, or `threaded`
 - `--console` / `--serial-window`: show guest serial in a dedicated `VM Serial`
   SDL window (enabled by default). After early boot, the kernel turns `VM Display`
   into a small graphical desktop with composited windows; shell input, echo,

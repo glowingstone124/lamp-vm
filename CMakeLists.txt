@@ -37,6 +37,11 @@ endif()
 
 set(SOURCES
         src/vm.c
+        src/engines/engine.c
+        src/engines/classic.c
+        src/engines/cached.c
+        src/engines/threaded.c
+        src/engines/interpreter_core.c
         src/runtime_stats.c
         src/debug.c
         src/io_devices/frame/frame.c
