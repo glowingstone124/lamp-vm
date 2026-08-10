@@ -405,12 +405,12 @@ private fun ConnectionBar(
                     onClick = onCycleExecutionEngine,
                     enabled = !connected,
                 ) {
-                    Text("Engine · ${executionEngine.displayName}")
+                    Text("Engine: ${executionEngine.displayName}")
                 }
                 OutlinedButton(
                     onClick = { onVgaEnabledChange(!vgaEnabled) },
                 ) {
-                    Text(if (vgaEnabled) "VGA · On" else "VGA · Off")
+                    Text(if (vgaEnabled) "VGA On" else "VGA Off")
                 }
                 Text(
                     "Configuration is applied when attaching",
@@ -443,7 +443,7 @@ private fun ControlBar(
         ) {
             Text(
                 "vCPU $selectedCore / ${coreCount - 1}" +
-                    if (selectedCore >= activeCoreCount) " · offline" else "",
+                    if (selectedCore >= activeCoreCount) " offline" else "",
             )
         }
         Button(onClick = onStart, enabled = enabled && state == VmState.Created) {
@@ -502,7 +502,7 @@ private fun RegisterPanel(
     coreId: Int,
     modifier: Modifier = Modifier,
 ) {
-    Panel("CPU $coreId · REGISTERS", modifier) {
+    Panel("CPU $coreId REGISTERS", modifier) {
         SelectionContainer {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(
@@ -539,7 +539,7 @@ private fun DisassemblyPanel(
     coreId: Int,
     modifier: Modifier = Modifier,
 ) {
-    Panel("CPU $coreId · DISASSEMBLY", modifier) {
+    Panel("CPU $coreId DISASSEMBLY", modifier) {
         if (instructions.isEmpty()) {
             Text(
                 "Pause the VM to disassemble memory around IP",
@@ -629,7 +629,7 @@ private fun MemoryPanel(
         Spacer(Modifier.height(8.dp))
         Text(
             if (inspectable) "256 bytes from $address"
-            else "Live memory is locked · pause the VM to inspect",
+            else "Live memory is locked, pause the VM to inspect",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 11.sp,
         )

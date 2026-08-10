@@ -184,7 +184,7 @@ private class VgaPanel(private val session: LampVmSession) : JPanel() {
             color = if (captured) java.awt.Color(139, 233, 193)
             else java.awt.Color(210, 220, 232)
             drawString(
-                if (captured) "Pointer captured · Ctrl+Alt/Command+G to release"
+                if (captured) "Pointer captured, Ctrl+Alt/Command+G to release"
                 else "Click display to capture keyboard and pointer",
                 20,
                 29,
