@@ -25,8 +25,7 @@ static uint32_t intc_read32(VM *vm, uint32_t addr) {
     const uint32_t offset = addr - INTC_BASE;
     const int core_id = intc_current_core_id(vm);
 
-    if (offset >= INTC_REG_PENDING &&
-        offset < INTC_REG_PENDING + IRQ_BITMAP_WORDS32 * 4u &&
+    if (offset < INTC_REG_PENDING + IRQ_BITMAP_WORDS32 * 4u &&
         intc_is_u32_aligned(offset)) {
         const uint32_t reg = (offset - INTC_REG_PENDING) / 4u;
         return vm_interrupt_read_pending32(vm, core_id, reg);
@@ -58,8 +57,7 @@ static void intc_write32(VM *vm, uint32_t addr, uint32_t value) {
     const uint32_t offset = addr - INTC_BASE;
     const int core_id = intc_current_core_id(vm);
 
-    if (offset >= INTC_REG_PENDING &&
-        offset < INTC_REG_PENDING + IRQ_BITMAP_WORDS32 * 4u &&
+    if (offset < INTC_REG_PENDING + IRQ_BITMAP_WORDS32 * 4u &&
         intc_is_u32_aligned(offset)) {
         const uint32_t reg = (offset - INTC_REG_PENDING) / 4u;
         vm_interrupt_raise_pending32(vm, core_id, reg, value);

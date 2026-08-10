@@ -193,12 +193,20 @@ int vm_mmu_translate_access_cpu(VM *vm,
         *pa_out = vaddr;
         return 1;
     }
+    if (!vm->cpus || vm->smp_cores <= 0 ||
+        core_id >= (uint32_t)vm->smp_cores) {
+        return 0;
+    }
 
     root = (uint32_t)(vm->mmu.root[core_id] & 0xFFFFF000ull);
     vpn = vaddr >> 12;
     tlb_index = vpn & (VM_MMU_TLB_ENTRIES - 1u);
     required_perms = mmu_access_required_perms(access);
-    epoch = atomic_load_explicit(&cpu->mmu_epoch, memory_order_acquire);
+    /* Non-vCPU callers use core 0's address space.  Always load the epoch
+     * from the canonical VM-owned vCPU so a missing or foreign CPU pointer
+     * cannot be dereferenced here. */
+    epoch = atomic_load_explicit(&vm->cpus[core_id].mmu_epoch,
+                                 memory_order_acquire);
     entry = &vm->cpus[core_id].tlb[tlb_index];
     if (entry->valid != 0u &&
         entry->epoch == epoch &&

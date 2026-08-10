@@ -10,7 +10,7 @@
 #include "timer.h"
 #include "../../panic.h"
 
-uint32_t time_read32(VM *vm, uint32_t addr) {
+static uint32_t time_read32(VM *vm, uint32_t addr) {
     uint32_t offset = addr - TIME_BASE;
 
     if (offset == 0x00) return 1; // Control
@@ -48,7 +48,7 @@ uint32_t time_read32(VM *vm, uint32_t addr) {
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
-void time_write32(VM *vm, uint32_t addr, uint32_t value) {
+static void time_write32(VM *vm, uint32_t addr, uint32_t value) {
     if (addr == TIME_BASE) {
         handle_programmable_tick(vm,value);
         return;

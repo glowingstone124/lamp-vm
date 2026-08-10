@@ -1,17 +1,21 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#define __USE_MISC
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sched.h>
+#if defined(__linux__)
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#endif
 #include <SDL3/SDL_timer.h>
 #include <SDL3/SDL_thread.h>
 #include <pthread.h>
 
 #include "engines/engine.h"
 #include "vm.h"
+#include "vm_runtime.h"
 #include "stack.h"
 #include "io.h"
 #include "panic.h"
@@ -31,7 +35,6 @@
 #include "io_devices/mmu/mmu_mmio_register.h"
 #include "io_devices/pcie/pcie.h"
 #include "io_devices/time/time_mmio_register.h"
-#include "io_devices/vga_display/display.h"
 #include "io_devices/vga_display/vga_mmio_register.h"
 #include "float.h"
 #include "flags.h"
@@ -43,7 +46,6 @@ const size_t MEM_SIZE = 1048576 * 64; // 64MB
 enum { EXECUTION_TIMES_FLUSH_INTERVAL = 1024 };
 enum { DEVICE_POLL_CHECK_INTERVAL = 2048 };
 enum { DEVICE_POLL_PERIOD_NS = 1000000 };
-enum { DISPLAY_TARGET_HZ = 120 };
 enum { CPU_PACE_TARGET_NS = 250000 };
 enum { CPU_PACE_MIN_QUANTUM = 64 };
 enum { CPU_PACE_MAX_QUANTUM = 16384 };
@@ -98,6 +100,40 @@ static inline void vm_flush_execution_times(VCPU *cpu, uint64_t *local_cycles) {
     *local_cycles = 0;
 }
 
+static void vm_set_current_thread_priority(SDL_ThreadPriority priority) {
+#if defined(VM_STATIC_BUILD) && defined(__linux__)
+    int nice_level = 0;
+    const long thread_id = syscall(SYS_gettid);
+
+    switch (priority) {
+        case SDL_THREAD_PRIORITY_LOW:
+            nice_level = 10;
+            break;
+        case SDL_THREAD_PRIORITY_HIGH:
+            nice_level = -10;
+            break;
+        case SDL_THREAD_PRIORITY_TIME_CRITICAL:
+            nice_level = -20;
+            break;
+        case SDL_THREAD_PRIORITY_NORMAL:
+        default:
+            nice_level = 0;
+            break;
+    }
+
+    /* A fully static glibc executable must not fall back through SDL's
+     * RTKit/D-Bus path: that path dlopens host DSOs and can introduce a
+     * second, incompatible glibc/loader into the process.  Linux applies
+     * setpriority() to the calling thread when addressed by its TID.  Keep
+     * this best-effort, as raising priority normally requires CAP_SYS_NICE. */
+    if (thread_id > 0) {
+        (void)setpriority(PRIO_PROCESS, (id_t)thread_id, nice_level);
+    }
+#else
+    (void)SDL_SetCurrentThreadPriority(priority);
+#endif
+}
+
 static uint64_t vm_cpu_cycles_to_ns(uint64_t cycles, uint64_t frequency_hz) {
     const uint64_t seconds = cycles / frequency_hz;
     const uint64_t remainder = cycles % frequency_hz;
@@ -137,12 +173,12 @@ static void vm_pace_cpu(VM *vm, uint64_t *epoch_ns,
     }
 }
 
-void *vm_thread(void *arg) {
+static void *vm_thread(void *arg) {
     CpuThreadArg *thread_arg = (CpuThreadArg *)arg;
     VM *vm = thread_arg->vm;
     int core_id = thread_arg->core_id;
     free(thread_arg);
-    (void)SDL_SetCurrentThreadPriority(core_id == 0 ?
+    vm_set_current_thread_priority(core_id == 0 ?
         SDL_THREAD_PRIORITY_HIGH : SDL_THREAD_PRIORITY_NORMAL);
     vm_tls_vcpu = &vm->cpus[core_id];
     uint64_t local_cycles = 0;
@@ -160,6 +196,37 @@ void *vm_thread(void *arg) {
         }
         if (core_id != 0 && !atomic_load_explicit(&vm->core_released[core_id], memory_order_acquire)) {
             sched_yield();
+            continue;
+        }
+        if (atomic_load_explicit(&vm->debug_pause_requested,
+                                 memory_order_acquire)) {
+            vm_flush_execution_times(vm_tls_vcpu, &local_cycles);
+            atomic_fetch_add_explicit(&vm->debug_paused_core_count, 1u,
+                                      memory_order_acq_rel);
+            while (atomic_load_explicit(&vm->debug_pause_requested,
+                                        memory_order_acquire) &&
+                   !atomic_is_vm_stopped(vm)) {
+                if ((uint32_t)core_id ==
+                        atomic_load_explicit(&vm->debug_step_core,
+                                             memory_order_relaxed) &&
+                    atomic_exchange_explicit(&vm->debug_step_requested, false,
+                                             memory_order_acq_rel)) {
+                    uint32_t stepped;
+                    if (__builtin_expect(
+                            vm_interrupt_pending_fast(vm, vm_tls_vcpu), 0)) {
+                        vm_handle_interrupts(vm, vm_tls_vcpu);
+                    }
+                    stepped = vm_engine_execute_single(vm, vm_tls_vcpu);
+                    local_cycles += stepped;
+                    vm_flush_execution_times(vm_tls_vcpu, &local_cycles);
+                    atomic_store_explicit(&vm->debug_step_completed, true,
+                                          memory_order_release);
+                    continue;
+                }
+                sched_yield();
+            }
+            atomic_fetch_sub_explicit(&vm->debug_paused_core_count, 1u,
+                                      memory_order_acq_rel);
             continue;
         }
         if (!pacing_started) {
@@ -188,7 +255,6 @@ void *vm_thread(void *arg) {
         if (core_id == 0 && device_poll_cycles >= DEVICE_POLL_CHECK_INTERVAL) {
             const uint64_t now_ns = host_monotonic_time_ns();
             if (next_device_poll_ns == 0u || now_ns >= next_device_poll_ns) {
-                disk_tick(vm);
                 ether_poll(vm);
                 audio_poll(vm);
                 next_device_poll_ns = now_ns + DEVICE_POLL_PERIOD_NS;
@@ -201,7 +267,6 @@ void *vm_thread(void *arg) {
         }
     }
     if (core_id == 0 && device_poll_cycles > 0) {
-        disk_tick(vm);
         ether_poll(vm);
         audio_poll(vm);
     }
@@ -209,69 +274,8 @@ void *vm_thread(void *arg) {
     return NULL;
 }
 
-static void display_loop(VM *vm) {
-    const uint64_t frame_ns = 1000000000ull / DISPLAY_TARGET_HZ;
-    uint64_t next_frame_ns = SDL_GetTicksNS();
-    (void)SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_HIGH);
-    while (!atomic_is_vm_stopped(vm)) {
-        uint64_t now_ns;
-        next_frame_ns += frame_ns;
-        display_poll_events(vm);
-        display_update(vm);
-        now_ns = SDL_GetTicksNS();
-        if (now_ns < next_frame_ns) {
-            SDL_DelayPrecise(next_frame_ns - now_ns);
-        } else if (now_ns - next_frame_ns > frame_ns * 2u) {
-            /* Drop missed deadlines instead of producing a burst of stale
-             * frames after a debugger stop or an expensive guest flip. */
-            next_frame_ns = now_ns;
-        }
-    }
-}
-
-void vm_run(VM *vm, int serial_window) {
-    const int cores = (vm->smp_cores > 0) ? vm->smp_cores : 1;
-    pthread_t *thread_ids = malloc(sizeof(pthread_t) * (size_t)cores);
-    if (!thread_ids) {
-        panic("Failed to allocate CPU thread list", vm);
-        return;
-    }
-
-    if (display_init(vm, serial_window) != 0) {
-        free(thread_ids);
-        panic("Failed to initialize SDL display", vm);
-        return;
-    }
-
-    int created_threads = 0;
-    for (int i = 0; i < cores; i++) {
-        CpuThreadArg *arg = malloc(sizeof(CpuThreadArg));
-        if (!arg) {
-            panic("Failed to allocate CPU thread argument", vm);
-            atomic_set_vm_halt(vm, 1);;
-            break;
-        }
-        arg->vm = vm;
-        arg->core_id = i;
-        if (pthread_create(&thread_ids[i], NULL, vm_thread, arg) != 0) {
-            free(arg);
-            panic("Failed to create CPU thread", vm);
-            atomic_set_vm_halt(vm, 1);;
-            break;
-        }
-        created_threads++;
-    }
-
-    display_loop(vm);
-
-    for (int i = 0; i < created_threads; i++) {
-        pthread_join(thread_ids[i], NULL);
-    }
-    display_shutdown();
-    free(thread_ids);
-}
-
-void vm_run_serial(VM *vm) {
+#ifndef LAMPVM_EMBEDDED
+static void vm_run_serial(VM *vm) {
     const int cores = (vm->smp_cores > 0) ? vm->smp_cores : 1;
     pthread_t *thread_ids = malloc(sizeof(pthread_t) * (size_t)cores);
     int created_threads = 0;
@@ -329,6 +333,7 @@ void vm_run_serial(VM *vm) {
     }
     free(thread_ids);
 }
+#endif
 
 int vm_run_headless(VM *vm, uint64_t timeout_ms) {
     const int cores = (vm->smp_cores > 0) ? vm->smp_cores : 1;
@@ -454,6 +459,11 @@ VM *vm_create(size_t memory_size,
     vm->cpu_frequency_hz = (uint64_t)VM_DEFAULT_CPU_MHZ * 1000000ull;
     vm->cpus = calloc((size_t)vm->smp_cores, sizeof(VCPU));
     atomic_init(&vm->stop_flags, 0u);
+    atomic_init(&vm->debug_pause_requested, false);
+    atomic_init(&vm->debug_paused_core_count, 0u);
+    atomic_init(&vm->debug_step_requested, false);
+    atomic_init(&vm->debug_step_completed, false);
+    atomic_init(&vm->debug_step_core, 0u);
     if (!vm->cpus) {
         free(vm);
         vm_error("Couldn't create CPU.");
@@ -756,6 +766,7 @@ void vm_destroy(VM *vm) {
         free(vm->interrupt_pending_summary);
     if (vm->core_released)
         free(vm->core_released);
+    vm_engine_destroy_vm(vm);
     if (vm->cpus)
         free(vm->cpus);
     if (vm->memory)
@@ -768,6 +779,8 @@ void vm_destroy(VM *vm) {
         free(vm->pcie);
     free(vm);
 }
+
+#ifndef LAMPVM_EMBEDDED
 
 typedef enum {
     VM_CLI_RUN,
@@ -783,8 +796,6 @@ typedef struct {
     int smp_cores;
     uint32_t cpu_mhz;
     VmExecutionEngine execution_engine;
-    int serial_window;
-    int serial_stdin;
 } VmCliOptions;
 
 static void vm_cli_options_init(VmCliOptions *options) {
@@ -794,8 +805,6 @@ static void vm_cli_options_init(VmCliOptions *options) {
     options->smp_cores = 1;
     options->cpu_mhz = VM_DEFAULT_CPU_MHZ;
     options->execution_engine = VM_ENGINE_CLASSIC;
-    options->serial_window = 1;
-    options->serial_stdin = 0;
 }
 
 static void print_usage(const char *prog) {
@@ -810,7 +819,6 @@ static void print_usage(const char *prog) {
     printf("Common examples:\n");
     printf("  %s run bios/boot.bin\n", prog);
     printf("  %s run bios/boot.bin --cores 2\n", prog);
-    printf("  %s run bios/boot.bin --console\n", prog);
     printf("  %s test\n", prog);
     printf("  %s benchmark\n", prog);
     printf("\n");
@@ -820,13 +828,10 @@ static void print_usage(const char *prog) {
     printf("  --cores, --smp <n>       CPU worker thread count in [1, 64] (default: 1)\n");
     printf("  --cpu-mhz <n>            per-vCPU execution cap in [1, 10000] MHz (default: %u)\n",
            VM_DEFAULT_CPU_MHZ);
-    printf("  --engine <name>          execution engine: classic, cached, or threaded (default: classic)\n");
-    printf("  --console                show guest serial in its own SDL window (default)\n");
-    printf("  --no-serial-window       send guest serial output to the host terminal\n");
-    printf("  --headless               use legacy serial stdin mode without SDL display\n");
+    printf("  --engine <name>          execution engine: classic, cached, threaded, or jit (default: classic)\n");
     printf("  --net <mode>             ethernet backend: null, nat, or udp:<bind-port>:<peer-port>\n");
     printf("\n");
-    printf("Compatibility aliases: --selftest, --serial-stdin, --serial-console\n");
+    printf("Compatibility alias: --selftest\n");
 }
 
 static int parse_positive_int(const char *s, int *out) {
@@ -865,6 +870,10 @@ static int parse_execution_engine(const char *s, VmExecutionEngine *out) {
         *out = VM_ENGINE_THREADED;
         return 1;
     }
+    if (strcmp(s, "jit") == 0) {
+        *out = VM_ENGINE_JIT;
+        return 1;
+    }
     return 0;
 }
 
@@ -872,6 +881,7 @@ static const char *execution_engine_name(VmExecutionEngine engine) {
     switch (engine) {
         case VM_ENGINE_CACHED: return "cached";
         case VM_ENGINE_THREADED: return "threaded";
+        case VM_ENGINE_JIT: return "jit";
         case VM_ENGINE_CLASSIC:
         default: return "classic";
     }
@@ -926,7 +936,7 @@ static int parse_cli_options(int argc, char **argv, VmCliOptions *options) {
         } else if (strcmp(argv[i], "--engine") == 0) {
             if (i + 1 >= argc ||
                 !parse_execution_engine(argv[i + 1], &options->execution_engine)) {
-                fprintf(stderr, "Invalid execution engine. Expected classic, cached, or threaded.\n");
+                fprintf(stderr, "Invalid execution engine. Expected classic, cached, threaded, or jit.\n");
                 return 0;
             }
             i++;
@@ -935,14 +945,6 @@ static int parse_cli_options(int argc, char **argv, VmCliOptions *options) {
             return 1;
         } else if (strcmp(argv[i], "--selftest") == 0) {
             options->command = VM_CLI_SELFTEST;
-        } else if (strcmp(argv[i], "--console") == 0 ||
-                   strcmp(argv[i], "--serial-console") == 0 ||
-                   strcmp(argv[i], "--serial-window") == 0) {
-            options->serial_window = 1;
-        } else if (strcmp(argv[i], "--no-serial-window") == 0) {
-            options->serial_window = 0;
-        } else if (strcmp(argv[i], "--headless") == 0 || strcmp(argv[i], "--serial-stdin") == 0) {
-            options->serial_stdin = 1;
         } else if (strcmp(argv[i], "--net") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "Missing value for --net.\n");
@@ -967,9 +969,7 @@ static void print_launch_summary(const VmCliOptions *options) {
     VM_RUNTIME_LOG("  cores:   %d\n", options->smp_cores);
     VM_RUNTIME_LOG("  clock:   %u MHz nominal\n", options->cpu_mhz);
     VM_RUNTIME_LOG("  engine:  %s\n", execution_engine_name(options->execution_engine));
-    VM_RUNTIME_LOG("  console: %s\n",
-                   options->serial_stdin ? "headless serial stdin" :
-                   (options->serial_window ? "VM display + serial SDL windows" : "VM display + serial stdout"));
+    VM_RUNTIME_LOG("  console: host serial stdin/stdout\n");
     VM_RUNTIME_LOG("  network: %s\n", options->net_mode);
 }
 
@@ -1020,7 +1020,6 @@ int main(int argc, char **argv) {
     if (options.command == VM_CLI_BENCHMARK) {
         return run_benchmark();
     }
-    if (options.serial_stdin) options.serial_window = 0;
     print_launch_summary(&options);
 
     size_t program_size = 0;
@@ -1064,15 +1063,8 @@ int main(int argc, char **argv) {
     VM_RUNTIME_LOG("VNC preview server enabled.\n");
     vnc_run(vm);
     (void)audio_host_start(vm);
-    if (options.serial_stdin) {
-        VM_RUNTIME_LOG("Serial stdin mode enabled (headless).\n");
-        vm_run_serial(vm);
-    } else {
-        if (options.serial_window) {
-            VM_RUNTIME_LOG("Separate VM Display and VM Serial windows enabled.\n");
-        }
-        vm_run(vm, options.serial_window);
-    }
+    VM_RUNTIME_LOG("Host serial stdin/stdout enabled.\n");
+    vm_run_serial(vm);
 #ifdef DBEUG
     vm_dump(vm, 1024);
 #endif
@@ -1092,3 +1084,5 @@ int main(int argc, char **argv) {
     free(data);
     return 0;
 }
+
+#endif /* LAMPVM_EMBEDDED */

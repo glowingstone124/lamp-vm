@@ -20,17 +20,19 @@ static uint64_t runtime_stats_resident_bytes(void) {
     }
     return (uint64_t)info.resident_size;
 #elif defined(__linux__)
+    unsigned long total_pages = 0u;
     unsigned long resident_pages = 0u;
     long page_size;
     FILE *stream = fopen("/proc/self/statm", "r");
     if (!stream) {
         return 0u;
     }
-    if (fscanf(stream, "%*lu %lu", &resident_pages) != 1) {
+    if (fscanf(stream, "%lu %lu", &total_pages, &resident_pages) != 2) {
         fclose(stream);
         return 0u;
     }
     fclose(stream);
+    (void)total_pages;
     page_size = sysconf(_SC_PAGESIZE);
     if (page_size <= 0) {
         return 0u;

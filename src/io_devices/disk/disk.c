@@ -25,9 +25,6 @@ static int disk_count_to_bytes(uint32_t count, uint64_t *bytes_out) {
     if (!bytes_out || count == 0u) {
         return 0;
     }
-    if ((uint64_t)count > (UINT64_MAX / (uint64_t)DISK_SECTOR_SIZE)) {
-        return 0;
-    }
     *bytes_out = (uint64_t)count * (uint64_t)DISK_SECTOR_SIZE;
     return 1;
 }
@@ -49,9 +46,6 @@ static int is_valid_lba(VM *vm, uint64_t lba, uint32_t count, uint64_t *disk_off
     uint64_t start;
     uint64_t bytes;
     if (!vm || count == 0u) {
-        return 0;
-    }
-    if ((uint64_t)count > (UINT64_MAX / (uint64_t)DISK_SECTOR_SIZE)) {
         return 0;
     }
     if (lba > (UINT64_MAX / (uint64_t)DISK_SECTOR_SIZE)) {
@@ -201,10 +195,14 @@ static void* disk_worker(void *arg) {
 
         pthread_mutex_lock(&vm->disk.mutex);
         vm->disk.current_cmd = DISK_CMD_NONE;
-        vm->disk.op_complete = true;
         vm->disk.status = ok ? DISK_STATUS_FREE : DISK_STATUS_ERROR;
         vm->io[DISK_STATUS] = vm->disk.status;
         pthread_mutex_unlock(&vm->disk.mutex);
+
+        /* A real device asserts its completion interrupt when the operation
+         * finishes.  Delivering it here also avoids tying disk latency to the
+         * vCPU engine's periodic device-poll cadence. */
+        trigger_interrupt(vm, INT_DISK_COMPLETE);
     }
     return NULL;
 }
@@ -234,7 +232,6 @@ void disk_init(VM *vm, const char *path) {
     vm->disk_size_bytes = disk_detect_size_bytes(vm->disk.fp);
     vm->disk.status = DISK_STATUS_FREE;
     vm->disk.current_cmd = DISK_CMD_NONE;
-    vm->disk.op_complete = false;
     vm->disk.thread_running = true;
     vm->io[DISK_STATUS] = DISK_STATUS_FREE;
 
@@ -274,6 +271,8 @@ void disk_close(VM *vm) {
 }
 
 void disk_cmd(VM *vm, const int value) {
+    int signal_completion = 0;
+
     if (!vm || !vm->disk.initialized) {
         return;
     }
@@ -287,26 +286,31 @@ void disk_cmd(VM *vm, const int value) {
     if (value != DISK_CMD_READ && value != DISK_CMD_WRITE) {
         vm->disk.current_cmd = DISK_CMD_NONE;
         vm->disk.status = DISK_STATUS_ERROR;
-        vm->disk.op_complete = true;
         vm->io[DISK_STATUS] = DISK_STATUS_ERROR;
+        signal_completion = 1;
     } else {
         vm->disk.current_cmd = value;
         vm->disk.status = DISK_STATUS_BUSY;
-        vm->disk.op_complete = false;
         vm->io[DISK_STATUS] = DISK_STATUS_BUSY;
         pthread_cond_signal(&vm->disk.cond_var);
     }
 
     pthread_mutex_unlock(&vm->disk.mutex);
-}
-void disk_tick(VM *vm) {
-    if (!vm || !vm->disk.initialized) {
-        return;
-    }
-    pthread_mutex_lock(&vm->disk.mutex);
-    if (vm->disk.op_complete) {
-        vm->disk.op_complete = false;
+
+    if (signal_completion) {
         trigger_interrupt(vm, INT_DISK_COMPLETE);
     }
+}
+
+int disk_read_status(VM *vm) {
+    int status;
+
+    if (!vm || !vm->disk.initialized) {
+        return DISK_STATUS_ERROR;
+    }
+
+    pthread_mutex_lock(&vm->disk.mutex);
+    status = (int)vm->disk.status;
     pthread_mutex_unlock(&vm->disk.mutex);
+    return status;
 }

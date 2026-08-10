@@ -72,7 +72,7 @@ a runtime fallback as well as a probe-time fallback.
 
 The framebuffer is a text console only during firmware and early kernel boot.
 After PCI display, audio, and Ethernet probing, `kernel/src/graphics.c` hands
-VM Display to the kernel window manager in `kernel/src/wm.c`. WM v0 provides:
+the framebuffer to the kernel window manager in `kernel/src/wm.c`. WM v0 provides:
 
 - a fixed-size window table with visibility, position, z-order, title, accent,
   and client text lines;
@@ -95,38 +95,24 @@ cursor rectangles. Window mutations currently do a full back-buffer composition.
 Runtime terminal traffic is deliberately separate from that screen:
 
 - kernel logs and stdout/stderr are always written to the serial device;
-- TTY input and local echo use the VM Serial window (or host terminal in
-  headless/no-serial-window modes);
-- PS/2 keyboard input from VM Display is reserved once graphics is active and
-  is not injected into the shell;
+- TTY input and local echo use the serial device through the host terminal or
+  Kotlin debugger terminal;
+- PS/2 keyboard input from the Kotlin VGA window is injected through the
+  debugger input ABI and remains separate from the serial shell;
 - PS/2 three-byte mouse packets drive the WM pointer, while button 1 selects and
   raises the topmost hit-tested window;
 - the panic path re-enables framebuffer text, clears the graphical screen, and
   displays the panic diagnostics there as well as on serial.
 
-## SDL3 presentation
+## Kotlin debugger presentation
 
-The final host presentation remains SDL3 on Linux and macOS. It uses a
-streaming `ARGB8888` texture with blending disabled, a resizable logical
-`640x480` viewport, nearest-neighbor scaling, and scanline dirty tracking.
-Both firmware framebuffer writes and PCI GPU publication converge on this
-same scanout path, so SDL and VNC do not need separate device-specific code.
-Clicking VM Display enables SDL3 relative mouse mode, which hides and grabs the
-host pointer while forwarding relative motion as PS/2 packets. Ctrl+Alt+G
-releases it on Linux and Windows; Control+Command+G is the macOS equivalent.
-This path is shared by Linux and macOS. Fractional SDL3 motion is carried
-between frames before integer PS/2 encoding. On macOS, trackpads remain on
-SDL's mouse path and relative motion uses the system acceleration curve; the
-relative constraint covers the 2D window instead of forcing the pointer to its
-center. The legacy PS/2 compatibility FIFO is independent of the active 8042
-queue, so an unconsumed legacy interface cannot stop pointer delivery.
-
-The host display loop uses one monotonic nanosecond deadline at 120 Hz. SDL
-renderer VSync is disabled so it cannot introduce a second blocking clock;
-missed deadlines are dropped instead of replayed as a burst. The display thread
-and BSP VM thread request SDL's high scheduling priority, while additional VM
-cores retain normal priority. This gives input delivery and scanout publication
-a bounded frame budget without growing queues that would increase latency.
+The host presentation reads coherent `640x480` ARGB framebuffer snapshots
+through the versioned debugger ABI and scales them with nearest-neighbor
+filtering in a separate Compose window. Both firmware framebuffer writes and
+PCI GPU publication still converge on the same scanout memory, so the frontend
+does not need device-specific rendering code. Pointer capture recenters the
+host pointer and forwards relative motion as complete PS/2 packets. The legacy
+PS/2 compatibility FIFO remains independent of the active 8042 queue.
 
 ## Current limitations
 

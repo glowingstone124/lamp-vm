@@ -184,6 +184,8 @@ TTY/ioctl constants:
 - `TCSETSF = 0x00005404`
 - `TIOCGWINSZ = 0x00005413`
 - termios local flags: `ISIG = 0x1`, `ICANON = 0x2`, `ECHO = 0x8`
+- termios output flags: `OPOST = 0x1`, `ONLCR = 0x4`; both default on, so
+  terminal LF output is serialized as CRLF. Canonical erase echoes `BS SP BS`.
 - `NCCS = 32`
 
 Signal constants:

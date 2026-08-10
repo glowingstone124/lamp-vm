@@ -28,7 +28,7 @@ $LAMP_LD -T bios/boot_flat.ld bios/bios.o -o bios/boot.bin
 ### Run with VM
 
 ```bash
-./build/vm --bin bios/boot.bin --smp 1
+./build/lampvm --bin bios/boot.bin --smp 1
 ```
 
 ## Artifact B: ELF (`bios.elf`)

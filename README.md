@@ -40,8 +40,8 @@ Assembler/toolchain project:
 Networking bring-up and BusyBox `wget` notes are in `docs/networking.md`.
 Firmware/PCI graphics takeover is described in `docs/graphics.md`; the shared
 DMA-ring and SDL3 PCI audio path is described in `docs/audio.md`.
-The classic, translated-fetch, and decoded direct-threaded engines, plus the
-native JIT roadmap, are documented in
+The classic, translated-fetch, decoded direct-threaded, and experimental
+ARM64 JIT engines are documented in
 `docs/execution-engine.md`.
 
 ## Build
@@ -60,18 +60,85 @@ cmake -S . -B build
 cmake --build build -j
 ```
 
+This produces the native CLI as `build/lampvm`. The full graphical build is a
+separate, optional application:
+
+```bash
+cd tools/lampvm-debugger
+gradle -g .gradle-user :app:createDistributable
+```
+
+On Apple Silicon this produces
+`app/build/compose/binaries/main/app/lampvm-debugger.app`. It bundles the native
+VM core and Kotlin/Native bridge and uses the Compose debugger as the default
+LampVM graphical startup experience.
+
 Notes:
 - On Apple Silicon, CMake is configured to build `arm64`.
-- Linux links `libm` and enables `_POSIX_C_SOURCE=200809L`.
+- Linux links `libm` and enables `_POSIX_C_SOURCE=200809L` together with
+  `_DEFAULT_SOURCE`.
+
+### Optional fully static Linux build
+
+The static mode requires a Linux toolchain, `libSDL3.a`, and static archives
+for SDL3's enabled platform dependencies. If SDL3 provides its official CMake
+package, Lamp VM uses `SDL3::SDL3-static`; otherwise it uses the dependency
+closure reported by `pkg-config --static sdl3`.
+
+```bash
+cmake -S . -B build-linux-static \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DVM_STATIC=ON
+cmake --build build-linux-static -j
+```
+
+For an SDL3 installation in a custom prefix, also pass
+`-DCMAKE_PREFIX_PATH=/path/to/sdl3` or set `PKG_CONFIG_PATH`. Verify the
+result with:
+
+```bash
+file build-linux-static/lampvm
+ldd build-linux-static/lampvm
+# Expected from ldd: not a dynamic executable
+```
+
+When building SDL3 for a fully static glibc executable, disable its D-Bus and
+IBus integrations:
+
+```bash
+cmake -S /path/to/SDL -B build-sdl-static \
+  -DSDL_SHARED=OFF \
+  -DSDL_STATIC=ON \
+  -DSDL_DBUS=OFF \
+  -DSDL_IBUS=OFF
+```
+
+SDL's Linux thread-priority fallback normally reaches RTKit through D-Bus.
+That requires `dlopen()` and is unsafe when a static glibc executable loads a
+host D-Bus library built against a different glibc. `VM_STATIC` therefore uses
+Linux `setpriority()` directly, and the distributable SDL archive must keep
+D-Bus disabled so SDL-owned audio threads cannot re-enter that fallback.
+
+GNU ld may still warn about `dlopen` when linking an official static SDL3
+archive. [SDL3 keeps its dynapi code enabled in static builds by
+design](https://github.com/libsdl-org/SDL/blob/release-3.4.8/src/dynapi/SDL_dynapi.h);
+the warning does not by itself add ELF `DT_NEEDED` dependencies. Runtime-loaded
+X11, Wayland, and audio backends can still require compatible host shared
+libraries when their SDL `_SHARED` options are enabled. Use the `file` and
+`ldd` checks above to verify the ELF, and disable those backends or link their
+complete static dependency closure for a hermetic binary.
+
+`VM_STATIC` is intentionally Linux-only. macOS always dynamically links the
+system libc and Frameworks even when SDL3 itself is built as a static archive.
 
 ## Run
 
 The executable supports subcommands for the common workflows:
 
 ```bash
-./build/vm run bios/boot.bin --cores 1
-./build/vm test
-./build/vm help
+./build/lampvm run bios/boot.bin --cores 1
+./build/lampvm test
+./build/lampvm help
 ```
 
 Arguments:
@@ -80,49 +147,36 @@ Arguments:
 - `help`: show usage and examples
 - `--cores <n>` / `--smp <n>`: CPU worker thread count in `[1, 64]` (default: `1`)
 - `--cpu-mhz <n>`: per-vCPU execution cap in `[1, 10000]` MHz (default: `100`)
-- `--engine <name>`: select `classic`, `cached`, or `threaded`
-- `--console` / `--serial-window`: show guest serial in a dedicated `VM Serial`
-  SDL window (enabled by default). After early boot, the kernel turns `VM Display`
-  into a small graphical desktop with composited windows; shell input, echo,
-  logs, and TTY output remain in `VM Serial`.
-- `--no-serial-window`: keep the framebuffer SDL window, but route guest serial
-  output to the host terminal
-- `--headless`: legacy headless serial stdin mode
+- `--engine <name>`: select `classic`, `cached`, `threaded`, or experimental
+  `jit` (ARM64 Tier 0; unsupported targets/instructions fall back to `cached`)
+- serial input/output uses the invoking host terminal; the Kotlin debugger
+  provides the graphical serial terminal and framebuffer window
 - `--net <mode>`: ethernet backend: `null`, `nat`, or `udp:<bind-port>:<peer-port>`
 
 Legacy flag-style invocation is still accepted:
 
 ```bash
-./build/vm --bin bios/boot.bin --smp 1
-./build/vm --selftest
+./build/lampvm --bin bios/boot.bin --smp 1
+./build/lampvm --selftest
 ```
 
-The serial window accepts normal text input, Ctrl-letter control characters,
-arrow/home/end/delete escape sequences, and clipboard paste with Ctrl/Cmd+V.
-Once the graphical screen is active, VM Display's PS/2 keyboard path is reserved
-for a future GUI event API and does not feed the shell. Its PS/2 mouse drives the
-guest-controlled PCI cursor plane on a high-priority input path; click VM
-Display to capture the host pointer and use Control+Command+G on macOS (or
-Ctrl+Alt+G elsewhere) to release it. Early-boot diagnostics still use the
-framebuffer, and a kernel panic restores framebuffer text output.
-Closing only `VM Serial` leaves the VM running and falls back to serial output
-on the host terminal; closing `VM Display` stops the VM.
+The full `lampvm-debugger` application owns the graphical frontends. Its serial
+console is a JediTerm xterm/VT100 terminal with editing, scrollback, clipboard,
+and ANSI color support. Its VGA window reads the
+framebuffer through the debugger ABI and injects PS/2 keyboard and relative
+mouse packets through explicit input APIs. Click VGA to capture the pointer;
+use Control+Command+G on macOS or Ctrl+Alt+G elsewhere to release it.
 
 Normal graphical runs do not print host lifecycle logs. Set `LAMP_VM_LOG=1` to
 show startup, device-registration, and VNC messages; errors remain visible.
 
-The serial renderer uses SDL3 and the bundled monospace glyph set on both Linux
-and macOS, so it does not depend on a desktop font package or a platform-native
-text API. The terminal model, ANSI handling, input routing, theme, and
-high-DPI/resizable UI follow the same rendering path across platforms.
-Its single metrics line separates the configured CPU MHz from measured aggregate
-interpreter MIPS and also shows guest RAM, host resident memory, core count, and
-uptime; the rest of the window is the terminal grid without decorative chrome.
+The old SDL serial and display frontends have been removed. SDL remains a VM
+runtime dependency for timing, thread priority, and audio support.
 
 Run selftests:
 
 ```bash
-./build/vm test
+./build/lampvm test
 ```
 
 ## Virtual CPU Clock Model

@@ -1,0 +1,3 @@
+headers = lampvm/debug_api.h
+package = lampvm.capi
+headerFilter = lampvm/**

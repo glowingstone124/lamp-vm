@@ -40,7 +40,7 @@ Current kernel target in this repository:
 - `include/kernel/iommu.h`: IOMMU init and DMA address translation API
 - `include/kernel/dma_ring.h`: reusable descriptor/completion ring producer API
 - `include/kernel/gpu.h`: PCI display takeover, completion IRQ, and cursor-plane API
-- `include/kernel/graphics.h`: graphical VM Display ownership and state API
+- `include/kernel/graphics.h`: graphical framebuffer ownership and state API
 - `include/kernel/wm.h`: kernel window and PS/2 pointer API
 - `include/kernel/audio.h`: fixed-format PCI PCM DMA API
 - `include/kernel/pci.h`: PCI enumeration results for bound device drivers
@@ -83,7 +83,7 @@ Current kernel target in this repository:
 1. firmware console, MMU, and IOMMU init
 2. trap/IRQ + syscall init
 3. PCI enumeration and display/audio/Ethernet driver binding
-4. graphical VM Display takeover; terminal traffic remains on serial
+4. graphical framebuffer takeover; terminal traffic remains on serial
 5. SMP BSP init
 6. scheduler and block/fs init, then init task spawn
 7. AP startup and scheduler run loop
@@ -194,13 +194,13 @@ Note:
 
 - firmware and early-kernel output is mirrored to serial and framebuffer
 - after graphical takeover, logs, stdout/stderr, input, and TTY echo use serial
-  while VM Display remains a kernel-owned graphical desktop
-- VM Display PS/2 keyboard input is reserved in graphics mode and does not feed
-  the shell
+  while the framebuffer remains a kernel-owned graphical desktop
+- Kotlin VGA-window keyboard input enters through the PS/2 debugger API and
+  does not feed the serial shell
 - PS/2 mouse packets are coalesced in the priority-`0xD0` mouse IRQ and move the
   PCI GPU cursor plane without desktop recomposition; left click raises windows
-- SDL3 relative mode captures the pointer after clicking VM Display, and
-  Control+Command+G on macOS (or Ctrl+Alt+G elsewhere) releases it
+- the Kotlin VGA window captures relative pointer motion after clicking it;
+  Control+Command+G on macOS or Ctrl+Alt+G elsewhere releases it
 - panic handling restores framebuffer text output
 - default tty local mode: `ECHO|ICANON|ISIG`
 - RX path normalizes `\r` to `\n`
@@ -320,5 +320,5 @@ $LAMP_LD -T bios/boot_flat.ld bios/bios.o -o bios/boot.bin
 ### 4) Boot VM
 
 ```bash
-./build/vm --bin bios/boot.bin --smp 1
+./build/lampvm --bin bios/boot.bin --smp 1
 ```

@@ -17,7 +17,7 @@ static inline size_t fb_pixel_index(VM *vm, uint32_t addr) {
     return 0;
 }
 
-uint32_t fb_read32(VM *vm, uint32_t addr) {
+static uint32_t fb_read32(VM *vm, uint32_t addr) {
     size_t pixel_index = fb_pixel_index(vm, addr);
     size_t row = vm_fb_row_from_pixel_index(pixel_index);
     vm_fb_row_lock(vm, row);
@@ -26,7 +26,7 @@ uint32_t fb_read32(VM *vm, uint32_t addr) {
     return value;
 }
 
-void fb_write32(VM *vm, uint32_t addr, uint32_t value) {
+static void fb_write32(VM *vm, uint32_t addr, uint32_t value) {
     size_t pixel_index = fb_pixel_index(vm, addr);
     size_t row = vm_fb_row_from_pixel_index(pixel_index);
     vm_fb_row_lock(vm, row);

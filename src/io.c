@@ -70,6 +70,60 @@ static int ps2_output_push_locked(VM *vm, uint8_t value, uint8_t aux, uint8_t ra
     return 1;
 }
 
+static uint16_t ps2_fifo_free(uint16_t head, uint16_t tail,
+                              uint16_t mask) {
+    return (uint16_t)((tail - head - 1u) & mask);
+}
+
+static int ps2_output_push_packet_locked(VM *vm, const uint8_t packet[3]) {
+    uint16_t head;
+    const int was_empty = vm->ps2_out_head == vm->ps2_out_tail;
+
+    if (ps2_fifo_free(vm->ps2_out_head, vm->ps2_out_tail,
+                      PS2_OUT_FIFO_MASK) < 3u) {
+        return 0;
+    }
+
+    head = vm->ps2_out_head;
+    for (uint32_t i = 0u; i < 3u; i++) {
+        vm->ps2_out_fifo[head] = packet[i];
+        vm->ps2_out_aux[head] = 1u;
+        vm->ps2_out_irq[head] = 1u;
+        head = (uint16_t)((head + 1u) & PS2_OUT_FIFO_MASK);
+    }
+    vm->ps2_out_head = head;
+    ps2_update_status_locked(vm);
+    if (was_empty && (vm->ps2_config & PS2_CONFIG_SECOND_IRQ) != 0u) {
+        trigger_interrupt(vm, INT_MOUSE);
+    }
+    return 1;
+}
+
+static int ps2_legacy_mouse_push_packet_locked(VM *vm,
+                                                const uint8_t packet[3]) {
+    uint16_t head;
+    const uint16_t tail = vm->ps2_mouse_tail;
+    const int was_empty = vm->ps2_mouse_head == tail;
+
+    if (ps2_fifo_free(vm->ps2_mouse_head, tail,
+                      PS2_LEGACY_FIFO_MASK) < 3u) {
+        return 0;
+    }
+
+    head = vm->ps2_mouse_head;
+    for (uint32_t i = 0u; i < 3u; i++) {
+        vm->ps2_mouse_fifo[head] = packet[i];
+        head = (uint16_t)((head + 1u) & PS2_LEGACY_FIFO_MASK);
+    }
+    vm->ps2_mouse_head = head;
+    if (was_empty) {
+        vm->io[PS2_MOUSE_DATA] = (int)packet[0];
+        vm->io[PS2_MOUSE_STATUS] |= PS2_STATUS_RX_READY;
+        trigger_interrupt(vm, INT_MOUSE);
+    }
+    return 1;
+}
+
 static void ps2_raise_front_irq_locked(VM *vm) {
     if (vm->ps2_out_tail == vm->ps2_out_head) {
         return;
@@ -424,6 +478,34 @@ int vm_ps2_mouse_enqueue(VM *vm, uint8_t c) {
     return queued;
 }
 
+int vm_ps2_mouse_enqueue_packet(VM *vm, uint8_t flags,
+                                uint8_t delta_x, uint8_t delta_y) {
+    const uint8_t packet[3] = { flags, delta_x, delta_y };
+    int legacy_queued;
+    int output_enabled;
+    int output_queued = 0;
+
+    if (!vm) {
+        return 0;
+    }
+
+    vm_shared_lock(vm);
+    legacy_queued = ps2_legacy_mouse_push_packet_locked(vm, packet);
+    output_enabled = vm->ps2_mouse_enabled != 0u &&
+                     vm->ps2_mouse_reporting != 0u &&
+                     (vm->ps2_config & PS2_CONFIG_SECOND_DISABLED) == 0u;
+    if (output_enabled) {
+        output_queued = ps2_output_push_packet_locked(vm, packet);
+    }
+    vm_shared_unlock(vm);
+
+    /* Once the 8042 path is active, report its backpressure rather than the
+     * compatibility FIFO's result. The latter is intentionally not consumed
+     * by modern guests and must not make a failed controller write look like
+     * success to the display frontend. */
+    return output_enabled ? output_queued : legacy_queued;
+}
+
 void accept_io(VM *vm, const int addr, const int value) {
     if (addr < 0 || addr >= IO_SIZE)
         return;
@@ -432,10 +514,11 @@ void accept_io(VM *vm, const int addr, const int value) {
     switch (addr) {
     case SCREEN: {
         unsigned char c = (unsigned char)value;
-        if (vm->serial_window_enabled) {
+        if (vm->serial_capture_enabled) {
             (void)vm_serial_tx_enqueue(vm, c);
         } else {
-            (void)write(STDOUT_FILENO, &c, 1);
+            const ssize_t written = write(STDOUT_FILENO, &c, 1);
+            (void)written;
         }
         vm->io[SCREEN] = value;
         break;

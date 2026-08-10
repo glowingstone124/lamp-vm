@@ -238,7 +238,7 @@ Typical boot test flow:
 
 ```bash
 bash ./kernel/build.sh
-./build/vm --bin bios/boot.bin --smp 1
+./build/lampvm --bin bios/boot.bin --smp 1
 ```
 
 Then in init shell:

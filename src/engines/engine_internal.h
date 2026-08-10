@@ -12,6 +12,18 @@ void vm_engine_execute_decoded(VM *vm,
                                VCPU *cpu,
                                const VM_DecodedOp *decoded);
 
+static inline int32_t vm_engine_add_wrap32(int32_t a, int32_t b) {
+    return (int32_t)((uint32_t)a + (uint32_t)b);
+}
+
+static inline int32_t vm_engine_sub_wrap32(int32_t a, int32_t b) {
+    return (int32_t)((uint32_t)a - (uint32_t)b);
+}
+
+static inline int32_t vm_engine_mul_wrap32(int32_t a, int32_t b) {
+    return (int32_t)((uint32_t)a * (uint32_t)b);
+}
+
 static inline void vm_engine_update_zf_sf(VM *vm,
                                           int32_t result,
                                           VCPU *cpu) {
@@ -44,8 +56,8 @@ static inline void vm_engine_update_add_flags(VM *vm,
     } else {
         cpu->flags &= ~FLAG_CF;
     }
-    if ((a > 0 && b > 0 && result < 0) ||
-        (a < 0 && b < 0 && result > 0)) {
+    if (((~((uint32_t)a ^ (uint32_t)b)) &
+         ((uint32_t)a ^ (uint32_t)result) & 0x80000000u) != 0u) {
         cpu->flags |= FLAG_OF;
     } else {
         cpu->flags &= ~FLAG_OF;
@@ -66,8 +78,8 @@ static inline void vm_engine_update_sub_flags(VM *vm,
     } else {
         cpu->flags &= ~FLAG_CF;
     }
-    if ((a > 0 && b < 0 && result < 0) ||
-        (a < 0 && b > 0 && result > 0)) {
+    if ((((uint32_t)a ^ (uint32_t)b) &
+         ((uint32_t)a ^ (uint32_t)result) & 0x80000000u) != 0u) {
         cpu->flags |= FLAG_OF;
     } else {
         cpu->flags &= ~FLAG_OF;

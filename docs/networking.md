@@ -25,7 +25,7 @@ the network stack consumes it, providing backpressure to the host-side queue.
 Debug logging is off by default. Set `LAMP_NET_TRACE=1` to trace NAT and Ethernet packet movement:
 
 ```bash
-LAMP_NET_TRACE=1 ./build-release/vm --bin ./bios/boot.bin --serial-stdin
+LAMP_NET_TRACE=1 ./build-release/lampvm --bin ./bios/boot.bin --serial-stdin
 ```
 
 Normal host runtime logging is also disabled by default. Set `LAMP_VM_LOG=1`

@@ -248,6 +248,7 @@ typedef enum {
     VM_ENGINE_CLASSIC = 0,
     VM_ENGINE_CACHED = 1,
     VM_ENGINE_THREADED = 2,
+    VM_ENGINE_JIT = 3,
 } VmExecutionEngine;
 
 typedef struct {
@@ -265,7 +266,6 @@ typedef struct {
     int pending_cmd;
     int current_cmd;
     bool thread_running;
-    bool op_complete;
     bool initialized;
 } Disk;
 
@@ -380,6 +380,7 @@ struct VCPU {
     VM_TlbEntry tlb[VM_MMU_TLB_ENTRIES];
     VM_DecodeCacheEntry decode_cache[VM_DECODE_CACHE_ENTRIES];
     VM_DecodedBlock threaded_blocks[VM_THREADED_BLOCK_CACHE_ENTRIES];
+    void *jit_state;
 };
 
 extern _Thread_local VCPU *vm_tls_vcpu;
@@ -388,6 +389,13 @@ static inline VCPU *vm_current_cpu(VM *vm);
 
 struct VM{
     _Atomic unsigned int stop_flags;
+    /* Host debugger rendezvous.  Released vCPUs acknowledge a pause request
+     * at a scheduling-quantum boundary before host-side state is inspected. */
+    atomic_bool debug_pause_requested;
+    atomic_uint debug_paused_core_count;
+    atomic_bool debug_step_requested;
+    atomic_bool debug_step_completed;
+    atomic_uint debug_step_core;
     VmExecutionEngine execution_engine;
     uint8_t *memory;
     size_t memory_size;
@@ -409,7 +417,7 @@ struct VM{
     uint16_t serial_tx_head;
     uint16_t serial_tx_tail;
     uint64_t serial_tx_dropped;
-    int serial_window_enabled;
+    int serial_capture_enabled;
     uint8_t ps2_kbd_fifo[256];
     uint16_t ps2_kbd_head;
     uint16_t ps2_kbd_tail;

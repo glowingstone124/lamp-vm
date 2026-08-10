@@ -15,6 +15,6 @@
 
 void disk_init(VM *vm, const char *path);
 void disk_cmd(VM *vm, int value);
-void disk_tick(VM *vm);
+int disk_read_status(VM *vm);
 void disk_close(VM *vm);
 #endif // VM_DISK_H

@@ -7,6 +7,8 @@
 #include "../interrupt.h"
 #include "../memory.h"
 
+enum { VM_THREADED_QUANTUM_MAX = 256u };
+
 /*
  * The threaded engine executes short, predecoded basic blocks.  It is kept
  * deliberately conservative: blocks never cross a guest page, stores and
@@ -231,7 +233,7 @@ vm_threaded_dispatch:
 vm_threaded_ADD: {
         const int32_t a = cpu->regs[decoded->rs1];
         const int32_t b = cpu->regs[decoded->rs2];
-        const int32_t result = a + b;
+        const int32_t result = vm_engine_add_wrap32(a, b);
         cpu->regs[decoded->rd] = result;
         vm_engine_update_add_flags(vm, a, b, result, cpu);
         VM_THREADED_NEXT();
@@ -239,14 +241,14 @@ vm_threaded_ADD: {
 vm_threaded_SUB: {
         const int32_t a = cpu->regs[decoded->rs1];
         const int32_t b = cpu->regs[decoded->rs2];
-        const int32_t result = a - b;
+        const int32_t result = vm_engine_sub_wrap32(a, b);
         cpu->regs[decoded->rd] = result;
         vm_engine_update_sub_flags(vm, a, b, result, cpu);
         VM_THREADED_NEXT();
     }
 vm_threaded_MUL:
-    cpu->regs[decoded->rd] =
-        cpu->regs[decoded->rs1] * cpu->regs[decoded->rs2];
+    cpu->regs[decoded->rd] = vm_engine_mul_wrap32(
+        cpu->regs[decoded->rs1], cpu->regs[decoded->rs2]);
     vm_engine_update_logic_flags(vm, cpu->regs[decoded->rd], cpu);
     VM_THREADED_NEXT();
 vm_threaded_MOV:
@@ -259,21 +261,21 @@ vm_threaded_MOVI:
     VM_THREADED_NEXT();
 vm_threaded_INC: {
         const int32_t a = cpu->regs[decoded->rd];
-        const int32_t result = a + 1;
+        const int32_t result = vm_engine_add_wrap32(a, 1);
         cpu->regs[decoded->rd] = result;
         vm_engine_update_add_flags(vm, a, 1, result, cpu);
         VM_THREADED_NEXT();
     }
 vm_threaded_ADDI: {
         const int32_t a = cpu->regs[decoded->rs1];
-        const int32_t result = a + decoded->imm;
+        const int32_t result = vm_engine_add_wrap32(a, decoded->imm);
         cpu->regs[decoded->rd] = result;
         vm_engine_update_add_flags(vm, a, decoded->imm, result, cpu);
         VM_THREADED_NEXT();
     }
 vm_threaded_SUBI: {
         const int32_t a = cpu->regs[decoded->rs1];
-        const int32_t result = a - decoded->imm;
+        const int32_t result = vm_engine_sub_wrap32(a, decoded->imm);
         cpu->regs[decoded->rd] = result;
         vm_engine_update_sub_flags(vm, a, decoded->imm, result, cpu);
         VM_THREADED_NEXT();
@@ -359,12 +361,14 @@ vm_threaded_RORI:
 vm_threaded_CMP: {
         const int32_t a = cpu->regs[decoded->rd];
         const int32_t b = cpu->regs[decoded->rs1];
-        vm_engine_update_sub_flags(vm, a, b, a - b, cpu);
+        vm_engine_update_sub_flags(vm, a, b,
+                                   vm_engine_sub_wrap32(a, b), cpu);
         VM_THREADED_NEXT();
     }
 vm_threaded_CMPI: {
         const int32_t a = cpu->regs[decoded->rd];
-        vm_engine_update_sub_flags(vm, a, decoded->imm, a - decoded->imm, cpu);
+        vm_engine_update_sub_flags(vm, a, decoded->imm,
+                                   vm_engine_sub_wrap32(a, decoded->imm), cpu);
         VM_THREADED_NEXT();
     }
 vm_threaded_LOAD:
@@ -551,19 +555,35 @@ vm_threaded_CPUID:
 
 uint32_t vm_engine_execute_threaded(VM *vm, VCPU *cpu) {
 #ifndef VM_DEBUG
-    VM_DecodedBlock *block = &cpu->threaded_blocks[
-        ((vm_addr_t)cpu->ip >> 3u) &
-        (VM_THREADED_BLOCK_CACHE_ENTRIES - 1u)];
-    if (!vm_threaded_block_valid(vm, cpu, block) &&
-        !vm_threaded_build_block(vm, cpu, block)) {
-        return vm_engine_execute_cached(vm, cpu);
-    }
-    {
-        const uint32_t executed =
-            vm_execute_threaded_block(vm, cpu, block);
-        if (executed != 0u) {
-            return executed;
+    uint32_t total = 0u;
+    while (total < VM_THREADED_QUANTUM_MAX &&
+           !atomic_is_vm_stopped(vm)) {
+        VM_DecodedBlock *block = &cpu->threaded_blocks[
+            ((vm_addr_t)cpu->ip >> 3u) &
+            (VM_THREADED_BLOCK_CACHE_ENTRIES - 1u)];
+        uint32_t executed;
+        int can_continue = 0;
+        if (!vm_threaded_block_valid(vm, cpu, block) &&
+            !vm_threaded_build_block(vm, cpu, block)) {
+            executed = vm_engine_execute_cached(vm, cpu);
+        } else {
+            executed = vm_execute_threaded_block(vm, cpu, block);
+            if (executed == 0u) {
+                executed = vm_engine_execute_cached(vm, cpu);
+            } else {
+                const uint8_t last_op = block->ops[block->count - 1u].op;
+                can_continue =
+                    block->count == VM_THREADED_BLOCK_MAX_OPS ||
+                    vm_threaded_opcode_terminates(last_op);
+            }
         }
+        total += executed;
+        if (!can_continue || vm_interrupt_pending_fast(vm, cpu)) {
+            break;
+        }
+    }
+    if (total != 0u) {
+        return total;
     }
 #endif
     return vm_engine_execute_cached(vm, cpu);

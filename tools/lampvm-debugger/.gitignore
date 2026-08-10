@@ -1,0 +1,5 @@
+.gradle/
+.gradle-user/
+.kotlin/
+build/
+**/build/

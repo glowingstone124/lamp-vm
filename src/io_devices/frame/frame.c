@@ -3,7 +3,6 @@
 #include <string.h>
 #include "frame.h"
 
-#include <stdlib.h>
 #define SCREEN_WIDTH 80
 #define SCREEN_HEIGHT 25
 #define FLUSH_THRESHOLD 3
@@ -15,8 +14,6 @@ Cell screen[SCREEN_HEIGHT][SCREEN_WIDTH];
 DirtyRect dirty = {0, 0, 0, 0, 0};
 uint16_t vga_memory[SCREEN_HEIGHT * SCREEN_WIDTH];
 #define VGA_ADDR(x, y) ((y) * SCREEN_WIDTH + (x))
-
-void set_dirty(int value) { dirty.dirty = value; }
 
 void init_screen(void) {
     for (int y = 0; y < SCREEN_HEIGHT; y++) {
@@ -102,7 +99,6 @@ void flush_to_vga(void) {
     }
     dirty.dirty = 0;
 }
-void clear_screen(void) { system("clear"); }
 void render_vga_screen(void) {
     flush_to_vga();
 

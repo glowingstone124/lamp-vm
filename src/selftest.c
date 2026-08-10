@@ -5,7 +5,10 @@
 
 #include "selftest.h"
 #include "vm.h"
+#include "vm_runtime.h"
+#include "flags.h"
 #include "engines/engine.h"
+#include "engines/jit/code_memory.h"
 #include "loadbin.h"
 #include "interrupt.h"
 #include "memory.h"
@@ -19,18 +22,6 @@
 #include "io_devices/mmu/mmu_mmio_register.h"
 #include "io_devices/pcie/pcie.h"
 #include "runtime_stats.h"
-
-extern const size_t MEM_SIZE;
-
-extern int vm_run_headless(VM *vm, uint64_t timeout_ms);
-extern VM *vm_create(size_t memory_size,
-                     const uint64_t *program,
-                     size_t program_size,
-                     const uint8_t *data,
-                     size_t data_size,
-                     const ProgramLayout *layout,
-                     int smp_cores);
-extern void vm_destroy(VM *vm);
 
 static VmExecutionEngine g_selftest_engine = VM_ENGINE_CLASSIC;
 
@@ -245,7 +236,7 @@ static int run_selftest_mmu_global_tlb_flush(void) {
     return ok;
 }
 
-static int run_selftest_cached_fetch_invalidation(void) {
+static int run_selftest_fetch_invalidation(VmExecutionEngine engine) {
     enum {
         root_pa = 0x4000u,
         l2_pa = 0x5000u,
@@ -269,7 +260,7 @@ static int run_selftest_cached_fetch_invalidation(void) {
     if (!vm) {
         return 0;
     }
-    vm->execution_engine = VM_ENGINE_CACHED;
+    vm->execution_engine = engine;
     store_le64(&vm->memory[first_pa], first_inst);
     store_le64(&vm->memory[second_pa], second_inst);
     store_le32(&vm->memory[root_pa + pde * 4u], l2_pa | perms);
@@ -278,14 +269,14 @@ static int run_selftest_cached_fetch_invalidation(void) {
     vm->mmu.ctrl[0] = MMU_CTRL_ENABLE;
     vm_mmu_flush_tlb(vm, 0u);
     vm->cpus[0].ip = va;
-    (void)vm_engine_execute_cached(vm, &vm->cpus[0]);
+    (void)vm_engine_execute_quantum(vm, &vm->cpus[0]);
     ok = vm->cpus[0].regs[1] == 1u;
 
     /* Changing the instruction bytes at the same physical address must be
      * observed even without a mapping change. */
     store_le64(&vm->memory[first_pa], second_inst);
     vm->cpus[0].ip = va;
-    (void)vm_engine_execute_cached(vm, &vm->cpus[0]);
+    (void)vm_engine_execute_quantum(vm, &vm->cpus[0]);
     ok = ok && vm->cpus[0].regs[1] == 2u;
 
     /* Restoring the old bytes through a different mapping must not reuse the
@@ -294,7 +285,7 @@ static int run_selftest_cached_fetch_invalidation(void) {
     store_le32(&vm->memory[l2_pa + pte * 4u], second_pa | perms);
     vm_mmu_flush_all_tlbs(vm);
     vm->cpus[0].ip = va;
-    (void)vm_engine_execute_cached(vm, &vm->cpus[0]);
+    (void)vm_engine_execute_quantum(vm, &vm->cpus[0]);
     ok = ok && vm->cpus[0].regs[1] == 2u;
     vm_destroy(vm);
     return ok;
@@ -959,6 +950,26 @@ static int run_selftest_ps2_controller(void) {
         ok = ok && (vm_ps2_read_data(vm) == value);
     }
 
+    /* Mouse reports are indivisible. With only two controller slots free,
+     * rejecting a report must leave the producer index untouched; accepting
+     * it later must expose exactly three ordered bytes. The legacy FIFO is
+     * already full here, so it cannot hide an 8042 backpressure failure. */
+    for (uint32_t i = 0u; i < 509u; i++) {
+        ok = ok && vm_ps2_mouse_enqueue(vm, (uint8_t)i);
+    }
+    {
+        const uint16_t head_before = vm->ps2_out_head;
+        ok = ok && !vm_ps2_mouse_enqueue_packet(vm, 0x09u, 0x01u, 0x02u);
+        ok = ok && vm->ps2_out_head == head_before;
+    }
+    for (uint32_t i = 0u; i < 509u; i++) {
+        ok = ok && vm_ps2_read_data(vm) == (uint8_t)i;
+    }
+    ok = ok && vm_ps2_mouse_enqueue_packet(vm, 0x09u, 0x01u, 0x02u);
+    ok = ok && vm_ps2_read_data(vm) == 0x09u;
+    ok = ok && vm_ps2_read_data(vm) == 0x01u;
+    ok = ok && vm_ps2_read_data(vm) == 0x02u;
+
     /* Reproduce the end-of-handler race: a new byte raises the mouse IRQ,
      * then a late EOI clears that latch while the 8042 buffer is non-empty.
      * The level source must immediately reassert it. */
@@ -1418,6 +1429,57 @@ static int run_selftest_cpu_pacing(void) {
     return ok;
 }
 
+static int run_selftest_integer_flag_edges(void) {
+    typedef struct FlagCase {
+        uint8_t op;
+        uint32_t a;
+        uint32_t b;
+        uint32_t result;
+        uint32_t result_flags;
+    } FlagCase;
+    static const FlagCase cases[] = {
+        { OP_ADD, 0x7FFFFFFFu, 1u, 0x80000000u, FLAG_SF | FLAG_OF },
+        { OP_ADD, 0xFFFFFFFFu, 1u, 0u, FLAG_CF | FLAG_ZF },
+        { OP_ADD, 0x80000000u, 0x80000000u, 0u,
+          FLAG_CF | FLAG_ZF | FLAG_OF },
+        { OP_SUB, 0u, 0x80000000u, 0x80000000u,
+          FLAG_CF | FLAG_SF | FLAG_OF },
+        { OP_SUB, 0x80000000u, 1u, 0x7FFFFFFFu, FLAG_OF },
+        { OP_SUB, 0u, 1u, 0xFFFFFFFFu, FLAG_CF | FLAG_SF },
+    };
+    const uint32_t preserved_flags = FLAG_PF | FLAG_AF | 0x80000000u;
+    uint64_t program[] = {
+        INST(OP_ADD, 3, 1, 2, 0),
+        INST(OP_HALT, 0, 0, 0, 0),
+    };
+    VM *vm = vm_create(MEM_SIZE, program,
+                       sizeof(program) / sizeof(program[0]),
+                       NULL, 0, NULL, 1);
+    int ok = 1;
+    if (!vm) {
+        return 0;
+    }
+    for (size_t i = 0u; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        VCPU *cpu = &vm->cpus[0];
+        store_le64(&vm->memory[PROGRAM_BASE],
+                   INST(cases[i].op, 3, 1, 2, 0));
+        memset(cpu->regs, 0, sizeof(cpu->regs));
+        cpu->regs[1] = cases[i].a;
+        cpu->regs[2] = cases[i].b;
+        cpu->flags = preserved_flags |
+                     FLAG_CF | FLAG_ZF | FLAG_SF | FLAG_OF;
+        cpu->ip = PROGRAM_BASE;
+        cpu->last_ip = PROGRAM_BASE;
+        atomic_store_explicit(&vm->stop_flags, 0u, memory_order_release);
+        ok = ok && vm_engine_execute_quantum(vm, cpu) == 1u;
+        ok = ok && cpu->regs[3] == cases[i].result;
+        ok = ok && cpu->flags ==
+            (preserved_flags | cases[i].result_flags);
+    }
+    vm_destroy(vm);
+    return ok;
+}
+
 static int run_selftests_for_engine(VmExecutionEngine engine) {
     g_selftest_engine = engine;
     int ok1 = run_selftest_startap_cpuid();
@@ -1443,10 +1505,12 @@ static int run_selftests_for_engine(VmExecutionEngine engine) {
     int ok21 = run_selftest_runtime_stats();
     int ok22 = run_selftest_cpu_pacing();
     int ok23 = run_selftest_mmu_global_tlb_flush();
+    int ok24 = run_selftest_integer_flag_edges();
 
     printf("[selftest] engine=%s\n",
            engine == VM_ENGINE_CACHED ? "cached" :
-           (engine == VM_ENGINE_THREADED ? "threaded" : "classic"));
+           (engine == VM_ENGINE_THREADED ? "threaded" :
+            (engine == VM_ENGINE_JIT ? "jit" : "classic")));
     printf("[selftest] startap_cpuid: %s\n", ok1 ? "PASS" : "FAIL");
     printf("[selftest] ipi: %s\n", ok2 ? "PASS" : "FAIL");
     printf("[selftest] mmu_percpu_root: %s\n", ok3 ? "PASS" : "FAIL");
@@ -1470,7 +1534,43 @@ static int run_selftests_for_engine(VmExecutionEngine engine) {
     printf("[selftest] runtime_stats: %s\n", ok21 ? "PASS" : "FAIL");
     printf("[selftest] cpu_pacing: %s\n", ok22 ? "PASS" : "FAIL");
     printf("[selftest] mmu_global_tlb_flush: %s\n", ok23 ? "PASS" : "FAIL");
-    return (ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12 && ok13 && ok14 && ok15 && ok16 && ok17 && ok18 && ok19 && ok20 && ok21 && ok22 && ok23) ? 0 : 1;
+    printf("[selftest] integer_flag_edges: %s\n", ok24 ? "PASS" : "FAIL");
+    return (ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 &&
+            ok10 && ok11 && ok12 && ok13 && ok14 && ok15 && ok16 && ok17 &&
+            ok18 && ok19 && ok20 && ok21 && ok22 && ok23 && ok24) ? 0 : 1;
+}
+
+static int run_selftest_jit_code_arena(void) {
+    VmJitCodeArena arena;
+    VmJitCode code;
+    const uint32_t first_words[] = { 0xD503201Fu, 0xD65F03C0u };
+    const uint32_t second_words[] = { 0xD503203Fu, 0xD65F03C0u };
+    void *slot;
+    int ok;
+
+    memset(&arena, 0, sizeof(arena));
+    memset(&code, 0, sizeof(code));
+    if (!vm_jit_code_arena_init(&arena, 2u, 4096u) ||
+        !vm_jit_code_assign_slot(&arena, 1u, &code)) {
+        vm_jit_code_arena_destroy(&arena);
+        return 0;
+    }
+    slot = code.mapping;
+    ok = vm_jit_code_publish(first_words,
+                             sizeof(first_words) / sizeof(first_words[0]),
+                             &code) &&
+         code.mapping == slot && code.entry != NULL &&
+         code.code_size == sizeof(first_words);
+    vm_jit_code_destroy(&code);
+    ok = ok && code.mapping == slot && code.entry == NULL &&
+         vm_jit_code_publish(second_words,
+                             sizeof(second_words) / sizeof(second_words[0]),
+                             &code) &&
+         code.mapping == slot && code.entry != NULL &&
+         code.code_size == sizeof(second_words);
+    vm_jit_code_destroy(&code);
+    vm_jit_code_arena_destroy(&arena);
+    return ok;
 }
 
 int run_selftests(void) {
@@ -1480,16 +1580,28 @@ int run_selftests(void) {
         run_selftests_for_engine(VM_ENGINE_CACHED) == 0;
     const int threaded_ok =
         run_selftests_for_engine(VM_ENGINE_THREADED) == 0;
-    const int invalidation_ok = run_selftest_cached_fetch_invalidation();
+    const int jit_ok =
+        run_selftests_for_engine(VM_ENGINE_JIT) == 0;
+    const int invalidation_ok =
+        run_selftest_fetch_invalidation(VM_ENGINE_CACHED);
+    const int jit_invalidation_ok =
+        run_selftest_fetch_invalidation(VM_ENGINE_JIT);
+    const int jit_code_arena_ok = run_selftest_jit_code_arena();
     printf("[selftest] cached_fetch_invalidation: %s\n",
            invalidation_ok ? "PASS" : "FAIL");
+    printf("[selftest] jit_block_invalidation: %s\n",
+           jit_invalidation_ok ? "PASS" : "FAIL");
+    printf("[selftest] jit_code_arena: %s\n",
+           jit_code_arena_ok ? "PASS" : "FAIL");
     g_selftest_engine = VM_ENGINE_CLASSIC;
-    return (classic_ok && cached_ok && threaded_ok && invalidation_ok) ? 0 : 1;
+    return (classic_ok && cached_ok && threaded_ok && jit_ok &&
+            invalidation_ok && jit_invalidation_ok && jit_code_arena_ok) ? 0 : 1;
 }
 
 static const char *benchmark_engine_name(VmExecutionEngine engine) {
     return engine == VM_ENGINE_CACHED ? "cached" :
-           (engine == VM_ENGINE_THREADED ? "threaded" : "classic");
+           (engine == VM_ENGINE_THREADED ? "threaded" :
+            (engine == VM_ENGINE_JIT ? "jit" : "classic"));
 }
 
 static int run_interpreter_benchmark_mode(const char *label,
@@ -1654,6 +1766,7 @@ int run_benchmark(void) {
         VM_ENGINE_CLASSIC,
         VM_ENGINE_CACHED,
         VM_ENGINE_THREADED,
+        VM_ENGINE_JIT,
     };
     for (size_t i = 0u; i < sizeof(engines) / sizeof(engines[0]); i++) {
         const VmExecutionEngine engine = engines[i];

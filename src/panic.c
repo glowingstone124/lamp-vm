@@ -3,6 +3,7 @@
 #include <stdarg.h>
 
 #include "vm.h"
+#include "panic.h"
 //
 // Created by Max Wang on 2025/12/29.
 //

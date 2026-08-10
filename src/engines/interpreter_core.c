@@ -7,6 +7,7 @@
 #include "../float.h"
 #include "../interrupt.h"
 #include "../io.h"
+#include "../io_devices/disk/disk.h"
 #include "../memory.h"
 #include "../stack.h"
 
@@ -74,7 +75,7 @@ void vm_engine_execute_decoded(VM *vm,
         case OP_ADD: {
             const int32_t a = cpu->regs[rs1];
             const int32_t b = cpu->regs[rs2];
-            const int32_t res = a + b;
+            const int32_t res = vm_engine_add_wrap32(a, b);
             cpu->regs[rd] = res;
             vm_engine_update_add_flags(vm, a, b, res, cpu);
             break;
@@ -83,13 +84,14 @@ void vm_engine_execute_decoded(VM *vm,
         case OP_SUB: {
             int32_t a = cpu->regs[rs1];
             int32_t b = cpu->regs[rs2];
-            int32_t res = a - b;
+            int32_t res = vm_engine_sub_wrap32(a, b);
             cpu->regs[rd] = res;
             vm_engine_update_sub_flags(vm, a, b, res, cpu);
             break;
         }
         case OP_MUL: {
-            cpu->regs[rd] = cpu->regs[rs1] * cpu->regs[rs2];
+            cpu->regs[rd] = vm_engine_mul_wrap32(cpu->regs[rs1],
+                                                cpu->regs[rs2]);
             vm_engine_update_logic_flags(vm, cpu->regs[rd], cpu);
             break;
         }
@@ -325,14 +327,14 @@ void vm_engine_execute_decoded(VM *vm,
         case OP_CMP: {
             const int32_t val1 = cpu->regs[rd];
             const int32_t val2 = cpu->regs[rs1];
-            const int32_t res = val1 - val2;
+            const int32_t res = vm_engine_sub_wrap32(val1, val2);
             vm_engine_update_sub_flags(vm, val1, val2, res,cpu);
             break;
         }
         case OP_CMPI: {
             const int32_t val1 = cpu->regs[rd];
             const int32_t val2 = imm;
-            const int32_t res = val1 - val2;
+            const int32_t res = vm_engine_sub_wrap32(val1, val2);
             vm_engine_update_sub_flags(vm, val1, val2, res,cpu);
             break;
         }
@@ -478,6 +480,8 @@ void vm_engine_execute_decoded(VM *vm,
                     cpu->regs[rd] = vm->io[PS2_KBD_STATUS] & 0xFF;
                 } else if (addr == PS2_MOUSE_STATUS) {
                     cpu->regs[rd] = vm->io[PS2_MOUSE_STATUS] & 0xFF;
+                } else if (addr == DISK_STATUS) {
+                    cpu->regs[rd] = disk_read_status(vm);
                 } else {
                     cpu->regs[rd] = vm->io[addr];
                 }
@@ -671,7 +675,7 @@ void vm_engine_execute_decoded(VM *vm,
         case OP_INC: {
             const int32_t a = cpu->regs[rd];
             const int32_t b = 1;
-            const int32_t res = a + b;
+            const int32_t res = vm_engine_add_wrap32(a, b);
             cpu->regs[rd] = res;
             vm_engine_update_add_flags(vm, a, b, res,cpu);
             break;
@@ -870,7 +874,7 @@ void vm_engine_execute_decoded(VM *vm,
         case OP_ADDI: {
             const int32_t a = cpu->regs[rs1];
             const int32_t b = imm;
-            const int32_t res = a + b;
+            const int32_t res = vm_engine_add_wrap32(a, b);
             cpu->regs[rd] = res;
             vm_engine_update_add_flags(vm, a, b, res,cpu);
             break;
@@ -878,7 +882,7 @@ void vm_engine_execute_decoded(VM *vm,
         case OP_SUBI: {
             const int32_t a = cpu->regs[rs1];
             const int32_t b = imm;
-            const int32_t res = a - b;
+            const int32_t res = vm_engine_sub_wrap32(a, b);
             cpu->regs[rd] = res;
             vm_engine_update_sub_flags(vm, a, b, res,cpu);
             break;
