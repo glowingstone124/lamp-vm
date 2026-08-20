@@ -1,6 +1,17 @@
 #include "engine.h"
 
 #include "jit/jit.h"
+#include "../memory.h"
+
+void vm_engine_set(VM *vm, VmExecutionEngine engine) {
+    if (!vm) {
+        return;
+    }
+    vm->execution_engine = engine;
+    if (engine == VM_ENGINE_JIT) {
+        vm_ram_enable_write_tracking(vm);
+    }
+}
 
 uint32_t vm_engine_execute_quantum(VM *vm, VCPU *cpu) {
     switch (vm->execution_engine) {

@@ -123,13 +123,14 @@ engines intact. Its two-tier shape is:
 
 The first ARM64 scratch backend is now executable on Apple Silicon and is also
 structured for Linux arm64. It directly lowers `MOV`, `MOVI`, integer
-add/subtract/multiply, immediate arithmetic, compare, byte/word loads and
-stores, ZF branches, fences, pause, and CPUID. Arithmetic and logic flags are
-derived directly from ARM64 NZCV without a C call. Backward direct branches to
-an instruction in the same compiled block become native branches with a
-256-instruction budget, so tight guest loops do not repeatedly return through
-the C dispatcher. Loads may continue within a compiled block; stores remain
-block exits so code writes and device effects retain a precise boundary.
+add/subtract/multiply, immediate arithmetic, compare, Boolean operations,
+variable shifts and rotates, byte/word loads and stores, ZF branches, fences,
+pause, and CPUID. Arithmetic and logic flags are derived directly from ARM64
+NZCV without a C call. Backward direct branches to an instruction in the same
+compiled block become native branches with a 256-instruction budget, so tight
+guest loops do not repeatedly return through the C dispatcher. Loads may
+continue within a compiled block; stores remain block exits so code writes and
+device effects retain a precise boundary.
 
 Compiled code uses a per-vCPU reusable arena with 1,024 four-way
 set-associative slots. Eviction overwrites a slot in place instead of performing
@@ -159,20 +160,21 @@ atomics, and uncommon operations currently use interpreter fallback.
 
 ## Invalidation and SMP correctness
 
-Before enabling native JIT code, raw-byte validation should be upgraded to
-write-generation invalidation:
+When JIT is selected, the VM enables a physical RAM-page generation table.
+CPU stores, successful atomic writes, disk/network/DMA writes, and debugger
+writes publish a release-ordered generation increment for every 4 KiB page
+they touch. Each compiled block records its code-page generation and validates
+it with an acquire load before entry, in addition to the existing raw-byte,
+MMU-epoch, and MMIO-epoch checks. A second validation after native compilation
+prevents a block changed while it was being emitted from entering the cache.
 
-- RAM writes must increment a physical-page generation while a block engine is
-  active. This includes CPU stores, atomics, disk/network/audio DMA, and debug
-  writes.
-- A block must record the generation of every code page it spans and validate it
-  before entry.
-- MMU root/control changes and explicit TLB invalidation must increment a per-core
-  MMU epoch and invalidate that core's block lookup entries.
-- Generation and epoch publication must be atomic so another vCPU cannot continue
-  running stale code after a shared executable page changes.
-- Dynamic PCI BAR relocation is never embedded as a permanent host pointer;
-  MMIO paths retain guarded helper exits.
+Current blocks stop at a guest page boundary and require contiguous physical
+instruction bytes, so one recorded physical-page generation covers the whole
+block. If blocks are later allowed to span pages, `VmJitBlock` must record and
+validate every covered physical page. MMU root/control changes and explicit
+TLB invalidation continue to advance the per-core MMU epoch. Dynamic PCI BAR
+relocation is never embedded as a permanent host pointer; MMIO paths retain
+guarded helper exits.
 
 The guest kernel already separates kernel text as RX and data as RW. Its ELF
 loader temporarily makes a segment writable while copying and then restores
@@ -193,10 +195,11 @@ alone is not sufficient.
 5. Complete optimization pass: bounded multi-block quanta, native ARM64
    backedges, inline NZCV flag lowering, guarded ARM64 TLB/plain-RAM paths, and
    a reusable four-way per-vCPU code arena.
-6. Next: add physical page-generation invalidation before permitting larger
-   memory-spanning blocks, and use real-guest profiles to choose the next ISA
-   operations or trace shape to lower.
-7. Required for every new backend: run all selftests and differential
+6. Complete: physical page-generation invalidation across CPU, atomic,
+   DMA/device, and debugger writes, with build-time and entry-time JIT guards.
+7. Next: use real-guest profiles to choose the next ISA operations or trace
+   shape to lower; add a generation vector before permitting multi-page blocks.
+8. Required for every new backend: run all selftests and differential
    instruction/state tests, then boot the full kernel on macOS and Linux.
 
 No engine becomes the default until it passes the interpreter's conformance

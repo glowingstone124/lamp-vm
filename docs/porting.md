@@ -202,7 +202,9 @@ Current implementation snapshot:
   remain future work
 - `fdtest` covers ignored self-signal, invalid uncatchable actions, mask block/unblock, missing pid, and child termination
 - syscall IDs wired for the next POSIX filesystem surface: `umask=43`, `rename=44`, `unlink=45`, `mkdir=46`, `rmdir=47`, `link=48`, `symlink=49`, `readlink=50`
-- `umask` is tracked per task and inherited by `sched_spawn`/`vfork`; mutation/link syscalls currently validate user pointers/paths and return stable read-only or non-symlink errno until ext4 mutation support lands
+- `umask` is tracked per task and inherited by `sched_spawn`/`vfork`; it is applied to newly created directories
+- ext4 supports creating directories, removing empty directories, and renaming regular files, including replacing a non-directory destination; `mkdir`, `rmdir`, and common `mv` workflows now work from BusyBox
+- directory renames, hard links, and creating symlinks remain unsupported
 
 ## M5 - BusyBox Integration and Rootfs Layout
 
@@ -221,6 +223,8 @@ Current implementation snapshot:
 - `readlink` returns ext4 symlink targets without a trailing NUL
 - install helper: `user/install_busybox_to_disk.sh --input <busybox-elf>`
 - init shell command `ush` launches `/bin/sh`
+- BusyBox `ps`, `free`, and `uptime` are enabled; `ps` reads live
+  `/proc/<pid>/stat` task snapshots
 
 Recommended initial BusyBox config:
 

@@ -1,13 +1,21 @@
 package dev.lampvm.debugger
 
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.awt.SwingPanel
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
 import com.jediterm.terminal.TerminalColor
 import com.jediterm.terminal.TextStyle
 import com.jediterm.terminal.TtyConnector
@@ -17,10 +25,12 @@ import java.awt.BorderLayout
 import java.awt.Font
 import java.io.IOException
 import javax.swing.JPanel
+import kotlinx.coroutines.delay
 
 @Composable
 internal fun TerminalPanel(
     session: LampVmSession?,
+    state: VmState?,
     modifier: Modifier = Modifier,
 ) {
     Panel("SERIAL TERMINAL", modifier) {
@@ -31,11 +41,32 @@ internal fun TerminalPanel(
             )
         } else {
             key(session) {
-                SwingPanel(
-                    factory = { JediSerialTerminal(session) },
-                    background = Color(0xFF090E14),
-                    modifier = Modifier.fillMaxSize(),
-                )
+                var pendingInputBytes by remember { mutableIntStateOf(0) }
+                LaunchedEffect(session) {
+                    while (true) {
+                        pendingInputBytes = session.pendingSerialInputBytes
+                        delay(50)
+                    }
+                }
+                Column(Modifier.fillMaxSize()) {
+                    if (state == VmState.Paused) {
+                        Text(
+                            if (pendingInputBytes == 0) {
+                                "PAUSED terminal input will be sent on STEP"
+                            } else {
+                                "PAUSED $pendingInputBytes bytes queued for STEP"
+                            },
+                            color = MaterialTheme.colorScheme.secondary,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        )
+                    }
+                    SwingPanel(
+                        factory = { JediSerialTerminal(session) },
+                        background = Color(0xFF090E14),
+                        modifier = Modifier.fillMaxSize().weight(1f),
+                    )
+                }
             }
         }
     }

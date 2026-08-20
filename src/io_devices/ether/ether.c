@@ -4,6 +4,7 @@
 #include "../iommu/iommu_mmio_register.h"
 #include "../pcie/pcie.h"
 #include "../../interrupt.h"
+#include "../../memory.h"
 #include "../../runtime_log.h"
 #include "../../vm.h"
 #include <stdio.h>
@@ -53,6 +54,7 @@ static void ether_pump_rx(VM *vm, ether_state_t *e) {
         return;
     }
     memcpy(&vm->memory[(size_t)dma_addr], frame, len);
+    vm_ram_mark_written(vm, (uint32_t)dma_addr, len);
     e->rx_len = len;
     e->status |= ETHER_STATUS_RX_READY;
     if (e->pci_function) {

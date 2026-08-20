@@ -464,6 +464,7 @@ VM *vm_create(size_t memory_size,
     atomic_init(&vm->debug_step_requested, false);
     atomic_init(&vm->debug_step_completed, false);
     atomic_init(&vm->debug_step_core, 0u);
+    atomic_init(&vm->ram_write_tracking_active, false);
     if (!vm->cpus) {
         free(vm);
         vm_error("Couldn't create CPU.");
@@ -532,6 +533,26 @@ VM *vm_create(size_t memory_size,
         return NULL;
     }
     memset(vm->memory, 0, memory_size);
+    vm->ram_page_count = (memory_size >> VM_RAM_PAGE_SHIFT) +
+        ((memory_size & VM_RAM_PAGE_MASK) != 0u ? 1u : 0u);
+    vm->ram_page_generations = calloc(
+        vm->ram_page_count, sizeof(*vm->ram_page_generations));
+    if (!vm->ram_page_generations) {
+        free(vm->memory);
+        pthread_mutex_destroy(&vm->runtime_stats_lock);
+        pthread_mutex_destroy(&vm->shared_lock);
+        free(vm->interrupt_pending_summary);
+        free(vm->interrupt_enable_bitmap);
+        free(vm->interrupt_bitmap);
+        free(vm->core_released);
+        free(vm->cpus);
+        free(vm);
+        vm_error("Couldn't allocate RAM page generations");
+        return NULL;
+    }
+    for (size_t page = 0u; page < vm->ram_page_count; page++) {
+        atomic_init(&vm->ram_page_generations[page], 0u);
+    }
 
     size_t fb_base = FB_BASE(memory_size);
 
@@ -540,6 +561,7 @@ VM *vm_create(size_t memory_size,
     if (!vm->fb || !vm->fb_front) {
         free(vm->fb_front);
         free(vm->fb);
+        free(vm->ram_page_generations);
         free(vm->memory);
         pthread_mutex_destroy(&vm->runtime_stats_lock);
         pthread_mutex_destroy(&vm->shared_lock);
@@ -562,6 +584,7 @@ VM *vm_create(size_t memory_size,
             }
             free(vm->fb_front);
             free(vm->fb);
+            free(vm->ram_page_generations);
             free(vm->memory);
             pthread_mutex_destroy(&vm->runtime_stats_lock);
             pthread_mutex_destroy(&vm->shared_lock);
@@ -771,6 +794,8 @@ void vm_destroy(VM *vm) {
         free(vm->cpus);
     if (vm->memory)
         free(vm->memory);
+    if (vm->ram_page_generations)
+        free(vm->ram_page_generations);
     if (vm->fb)
         free(vm->fb);
     if (vm->fb_front)
@@ -1048,7 +1073,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     vm->cpu_frequency_hz = (uint64_t)options.cpu_mhz * 1000000ull;
-    vm->execution_engine = options.execution_engine;
+    vm_engine_set(vm, options.execution_engine);
     disk_init(vm, "./disk.img");
 
     init_ethernet_backend_from_cli(vm, options.net_mode);

@@ -37,10 +37,11 @@ typedef struct VmJitMemoryOps {
 
 typedef struct VmJitBlock {
     uint64_t mmu_epoch;
+    uint64_t code_page_generation;
     vm_addr_t start_ip;
     uint32_t host_pa;
     uint32_t mmio_epoch;
-    uint8_t count;
+    uint16_t count;
     uint8_t reserved[3];
     uint64_t raw[VM_JIT_BLOCK_MAX_OPS];
     VM_DecodedOp ops[VM_JIT_BLOCK_MAX_OPS];

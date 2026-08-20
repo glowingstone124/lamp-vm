@@ -48,18 +48,43 @@ data class CpuSnapshot(
 )
 
 class LampVmSession private constructor(private var handle: Long) : AutoCloseable {
+    private val serialInputLock = Any()
+    private val deferredSerialInput = DeferredSerialInput()
+
     val state: VmState
         get() = VmState.fromNative(NativeBindings.state(requireHandle()))
 
-    fun start() = NativeBindings.start(requireHandle())
-    fun pause(timeoutMillis: Long = 2_000) =
+    internal val pendingSerialInputBytes: Int
+        get() = synchronized(serialInputLock) { deferredSerialInput.size }
+
+    fun start() = synchronized(serialInputLock) {
+        val current = requireHandle()
+        NativeBindings.start(current)
+        flushDeferredSerialInput(current)
+    }
+
+    fun pause(timeoutMillis: Long = 2_000) = synchronized(serialInputLock) {
         NativeBindings.pause(requireHandle(), timeoutMillis)
+    }
 
     fun step(coreId: Int = 0, timeoutMillis: Long = 2_000) =
-        NativeBindings.step(requireHandle(), coreId, timeoutMillis)
+        synchronized(serialInputLock) {
+            val current = requireHandle()
+            /* Queue serial input before publishing the step request so the
+             * paused vCPU can observe its interrupt during this step. */
+            flushDeferredSerialInput(current)
+            NativeBindings.step(current, coreId, timeoutMillis)
+        }
 
-    fun resume() = NativeBindings.resume(requireHandle())
-    fun stop() = NativeBindings.stop(requireHandle())
+    fun resume() = synchronized(serialInputLock) {
+        val current = requireHandle()
+        flushDeferredSerialInput(current)
+        NativeBindings.resume(current)
+    }
+
+    fun stop() = synchronized(serialInputLock) {
+        NativeBindings.stop(requireHandle())
+    }
 
     fun stats(): VmStats {
         val value = NativeBindings.stats(requireHandle())
@@ -107,22 +132,46 @@ class LampVmSession private constructor(private var handle: Long) : AutoCloseabl
     fun sendMouse(deltaX: Int, deltaY: Int, buttons: Int) =
         NativeBindings.sendMouse(requireHandle(), deltaX, deltaY, buttons)
 
-    fun readSerial(capacity: Int = 8_192): ByteArray =
-        NativeBindings.serialRead(requireHandle(), capacity)
+    fun readSerial(capacity: Int = 8_192): ByteArray {
+        val current = requireHandle()
+        synchronized(serialInputLock) {
+            if (deferredSerialInput.size > 0 &&
+                VmState.fromNative(NativeBindings.state(current)) != VmState.Paused
+            ) {
+                flushDeferredSerialInput(current)
+            }
+        }
+        return NativeBindings.serialRead(current, capacity)
+    }
 
     fun writeSerial(text: String): Int =
         writeSerial(text.encodeToByteArray())
 
-    fun writeSerial(data: ByteArray): Int =
-        NativeBindings.serialWrite(requireHandle(), data)
+    fun writeSerial(data: ByteArray): Int = synchronized(serialInputLock) {
+        if (data.isEmpty()) return@synchronized 0
+        val current = requireHandle()
+        deferredSerialInput.enqueue(data)
+        if (VmState.fromNative(NativeBindings.state(current)) != VmState.Paused) {
+            flushDeferredSerialInput(current)
+        }
+        /* JediTerm cares whether the debugger accepted the input. Bytes that
+         * do not fit the guest RX FIFO remain queued for a later drain. */
+        data.size
+    }
 
     override fun close() {
-        val current = handle
-        if (current != 0L) {
-            handle = 0L
-            NativeBindings.destroy(current)
+        synchronized(serialInputLock) {
+            val current = handle
+            if (current != 0L) {
+                handle = 0L
+                deferredSerialInput.clear()
+                NativeBindings.destroy(current)
+            }
         }
     }
+
+    private fun flushDeferredSerialInput(current: Long): Int =
+        deferredSerialInput.flush { NativeBindings.serialWrite(current, it) }
 
     private fun requireHandle(): Long = handle.also {
         check(it != 0L) { "Lamp VM session is closed" }

@@ -123,6 +123,8 @@ The read-only procfs backend currently provides:
 - `/proc/version`: kernel/procfs version string
 - `/proc/lampvm`: raw frequency, cycles, retired instructions, measured IPS,
   uptime, guest estimates, host RSS, and task count
+- `/proc/<pid>/stat`: a live task snapshot compatible with BusyBox process
+  scanners; each numeric task directory contains `stat`
 
 `/proc/meminfo` is intentionally labeled as an estimate: the kernel does not yet
 have a page allocator that can report exact free/active/cache page accounting.

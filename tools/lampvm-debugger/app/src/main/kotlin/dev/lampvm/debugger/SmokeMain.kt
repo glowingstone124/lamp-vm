@@ -73,9 +73,17 @@ fun main() {
             check(cpu.coreId == 0)
             check(vm.cpu(1).coreId == 1)
             check(vm.readMemory(cpu.ip.toUInt(), 8).size == 8)
+            val pausedInput = "queued while paused\n".encodeToByteArray()
+            check(vm.writeSerial(pausedInput) == pausedInput.size)
+            check(vm.pendingSerialInputBytes == pausedInput.size) {
+                "terminal input was sent before the paused VM stepped"
+            }
             val instructionsBeforeStep = vm.stats().executedInstructions
             vm.step(0)
             check(vm.state == VmState.Paused)
+            check(vm.pendingSerialInputBytes == 0) {
+                "single-step did not schedule queued terminal input"
+            }
             check(vm.stats().executedInstructions == instructionsBeforeStep + 1uL) {
                 "single-step did not execute exactly one guest instruction"
             }

@@ -65,8 +65,10 @@ fully reflected in documentation tables):
 |---|---|
 | `0x00000000`-`~0x00430000` | BIOS/kernel image, low stacks, ELF load buffer (`KERNEL_ELF_BUF=0x00300000`) |
 | `~0x00750000`-`0x00800000` | Native C stack active growth region (rooted at `0x00800000`, grows down) |
-| `0x01000000`-`0x01200000` | Kernel vfork snapshot scratch (`SCHED_VFORK_SNAPSHOT_BASE`) |
+| `0x00680000`-`0x00700000` | Kernel vfork user-stack snapshot scratch (`SCHED_VFORK_STACK_SNAPSHOT_BASE`) |
+| `0x01000000`-`0x01F80000` | Kernel vfork non-stack user-region snapshot scratch (`SCHED_VFORK_SNAPSHOT_BASE`) |
 | `0x01000000` | IOMMU DMA IOVA base offset (`IOMMU_DMA_IOVA_BASE`, translation input, not a direct occupant) |
+| `0x01FE8000`-`0x01FF0000` | BSP kernel IRQ stack; vfork scratch must remain below this range |
 | `0x02000000`-`0x03000000` | Guest userspace process region (`USER_REGION_BASE/SIZE`) |
 | `0x03B80000`-`0x04000000` | SMP per-task stack pool (top of RAM) |
 

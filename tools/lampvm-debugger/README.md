@@ -55,7 +55,8 @@ The first milestone supports:
 - Lamp/Polaris ISA disassembly around IP with current-instruction highlighting
 - runtime statistics
 - embedded JediTerm 3.74 xterm/VT100 serial terminal with editing, ANSI colors,
-  scrollback, selection, and clipboard support
+  scrollback, selection, and clipboard support; input typed while paused is
+  queued and delivered immediately before the next single-step request
 - an independent live Compose VGA window backed by coherent framebuffer snapshots
 - VGA keyboard and relative-pointer capture through explicit PS/2 input ABI calls
 

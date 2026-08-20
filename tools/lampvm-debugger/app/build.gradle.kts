@@ -28,6 +28,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.10.2")
     implementation("org.jetbrains.jediterm:jediterm-core:3.74")
     implementation("org.jetbrains.jediterm:jediterm-ui:3.74")
+    testImplementation(kotlin("test"))
 }
 
 kotlin {

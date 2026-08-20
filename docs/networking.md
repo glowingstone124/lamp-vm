@@ -103,7 +103,12 @@ BusyBox networking applets are controlled by `user/busybox_lamp_min.config`.
 
 Current practical notes:
 
-- `ping`, `nc`, `nslookup`, and `wget` are enabled.
+- Common shell/file tools (`basename`, `cat`, `cp`, `cut`, `date`, `dd`, `dirname`,
+  `du`, `env`, `find`, `head`, `ls`, `mkdir`, `mv`, `readlink`, `sort`, `tail`,
+  `tr`, `wc`)
+  plus process tools (`kill`, `ps`), procfs tools (`free`, `uptime`), and `ping`,
+  `nc`, `nslookup`, and `wget` are
+  enabled.
 - `CONFIG_FEATURE_WGET_STATUSBAR` is disabled. The progress bar path depends on terminal/time behavior that is not yet robust enough in the guest libc/kernel combination, and it can stall after successful downloads.
 - `wget -O - ...` is less reliable than saving to a file today. The recommended smoke test is plain `wget URL` followed by `cat`.
 

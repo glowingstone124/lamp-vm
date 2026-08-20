@@ -25,6 +25,9 @@ typedef struct VCPU VCPU;
 typedef struct VM_Debug VM_Debug;
 #endif
 #define MAX_MMIO_DEVICES 32
+#define VM_RAM_PAGE_SHIFT 12u
+#define VM_RAM_PAGE_SIZE (1u << VM_RAM_PAGE_SHIFT)
+#define VM_RAM_PAGE_MASK (VM_RAM_PAGE_SIZE - 1u)
 #define VM_MMIO_PAGE_SHIFT 12u
 #define VM_MMIO_PAGE_COUNT (1u << (32u - VM_MMIO_PAGE_SHIFT))
 #define VM_MMIO_PAGE_MAP_BYTES (VM_MMIO_PAGE_COUNT / 8u)
@@ -399,6 +402,9 @@ struct VM{
     VmExecutionEngine execution_engine;
     uint8_t *memory;
     size_t memory_size;
+    atomic_uint_fast64_t *ram_page_generations;
+    size_t ram_page_count;
+    atomic_bool ram_write_tracking_active;
 
     /*
      * framebuffer is mapped after main memory:

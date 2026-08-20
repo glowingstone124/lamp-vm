@@ -10,6 +10,42 @@
 #include "vm.h"
 #include "io_devices/mmu/mmu_mmio_register.h"
 
+void vm_ram_enable_write_tracking(VM *vm) {
+    if (!vm || !vm->ram_page_generations || vm->ram_page_count == 0u) {
+        return;
+    }
+    atomic_store_explicit(&vm->ram_write_tracking_active, true,
+                          memory_order_release);
+}
+
+uint64_t vm_ram_page_generation_acquire(const VM *vm, uint32_t pa) {
+    const size_t page = (size_t)pa >> VM_RAM_PAGE_SHIFT;
+    if (!vm || !vm->ram_page_generations || page >= vm->ram_page_count) {
+        return UINT64_MAX;
+    }
+    return atomic_load_explicit(&vm->ram_page_generations[page],
+                                memory_order_acquire);
+}
+
+void vm_ram_mark_written(VM *vm, uint32_t pa, size_t size) {
+    size_t first_page;
+    size_t last_page;
+    size_t last_byte;
+    if (!vm || size == 0u || !vm->ram_page_generations ||
+        !atomic_load_explicit(&vm->ram_write_tracking_active,
+                              memory_order_acquire) ||
+        (size_t)pa >= vm->memory_size || size > vm->memory_size - (size_t)pa) {
+        return;
+    }
+    first_page = (size_t)pa >> VM_RAM_PAGE_SHIFT;
+    last_byte = (size_t)pa + size - 1u;
+    last_page = last_byte >> VM_RAM_PAGE_SHIFT;
+    for (size_t page = first_page; page <= last_page; page++) {
+        atomic_fetch_add_explicit(&vm->ram_page_generations[page], 1u,
+                                  memory_order_release);
+    }
+}
+
 #ifdef VM_MEMCHECK
 static inline void memcheck_align(VM *vm, vm_addr_t addr, size_t align, const char *op) {
     if ((addr % align) != 0) {
@@ -142,7 +178,8 @@ static _Atomic uint32_t *atomic32_ptr_from_va_or_panic(VM *vm,
                                                         VCPU *cpu,
                                                         vm_addr_t addr,
                                                         uint32_t access,
-                                                        const char *op_name) {
+                                                        const char *op_name,
+                                                        uint32_t *pa_out) {
     uint32_t pa_base;
     uint32_t pa[4];
     if ((addr % _Alignof(_Atomic uint32_t)) != 0u) {
@@ -170,6 +207,9 @@ static _Atomic uint32_t *atomic32_ptr_from_va_or_panic(VM *vm,
     if (!in_ram(vm, pa_base, sizeof(uint32_t))) {
         panic(panic_format("%s out of bounds: 0x%08x", op_name, pa_base), vm);
         return NULL;
+    }
+    if (pa_out) {
+        *pa_out = pa_base;
     }
     return (_Atomic uint32_t *)(void *)(&vm->memory[pa_base]);
 }
@@ -290,7 +330,8 @@ uint64_t vm_read64(VM *vm, vm_addr_t addr) {
 }
 
 uint32_t vm_atomic_load32_acquire_cpu(VM *vm, VCPU *cpu, vm_addr_t addr) {
-    _Atomic uint32_t *ptr = atomic32_ptr_from_va_or_panic(vm, cpu, addr, VM_MMU_ACC_READ, "LDAR");
+    _Atomic uint32_t *ptr = atomic32_ptr_from_va_or_panic(
+        vm, cpu, addr, VM_MMU_ACC_READ, "LDAR", NULL);
     if (!ptr) {
         return 0;
     }
@@ -298,27 +339,40 @@ uint32_t vm_atomic_load32_acquire_cpu(VM *vm, VCPU *cpu, vm_addr_t addr) {
 }
 
 void vm_atomic_store32_release_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint32_t value) {
-    _Atomic uint32_t *ptr = atomic32_ptr_from_va_or_panic(vm, cpu, addr, VM_MMU_ACC_WRITE, "STLR");
+    uint32_t pa;
+    _Atomic uint32_t *ptr = atomic32_ptr_from_va_or_panic(
+        vm, cpu, addr, VM_MMU_ACC_WRITE, "STLR", &pa);
     if (!ptr) {
         return;
     }
     atomic_store_explicit(ptr, value, memory_order_release);
+    vm_ram_mark_written(vm, pa, sizeof(value));
 }
 
 uint32_t vm_atomic_exchange32_seqcst_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint32_t value) {
-    _Atomic uint32_t *ptr = atomic32_ptr_from_va_or_panic(vm, cpu, addr, VM_MMU_ACC_READ | VM_MMU_ACC_WRITE, "XCHG");
+    uint32_t pa;
+    uint32_t observed;
+    _Atomic uint32_t *ptr = atomic32_ptr_from_va_or_panic(
+        vm, cpu, addr, VM_MMU_ACC_READ | VM_MMU_ACC_WRITE, "XCHG", &pa);
     if (!ptr) {
         return 0;
     }
-    return atomic_exchange_explicit(ptr, value, memory_order_seq_cst);
+    observed = atomic_exchange_explicit(ptr, value, memory_order_seq_cst);
+    vm_ram_mark_written(vm, pa, sizeof(value));
+    return observed;
 }
 
 uint32_t vm_atomic_fetch_add32_seqcst_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint32_t value) {
-    _Atomic uint32_t *ptr = atomic32_ptr_from_va_or_panic(vm, cpu, addr, VM_MMU_ACC_READ | VM_MMU_ACC_WRITE, "XADD");
+    uint32_t pa;
+    uint32_t observed;
+    _Atomic uint32_t *ptr = atomic32_ptr_from_va_or_panic(
+        vm, cpu, addr, VM_MMU_ACC_READ | VM_MMU_ACC_WRITE, "XADD", &pa);
     if (!ptr) {
         return 0;
     }
-    return atomic_fetch_add_explicit(ptr, value, memory_order_seq_cst);
+    observed = atomic_fetch_add_explicit(ptr, value, memory_order_seq_cst);
+    vm_ram_mark_written(vm, pa, sizeof(value));
+    return observed;
 }
 
 uint32_t vm_atomic_compare_exchange32_seqcst_cpu(VM *vm,
@@ -327,7 +381,9 @@ uint32_t vm_atomic_compare_exchange32_seqcst_cpu(VM *vm,
                                              uint32_t expected,
                                              uint32_t desired,
                                              int *success) {
-    _Atomic uint32_t *ptr = atomic32_ptr_from_va_or_panic(vm, cpu, addr, VM_MMU_ACC_READ | VM_MMU_ACC_WRITE, "CAS");
+    uint32_t pa;
+    _Atomic uint32_t *ptr = atomic32_ptr_from_va_or_panic(
+        vm, cpu, addr, VM_MMU_ACC_READ | VM_MMU_ACC_WRITE, "CAS", &pa);
     if (!ptr) {
         if (success) {
             *success = 0;
@@ -342,6 +398,9 @@ uint32_t vm_atomic_compare_exchange32_seqcst_cpu(VM *vm,
                                                      memory_order_seq_cst);
     if (success) {
         *success = ok ? 1 : 0;
+    }
+    if (ok) {
+        vm_ram_mark_written(vm, pa, sizeof(desired));
     }
     return observed;
 }
@@ -392,6 +451,7 @@ void vm_write8_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint8_t value) {
     }
 
     vm->memory[pa] = value;
+    vm_ram_mark_written(vm, pa, sizeof(value));
 }
 
 void vm_write8(VM *vm, vm_addr_t addr, uint8_t value) {
@@ -422,6 +482,7 @@ void vm_write32_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint32_t value) {
             return;
         }
         store_le32(&vm->memory[pa_base], value);
+        vm_ram_mark_written(vm, pa_base, sizeof(value));
         return;
     }
     if (!vm_translate_span_or_panic_cpu(vm, cpu, addr, 4u, VM_MMU_ACC_WRITE, "WRITE32", pa)) {
@@ -446,6 +507,7 @@ void vm_write32_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint32_t value) {
             return;
         }
         store_le32(&vm->memory[pa[0]], value);
+        vm_ram_mark_written(vm, pa[0], sizeof(value));
         return;
     }
 
@@ -459,6 +521,7 @@ void vm_write32_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint32_t value) {
             return;
         }
         vm->memory[pa[i]] = (uint8_t)((value >> (i * 8u)) & 0xFFu);
+        vm_ram_mark_written(vm, pa[i], 1u);
     }
 }
 
@@ -478,6 +541,7 @@ void vm_write64_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint64_t value) {
                 return;
             }
             store_le64(&vm->memory[pa_base], value);
+            vm_ram_mark_written(vm, pa_base, sizeof(value));
             return;
         }
     }

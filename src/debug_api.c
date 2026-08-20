@@ -8,6 +8,8 @@
 
 #include "interrupt.h"
 #include "io.h"
+#include "memory.h"
+#include "engines/engine.h"
 #include "io_devices/disk/disk.h"
 #include "io_devices/ether/ether.h"
 #include "io_devices/ether/ether_backend.h"
@@ -143,8 +145,7 @@ lamp_debug_status_t lamp_debug_create_from_file(
     handle->vm->cpu_frequency_hz = config->cpu_frequency_hz != 0u ?
         config->cpu_frequency_hz :
         (uint64_t)VM_DEFAULT_CPU_MHZ * 1000000ull;
-    handle->vm->execution_engine =
-        (VmExecutionEngine)config->execution_engine;
+    vm_engine_set(handle->vm, (VmExecutionEngine)config->execution_engine);
     /* Embedded frontends consume serial bytes through the debugger API.
      * Without capture, the legacy IO path bypasses the TX FIFO and writes
      * directly to the host process stdout. */
@@ -435,6 +436,7 @@ lamp_debug_status_t lamp_debug_write_memory(lamp_debug_vm_t *handle,
         return LAMP_DEBUG_INVALID_STATE;
     }
     memcpy(handle->vm->memory + address, source, size);
+    vm_ram_mark_written(handle->vm, address, size);
     return LAMP_DEBUG_OK;
 }
 

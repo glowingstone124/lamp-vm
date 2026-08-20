@@ -279,6 +279,7 @@ private fun DebuggerScreen() {
                     )
                     TerminalPanel(
                         session = session,
+                        state = stats?.state ?: session?.state,
                         modifier = Modifier.weight(1.1f),
                     )
                 }

@@ -35,7 +35,7 @@ static VM *selftest_vm_create(size_t memory_size,
     VM *vm = vm_create(memory_size, program, program_size,
                        data, data_size, layout, smp_cores);
     if (vm) {
-        vm->execution_engine = g_selftest_engine;
+        vm_engine_set(vm, g_selftest_engine);
     }
     return vm;
 }
@@ -260,7 +260,7 @@ static int run_selftest_fetch_invalidation(VmExecutionEngine engine) {
     if (!vm) {
         return 0;
     }
-    vm->execution_engine = engine;
+    vm_engine_set(vm, engine);
     store_le64(&vm->memory[first_pa], first_inst);
     store_le64(&vm->memory[second_pa], second_inst);
     store_le32(&vm->memory[root_pa + pde * 4u], l2_pa | perms);
@@ -274,14 +274,14 @@ static int run_selftest_fetch_invalidation(VmExecutionEngine engine) {
 
     /* Changing the instruction bytes at the same physical address must be
      * observed even without a mapping change. */
-    store_le64(&vm->memory[first_pa], second_inst);
+    vm_write64_cpu(vm, &vm->cpus[0], va, second_inst);
     vm->cpus[0].ip = va;
     (void)vm_engine_execute_quantum(vm, &vm->cpus[0]);
     ok = ok && vm->cpus[0].regs[1] == 2u;
 
     /* Restoring the old bytes through a different mapping must not reuse the
      * cached host address after a global MMU epoch change. */
-    store_le64(&vm->memory[first_pa], first_inst);
+    vm_write64_cpu(vm, &vm->cpus[0], va, first_inst);
     store_le32(&vm->memory[l2_pa + pte * 4u], second_pa | perms);
     vm_mmu_flush_all_tlbs(vm);
     vm->cpus[0].ip = va;
@@ -1461,8 +1461,8 @@ static int run_selftest_integer_flag_edges(void) {
     }
     for (size_t i = 0u; i < sizeof(cases) / sizeof(cases[0]); i++) {
         VCPU *cpu = &vm->cpus[0];
-        store_le64(&vm->memory[PROGRAM_BASE],
-                   INST(cases[i].op, 3, 1, 2, 0));
+        vm_write64_cpu(vm, cpu, PROGRAM_BASE,
+                       INST(cases[i].op, 3, 1, 2, 0));
         memset(cpu->regs, 0, sizeof(cpu->regs));
         cpu->regs[1] = cases[i].a;
         cpu->regs[2] = cases[i].b;
@@ -1573,6 +1573,171 @@ static int run_selftest_jit_code_arena(void) {
     return ok;
 }
 
+static int run_selftest_ram_page_generations(void) {
+    enum {
+        first_page_pa = 0x9000u,
+        second_page_pa = first_page_pa + VM_RAM_PAGE_SIZE,
+    };
+    uint64_t program[] = {
+        INST(OP_HALT, 0, 0, 0, 0),
+    };
+    VM *vm = vm_create(MEM_SIZE, program,
+                       sizeof(program) / sizeof(program[0]),
+                       NULL, 0, NULL, 1);
+    uint64_t first_before;
+    uint64_t second_before;
+    int ok;
+
+    if (!vm) {
+        return 0;
+    }
+    vm_engine_set(vm, VM_ENGINE_JIT);
+    first_before = vm_ram_page_generation_acquire(vm, first_page_pa);
+    second_before = vm_ram_page_generation_acquire(vm, second_page_pa);
+    ok = first_before != UINT64_MAX && second_before != UINT64_MAX;
+
+    vm_write8_cpu(vm, &vm->cpus[0], first_page_pa, 0x5Au);
+    ok = ok && vm_ram_page_generation_acquire(vm, first_page_pa) ==
+                   first_before + 1u &&
+         vm_ram_page_generation_acquire(vm, second_page_pa) == second_before;
+
+    vm_atomic_store32_release_cpu(vm, &vm->cpus[0], second_page_pa,
+                                  0x12345678u);
+    ok = ok && vm_ram_page_generation_acquire(vm, second_page_pa) ==
+                   second_before + 1u;
+
+    /* DMA/debug bulk writes publish every physical page they overlap. */
+    vm_ram_mark_written(vm, second_page_pa - 1u, 2u);
+    ok = ok && vm_ram_page_generation_acquire(vm, first_page_pa) ==
+                   first_before + 2u &&
+         vm_ram_page_generation_acquire(vm, second_page_pa) ==
+                   second_before + 2u;
+
+    vm_destroy(vm);
+    return ok;
+}
+
+static int run_selftest_jit_region_control_flow(void) {
+    const vm_addr_t external_not_taken = PROGRAM_BASE + 31u * 8u;
+    const vm_addr_t external_taken = PROGRAM_BASE + 34u * 8u;
+    const uint64_t expected_instructions = 20u;
+    uint64_t program[] = {
+        INST(OP_MOVI, 1, 0, 0, 0),
+        INST(OP_RJZ, 0, 0, 0, 24),       /* forward to 4 */
+        INST(OP_MOVI, 2, 0, 0, 0xBAD),   /* skipped */
+        INST(OP_MOVI, 8, 0, 0, 0xBAD),   /* skipped */
+        INST(OP_MOVI, 2, 0, 0, 7),
+        INST(OP_CMPI, 2, 0, 0, 8),
+        INST(OP_JZ, 0, 0, 0, external_not_taken),
+        INST(OP_RJNZ, 0, 0, 0, 16),      /* forward to 9 */
+        INST(OP_MOVI, 8, 0, 0, 0xBAD),   /* skipped */
+        INST(OP_MOVI, 3, 0, 0, 3),
+        INST(OP_SUBI, 3, 3, 0, 1),
+        INST(OP_RJNZ, 0, 0, 0, (uint32_t)-8), /* native backedge */
+        INST(OP_MOVI, 10, 0, 0, 0x3400),
+        INST(OP_MOVI, 11, 0, 0, 1),
+        INST(OP_STORE32, 11, 10, 0, 0),
+
+        INST(OP_MOVI, 5, 0, 0, 0),
+        INST(OP_JZ, 0, 0, 0, external_taken),
+        INST(OP_MOVI, 7, 0, 0, 0xBAD),
+        INST(OP_MOVI, 7, 0, 0, 0xBAD),
+        INST(OP_MOVI, 7, 0, 0, 0xBAD),
+        INST(OP_MOVI, 7, 0, 0, 0xBAD),
+        INST(OP_MOVI, 7, 0, 0, 0xBAD),
+        INST(OP_MOVI, 7, 0, 0, 0xBAD),
+        INST(OP_MOVI, 7, 0, 0, 0xBAD),
+        INST(OP_MOVI, 7, 0, 0, 0xBAD),
+        INST(OP_MOVI, 7, 0, 0, 0xBAD),
+        INST(OP_MOVI, 7, 0, 0, 0xBAD),
+        INST(OP_MOVI, 7, 0, 0, 0xBAD),
+        INST(OP_MOVI, 7, 0, 0, 0xBAD),
+        INST(OP_MOVI, 7, 0, 0, 0xBAD),
+        INST(OP_MOVI, 7, 0, 0, 0xBAD),
+
+        INST(OP_MOVI, 8, 0, 0, 0xBAD),   /* not-taken failure */
+        INST(OP_HALT, 0, 0, 0, 0),
+        INST(OP_HALT, 0, 0, 0, 0),       /* padding */
+        INST(OP_MOVI, 6, 0, 0, 123),
+        INST(OP_HALT, 0, 0, 0, 0),
+    };
+    VM *vm = vm_create(MEM_SIZE, program,
+                       sizeof(program) / sizeof(program[0]),
+                       NULL, 0, NULL, 1);
+    uint64_t executed;
+    int ok;
+
+    if (!vm) {
+        return 0;
+    }
+    vm->cpu_frequency_hz = 0u;
+    vm_engine_set(vm, VM_ENGINE_JIT);
+    init_ivt(vm);
+    ok = vm_run_headless(vm, 1000u);
+    executed = atomic_load_explicit(&vm->cpus[0].execution_times,
+                                    memory_order_relaxed);
+    ok = ok && !atomic_is_vm_panicked(vm) &&
+         executed == expected_instructions &&
+         vm->cpus[0].regs[2] == 7u &&
+         vm->cpus[0].regs[3] == 0u &&
+         vm->cpus[0].regs[6] == 123u &&
+         vm->cpus[0].regs[7] == 0u &&
+         vm->cpus[0].regs[8] == 0u &&
+         vm_read32(vm, 0x3400) == 1u;
+    vm_destroy(vm);
+    return ok;
+}
+
+static int run_selftest_jit_bitwise_lowering(void) {
+    const uint64_t expected_instructions = 15u;
+    uint64_t program[] = {
+        INST(OP_MOVI, 1, 0, 0, 0xF0F0F0F0u),
+        INST(OP_MOVI, 2, 0, 0, 0x0FF00FF0u),
+        INST(OP_AND, 3, 1, 2, 0),
+        INST(OP_OR, 4, 1, 2, 0),
+        INST(OP_XOR, 5, 1, 2, 0),
+        INST(OP_NOT, 6, 2, 0, 0),
+        INST(OP_MOVI, 7, 0, 0, 4),
+        INST(OP_SHL, 8, 2, 7, 0),
+        INST(OP_SHR, 9, 1, 7, 0),
+        INST(OP_SAR, 10, 6, 7, 0),
+        INST(OP_MOVI, 11, 0, 0, 0x12345678u),
+        INST(OP_MOVI, 12, 0, 0, 8),
+        INST(OP_ROL, 13, 11, 12, 0),
+        INST(OP_ROR, 14, 11, 12, 0),
+        INST(OP_HALT, 0, 0, 0, 0),
+    };
+    VM *vm = vm_create(MEM_SIZE, program,
+                       sizeof(program) / sizeof(program[0]),
+                       NULL, 0, NULL, 1);
+    uint64_t executed;
+    int ok;
+
+    if (!vm) {
+        return 0;
+    }
+    vm->cpu_frequency_hz = 0u;
+    vm_engine_set(vm, VM_ENGINE_JIT);
+    init_ivt(vm);
+    ok = vm_run_headless(vm, 1000u);
+    executed = atomic_load_explicit(&vm->cpus[0].execution_times,
+                                    memory_order_relaxed);
+    ok = ok && !atomic_is_vm_panicked(vm) &&
+         executed == expected_instructions &&
+         vm->cpus[0].regs[3] == 0x00F000F0u &&
+         vm->cpus[0].regs[4] == 0xFFF0FFF0u &&
+         vm->cpus[0].regs[5] == 0xFF00FF00u &&
+         vm->cpus[0].regs[6] == 0xF00FF00Fu &&
+         vm->cpus[0].regs[8] == 0xFF00FF00u &&
+         vm->cpus[0].regs[9] == 0x0F0F0F0Fu &&
+         vm->cpus[0].regs[10] == 0xFF00FF00u &&
+         vm->cpus[0].regs[13] == 0x34567812u &&
+         vm->cpus[0].regs[14] == 0x78123456u &&
+         (vm->cpus[0].flags & (FLAG_CF | FLAG_ZF | FLAG_SF | FLAG_OF)) == 0u;
+    vm_destroy(vm);
+    return ok;
+}
+
 int run_selftests(void) {
     const int classic_ok =
         run_selftests_for_engine(VM_ENGINE_CLASSIC) == 0;
@@ -1587,15 +1752,29 @@ int run_selftests(void) {
     const int jit_invalidation_ok =
         run_selftest_fetch_invalidation(VM_ENGINE_JIT);
     const int jit_code_arena_ok = run_selftest_jit_code_arena();
+    const int ram_page_generations_ok =
+        run_selftest_ram_page_generations();
+    const int jit_region_control_flow_ok =
+        run_selftest_jit_region_control_flow();
+    const int jit_bitwise_lowering_ok =
+        run_selftest_jit_bitwise_lowering();
     printf("[selftest] cached_fetch_invalidation: %s\n",
            invalidation_ok ? "PASS" : "FAIL");
     printf("[selftest] jit_block_invalidation: %s\n",
            jit_invalidation_ok ? "PASS" : "FAIL");
     printf("[selftest] jit_code_arena: %s\n",
            jit_code_arena_ok ? "PASS" : "FAIL");
+    printf("[selftest] ram_page_generations: %s\n",
+           ram_page_generations_ok ? "PASS" : "FAIL");
+    printf("[selftest] jit_region_control_flow: %s\n",
+           jit_region_control_flow_ok ? "PASS" : "FAIL");
+    printf("[selftest] jit_bitwise_lowering: %s\n",
+           jit_bitwise_lowering_ok ? "PASS" : "FAIL");
     g_selftest_engine = VM_ENGINE_CLASSIC;
     return (classic_ok && cached_ok && threaded_ok && jit_ok &&
-            invalidation_ok && jit_invalidation_ok && jit_code_arena_ok) ? 0 : 1;
+            invalidation_ok && jit_invalidation_ok && jit_code_arena_ok &&
+            ram_page_generations_ok && jit_region_control_flow_ok &&
+            jit_bitwise_lowering_ok) ? 0 : 1;
 }
 
 static const char *benchmark_engine_name(VmExecutionEngine engine) {
@@ -1637,7 +1816,7 @@ static int run_interpreter_benchmark_mode(const char *label,
     /* Zero disables the virtual clock limiter so this measures the host-side
      * single-core interpreter ceiling rather than the configured vCPU clock. */
     vm->cpu_frequency_hz = 0u;
-    vm->execution_engine = engine;
+    vm_engine_set(vm, engine);
     init_ivt(vm);
     if (enable_mmu) {
         const uint32_t page = (uint32_t)PROGRAM_BASE & ~0xFFFu;
@@ -1718,7 +1897,7 @@ static int run_memory_benchmark_mode(const char *label,
         return 1;
     }
     vm->cpu_frequency_hz = 0u;
-    vm->execution_engine = engine;
+    vm_engine_set(vm, engine);
     init_ivt(vm);
     if (enable_mmu) {
         const uint32_t code_page = (uint32_t)PROGRAM_BASE & ~0xFFFu;

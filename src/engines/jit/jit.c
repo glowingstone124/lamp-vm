@@ -46,6 +46,8 @@ static int vm_jit_block_valid(const VM *vm,
     if (block->count == 0u || block->start_ip != (vm_addr_t)cpu->ip ||
         block->mmu_epoch != atomic_load_explicit(&cpu->mmu_epoch,
                                                  memory_order_acquire) ||
+        block->code_page_generation !=
+            vm_ram_page_generation_acquire(vm, block->host_pa) ||
         block->mmio_epoch !=
             (uint32_t)atomic_load_explicit(&vm->mmio_epoch,
                                            memory_order_acquire)) {
@@ -69,6 +71,9 @@ static int vm_jit_build_block(VM *vm,
                               VCPU *cpu,
                               const VmJitBackend *backend,
                               VmJitBlock *block) {
+    if (!vm || !cpu || !backend || !block) {
+        return 0;
+    }
     const vm_addr_t start_ip = (vm_addr_t)cpu->ip;
     const vm_addr_t start_page = start_ip & ~0xFFFu;
     const uint64_t mmu_epoch_before =
@@ -77,11 +82,9 @@ static int vm_jit_build_block(VM *vm,
         (uint32_t)atomic_load_explicit(&vm->mmio_epoch,
                                        memory_order_acquire);
     uint32_t first_host_pa = UINT32_MAX;
+    uint64_t generation_before;
+    uint64_t generation_after;
     uint8_t count = 0u;
-
-    if (!vm || !cpu || !backend || !block) {
-        return 0;
-    }
     memset(block, 0, sizeof(*block));
     for (uint32_t i = 0u; i < VM_JIT_BLOCK_MAX_OPS; i++) {
         const vm_addr_t ip = start_ip + i * (vm_addr_t)sizeof(uint64_t);
@@ -126,9 +129,24 @@ static int vm_jit_build_block(VM *vm,
                                            memory_order_acquire)) {
         return 0;
     }
+    generation_before = vm_ram_page_generation_acquire(vm, first_host_pa);
+    if (generation_before == UINT64_MAX) {
+        return 0;
+    }
+    for (uint32_t i = 0u; i < count; i++) {
+        if (load_le64(&vm->memory[first_host_pa + i * sizeof(uint64_t)]) !=
+            block->raw[i]) {
+            return 0;
+        }
+    }
+    generation_after = vm_ram_page_generation_acquire(vm, first_host_pa);
+    if (generation_before != generation_after) {
+        return 0;
+    }
     block->start_ip = start_ip;
     block->host_pa = first_host_pa;
     block->mmu_epoch = mmu_epoch_before;
+    block->code_page_generation = generation_after;
     block->mmio_epoch = mmio_epoch_before;
     block->count = count;
     return 1;
@@ -143,12 +161,13 @@ static void vm_jit_cache_entry_clear(VmJitCacheEntry *entry) {
     memset(&entry->block, 0, sizeof(entry->block));
 }
 
-static VmJitCpuState *vm_jit_cpu_state(VCPU *cpu) {
+static VmJitCpuState *vm_jit_cpu_state(VM *vm, VCPU *cpu) {
     const VmJitBackend *backend;
     VmJitCpuState *state;
-    if (!cpu) {
+    if (!vm || !cpu) {
         return NULL;
     }
+    vm_ram_enable_write_tracking(vm);
     if (cpu->jit_state) {
         return (VmJitCpuState *)cpu->jit_state;
     }
@@ -227,6 +246,10 @@ static uint32_t vm_jit_execute_one_block(VM *vm,
             return vm_engine_execute_cached(vm, cpu);
         }
         entry->valid = 1u;
+        if (!vm_jit_block_valid(vm, cpu, entry)) {
+            vm_jit_cache_entry_clear(entry);
+            return vm_engine_execute_cached(vm, cpu);
+        }
     }
 
     executed = entry->code.entry(vm, cpu);
@@ -255,7 +278,7 @@ uint32_t vm_engine_execute_jit(VM *vm, VCPU *cpu) {
     /* Preserve exact per-op tracing/counting in instrumentation builds. */
     return vm_engine_execute_cached(vm, cpu);
 #endif
-    state = vm_jit_cpu_state(cpu);
+    state = vm_jit_cpu_state(vm, cpu);
     if (!state) {
         return vm_engine_execute_cached(vm, cpu);
     }

@@ -166,6 +166,8 @@ static void* disk_worker(void *arg) {
                     } else {
                         vm_shared_lock(vm);
                         memcpy(&vm->memory[(size_t)dma_addr], buf, (size_t)bytes);
+                        vm_ram_mark_written(vm, (uint32_t)dma_addr,
+                                            (size_t)bytes);
                         vm_shared_unlock(vm);
                     }
                     free(buf);

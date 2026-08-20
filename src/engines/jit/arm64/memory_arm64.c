@@ -110,6 +110,7 @@ static void vm_jit_arm64_write8(VM *vm,
                                     VM_MMU_ACC_WRITE, &pa) &&
         vm_jit_arm64_page_is_plain_ram(vm, pa, 1u)) {
         vm->memory[pa] = value;
+        vm_ram_mark_written(vm, pa, sizeof(value));
         return;
     }
     vm_write8_cpu(vm, cpu, addr, value);
@@ -124,6 +125,7 @@ static void vm_jit_arm64_write32(VM *vm,
                                     VM_MMU_ACC_WRITE, &pa) &&
         vm_jit_arm64_page_is_plain_ram(vm, pa, 4u)) {
         store_le32(&vm->memory[pa], value);
+        vm_ram_mark_written(vm, pa, sizeof(value));
         return;
     }
     vm_write32_cpu(vm, cpu, addr, value);

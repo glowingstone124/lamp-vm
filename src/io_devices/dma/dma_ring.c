@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "../iommu/iommu_mmio_register.h"
+#include "../../memory.h"
 
 static uint32_t dma_from_le32(uint32_t value) {
 #if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
@@ -45,6 +46,7 @@ static int dma_guest_copy_to(VM *vm, uint32_t iommu_dev, uint64_t iova,
         return 0;
     }
     memcpy(&vm->memory[(size_t)pa], src, len);
+    vm_ram_mark_written(vm, (uint32_t)pa, len);
     return 1;
 }
 

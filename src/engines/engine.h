@@ -8,6 +8,9 @@
 /* Execute one scheduling quantum and return the number of guest instructions. */
 uint32_t vm_engine_execute_quantum(VM *vm, VCPU *cpu);
 
+/* Select an engine and enable any VM-wide tracking required by that engine. */
+void vm_engine_set(VM *vm, VmExecutionEngine engine);
+
 /* Execute exactly one guest instruction. Debuggers use the conservative
  * interpreter path so block-oriented engines cannot run past the requested
  * stop point. */

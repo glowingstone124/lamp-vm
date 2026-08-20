@@ -31,11 +31,42 @@ enum {
     A64_SP = 31,
 };
 
+enum {
+    A64_MAX_FIXUPS = VM_JIT_BLOCK_MAX_OPS * 2u
+};
+
+typedef enum A64FixupKind {
+    A64_FIXUP_B,
+    A64_FIXUP_TBZ,
+    A64_FIXUP_TBNZ,
+    A64_FIXUP_BCOND,
+} A64FixupKind;
+typedef enum A64FixupTargetKind {
+    A64_FIXUP_TARGET_OP,
+    A64_FIXUP_TARGET_EPILOGUE,
+} A64FixupTargetKind;
+typedef struct A64BranchFixup {
+    A64FixupKind kind;
+    A64FixupTargetKind target_kind;
+
+    size_t word_index;
+    uint32_t target_op_index;
+
+    unsigned rt;
+    unsigned bit;
+    unsigned condition;
+} A64BranchFixup;
+
 typedef struct A64Emitter {
     uint32_t words[1024];
     size_t count;
+
+    A64BranchFixup fixups[A64_MAX_FIXUPS];
+    size_t fixup_count;
+
     int failed;
 } A64Emitter;
+
 
 static void a64_emit(A64Emitter *emitter, uint32_t word) {
     if (!emitter || emitter->failed) {
@@ -61,10 +92,10 @@ static void a64_emit_stp_pre(A64Emitter *emitter,
     }
     a64_emit(emitter,
              0xA9800000u |
-             (((uint32_t)scaled & 0x7Fu) << 15u) |
-             ((uint32_t)rt2 << 10u) |
-             ((uint32_t)rn << 5u) |
-             (uint32_t)rt);
+             (((uint32_t) scaled & 0x7Fu) << 15u) |
+             ((uint32_t) rt2 << 10u) |
+             ((uint32_t) rn << 5u) |
+             (uint32_t) rt);
 }
 
 static void a64_emit_ldp_post(A64Emitter *emitter,
@@ -80,10 +111,10 @@ static void a64_emit_ldp_post(A64Emitter *emitter,
     }
     a64_emit(emitter,
              0xA8C00000u |
-             (((uint32_t)scaled & 0x7Fu) << 15u) |
-             ((uint32_t)rt2 << 10u) |
-             ((uint32_t)rn << 5u) |
-             (uint32_t)rt);
+             (((uint32_t) scaled & 0x7Fu) << 15u) |
+             ((uint32_t) rt2 << 10u) |
+             ((uint32_t) rn << 5u) |
+             (uint32_t) rt);
 }
 
 static void a64_emit_mov_x(A64Emitter *emitter,
@@ -94,7 +125,7 @@ static void a64_emit_mov_x(A64Emitter *emitter,
         return;
     }
     a64_emit(emitter,
-             0xAA0003E0u | ((uint32_t)rm << 16u) | (uint32_t)rd);
+             0xAA0003E0u | ((uint32_t) rm << 16u) | (uint32_t) rd);
 }
 
 static void a64_emit_mov_w(A64Emitter *emitter,
@@ -105,7 +136,7 @@ static void a64_emit_mov_w(A64Emitter *emitter,
         return;
     }
     a64_emit(emitter,
-             0x2A0003E0u | ((uint32_t)rm << 16u) | (uint32_t)rd);
+             0x2A0003E0u | ((uint32_t) rm << 16u) | (uint32_t) rd);
 }
 
 static void a64_emit_mov_w_imm(A64Emitter *emitter,
@@ -116,11 +147,11 @@ static void a64_emit_mov_w_imm(A64Emitter *emitter,
         return;
     }
     a64_emit(emitter,
-             0x52800000u | ((value & 0xFFFFu) << 5u) | (uint32_t)rd);
+             0x52800000u | ((value & 0xFFFFu) << 5u) | (uint32_t) rd);
     if ((value >> 16u) != 0u) {
         a64_emit(emitter,
                  0x72A00000u | (((value >> 16u) & 0xFFFFu) << 5u) |
-                 (uint32_t)rd);
+                 (uint32_t) rd);
     }
 }
 
@@ -132,25 +163,25 @@ static void a64_emit_mov_x_imm(A64Emitter *emitter,
         return;
     }
     a64_emit(emitter,
-             0xD2800000u | ((uint32_t)(value & 0xFFFFu) << 5u) |
-             (uint32_t)rd);
+             0xD2800000u | ((uint32_t) (value & 0xFFFFu) << 5u) |
+             (uint32_t) rd);
     if (((value >> 16u) & 0xFFFFu) != 0u) {
         a64_emit(emitter,
                  0xF2A00000u |
-                 ((uint32_t)((value >> 16u) & 0xFFFFu) << 5u) |
-                 (uint32_t)rd);
+                 ((uint32_t) ((value >> 16u) & 0xFFFFu) << 5u) |
+                 (uint32_t) rd);
     }
     if (((value >> 32u) & 0xFFFFu) != 0u) {
         a64_emit(emitter,
                  0xF2C00000u |
-                 ((uint32_t)((value >> 32u) & 0xFFFFu) << 5u) |
-                 (uint32_t)rd);
+                 ((uint32_t) ((value >> 32u) & 0xFFFFu) << 5u) |
+                 (uint32_t) rd);
     }
     if (((value >> 48u) & 0xFFFFu) != 0u) {
         a64_emit(emitter,
                  0xF2E00000u |
-                 ((uint32_t)((value >> 48u) & 0xFFFFu) << 5u) |
-                 (uint32_t)rd);
+                 ((uint32_t) ((value >> 48u) & 0xFFFFu) << 5u) |
+                 (uint32_t) rd);
     }
 }
 
@@ -165,9 +196,9 @@ static void a64_emit_ldr_w(A64Emitter *emitter,
     }
     a64_emit(emitter,
              0xB9400000u |
-             ((uint32_t)(byte_offset / 4u) << 10u) |
-             ((uint32_t)rn << 5u) |
-             (uint32_t)rt);
+             ((uint32_t) (byte_offset / 4u) << 10u) |
+             ((uint32_t) rn << 5u) |
+             (uint32_t) rt);
 }
 
 static void a64_emit_str_w(A64Emitter *emitter,
@@ -181,9 +212,9 @@ static void a64_emit_str_w(A64Emitter *emitter,
     }
     a64_emit(emitter,
              0xB9000000u |
-             ((uint32_t)(byte_offset / 4u) << 10u) |
-             ((uint32_t)rn << 5u) |
-             (uint32_t)rt);
+             ((uint32_t) (byte_offset / 4u) << 10u) |
+             ((uint32_t) rn << 5u) |
+             (uint32_t) rt);
 }
 
 static void a64_emit_str_x(A64Emitter *emitter,
@@ -197,9 +228,9 @@ static void a64_emit_str_x(A64Emitter *emitter,
     }
     a64_emit(emitter,
              0xF9000000u |
-             ((uint32_t)(byte_offset / 8u) << 10u) |
-             ((uint32_t)rn << 5u) |
-             (uint32_t)rt);
+             ((uint32_t) (byte_offset / 8u) << 10u) |
+             ((uint32_t) rn << 5u) |
+             (uint32_t) rt);
 }
 
 static void a64_emit_add_w(A64Emitter *emitter,
@@ -207,8 +238,8 @@ static void a64_emit_add_w(A64Emitter *emitter,
                            unsigned rn,
                            unsigned rm) {
     a64_emit(emitter,
-             0x0B000000u | ((uint32_t)rm << 16u) |
-             ((uint32_t)rn << 5u) | (uint32_t)rd);
+             0x0B000000u | ((uint32_t) rm << 16u) |
+             ((uint32_t) rn << 5u) | (uint32_t) rd);
 }
 
 static void a64_emit_add_w_imm(A64Emitter *emitter,
@@ -221,7 +252,7 @@ static void a64_emit_add_w_imm(A64Emitter *emitter,
     }
     a64_emit(emitter,
              0x11000000u | (immediate << 10u) |
-             ((uint32_t)rn << 5u) | (uint32_t)rd);
+             ((uint32_t) rn << 5u) | (uint32_t) rd);
 }
 
 static void a64_emit_cmp_w_imm(A64Emitter *emitter,
@@ -232,7 +263,7 @@ static void a64_emit_cmp_w_imm(A64Emitter *emitter,
         return;
     }
     a64_emit(emitter,
-             0x7100001Fu | (immediate << 10u) | ((uint32_t)rn << 5u));
+             0x7100001Fu | (immediate << 10u) | ((uint32_t) rn << 5u));
 }
 
 static void a64_emit_adds_w(A64Emitter *emitter,
@@ -240,8 +271,8 @@ static void a64_emit_adds_w(A64Emitter *emitter,
                             unsigned rn,
                             unsigned rm) {
     a64_emit(emitter,
-             0x2B000000u | ((uint32_t)rm << 16u) |
-             ((uint32_t)rn << 5u) | (uint32_t)rd);
+             0x2B000000u | ((uint32_t) rm << 16u) |
+             ((uint32_t) rn << 5u) | (uint32_t) rd);
 }
 
 static void a64_emit_subs_w(A64Emitter *emitter,
@@ -249,8 +280,8 @@ static void a64_emit_subs_w(A64Emitter *emitter,
                             unsigned rn,
                             unsigned rm) {
     a64_emit(emitter,
-             0x6B000000u | ((uint32_t)rm << 16u) |
-             ((uint32_t)rn << 5u) | (uint32_t)rd);
+             0x6B000000u | ((uint32_t) rm << 16u) |
+             ((uint32_t) rn << 5u) | (uint32_t) rd);
 }
 
 static void a64_emit_mrs_nzcv(A64Emitter *emitter, unsigned rt) {
@@ -258,7 +289,7 @@ static void a64_emit_mrs_nzcv(A64Emitter *emitter, unsigned rt) {
         emitter->failed = 1;
         return;
     }
-    a64_emit(emitter, 0xD53B4200u | (uint32_t)rt);
+    a64_emit(emitter, 0xD53B4200u | (uint32_t) rt);
 }
 
 static void a64_emit_lsr_w(A64Emitter *emitter,
@@ -270,8 +301,8 @@ static void a64_emit_lsr_w(A64Emitter *emitter,
         return;
     }
     a64_emit(emitter,
-             0x53000000u | ((uint32_t)shift << 16u) | (31u << 10u) |
-             ((uint32_t)rn << 5u) | (uint32_t)rd);
+             0x53000000u | ((uint32_t) shift << 16u) | (31u << 10u) |
+             ((uint32_t) rn << 5u) | (uint32_t) rd);
 }
 
 static void a64_emit_lsl_w(A64Emitter *emitter,
@@ -287,9 +318,9 @@ static void a64_emit_lsl_w(A64Emitter *emitter,
     immr = (32u - shift) & 31u;
     imms = 31u - shift;
     a64_emit(emitter,
-             0x53000000u | ((uint32_t)immr << 16u) |
-             ((uint32_t)imms << 10u) |
-             ((uint32_t)rn << 5u) | (uint32_t)rd);
+             0x53000000u | ((uint32_t) immr << 16u) |
+             ((uint32_t) imms << 10u) |
+             ((uint32_t) rn << 5u) | (uint32_t) rd);
 }
 
 static void a64_emit_and_w(A64Emitter *emitter,
@@ -297,8 +328,8 @@ static void a64_emit_and_w(A64Emitter *emitter,
                            unsigned rn,
                            unsigned rm) {
     a64_emit(emitter,
-             0x0A000000u | ((uint32_t)rm << 16u) |
-             ((uint32_t)rn << 5u) | (uint32_t)rd);
+             0x0A000000u | ((uint32_t) rm << 16u) |
+             ((uint32_t) rn << 5u) | (uint32_t) rd);
 }
 
 static void a64_emit_orr_w(A64Emitter *emitter,
@@ -306,8 +337,8 @@ static void a64_emit_orr_w(A64Emitter *emitter,
                            unsigned rn,
                            unsigned rm) {
     a64_emit(emitter,
-             0x2A000000u | ((uint32_t)rm << 16u) |
-             ((uint32_t)rn << 5u) | (uint32_t)rd);
+             0x2A000000u | ((uint32_t) rm << 16u) |
+             ((uint32_t) rn << 5u) | (uint32_t) rd);
 }
 
 static void a64_emit_eor_w(A64Emitter *emitter,
@@ -315,8 +346,58 @@ static void a64_emit_eor_w(A64Emitter *emitter,
                            unsigned rn,
                            unsigned rm) {
     a64_emit(emitter,
-             0x4A000000u | ((uint32_t)rm << 16u) |
+             0x4A000000u | ((uint32_t) rm << 16u) |
+             ((uint32_t) rn << 5u) | (uint32_t) rd);
+}
+
+static void a64_emit_mvn_w(A64Emitter *emitter,
+                           unsigned rd,
+                           unsigned rm) {
+    a64_emit(emitter,
+             0x2A2003E0u | ((uint32_t)rm << 16u) | (uint32_t)rd);
+}
+
+static void a64_emit_lslv_w(A64Emitter *emitter,
+                            unsigned rd,
+                            unsigned rn,
+                            unsigned rm) {
+    a64_emit(emitter,
+             0x1AC02000u | ((uint32_t)rm << 16u) |
              ((uint32_t)rn << 5u) | (uint32_t)rd);
+}
+
+static void a64_emit_lsrv_w(A64Emitter *emitter,
+                            unsigned rd,
+                            unsigned rn,
+                            unsigned rm) {
+    a64_emit(emitter,
+             0x1AC02400u | ((uint32_t)rm << 16u) |
+             ((uint32_t)rn << 5u) | (uint32_t)rd);
+}
+
+static void a64_emit_asrv_w(A64Emitter *emitter,
+                            unsigned rd,
+                            unsigned rn,
+                            unsigned rm) {
+    a64_emit(emitter,
+             0x1AC02800u | ((uint32_t)rm << 16u) |
+             ((uint32_t)rn << 5u) | (uint32_t)rd);
+}
+
+static void a64_emit_rorv_w(A64Emitter *emitter,
+                            unsigned rd,
+                            unsigned rn,
+                            unsigned rm) {
+    a64_emit(emitter,
+             0x1AC02C00u | ((uint32_t)rm << 16u) |
+             ((uint32_t)rn << 5u) | (uint32_t)rd);
+}
+
+static void a64_emit_neg_w(A64Emitter *emitter,
+                           unsigned rd,
+                           unsigned rm) {
+    a64_emit(emitter,
+             0x4B0003E0u | ((uint32_t)rm << 16u) | (uint32_t)rd);
 }
 
 static void a64_emit_mul_w(A64Emitter *emitter,
@@ -324,8 +405,8 @@ static void a64_emit_mul_w(A64Emitter *emitter,
                            unsigned rn,
                            unsigned rm) {
     a64_emit(emitter,
-             0x1B007C00u | ((uint32_t)rm << 16u) |
-             ((uint32_t)rn << 5u) | (uint32_t)rd);
+             0x1B007C00u | ((uint32_t) rm << 16u) |
+             ((uint32_t) rn << 5u) | (uint32_t) rd);
 }
 
 static void a64_emit_blr(A64Emitter *emitter, unsigned rn) {
@@ -333,7 +414,7 @@ static void a64_emit_blr(A64Emitter *emitter, unsigned rn) {
         emitter->failed = 1;
         return;
     }
-    a64_emit(emitter, 0xD63F0000u | ((uint32_t)rn << 5u));
+    a64_emit(emitter, 0xD63F0000u | ((uint32_t) rn << 5u));
 }
 
 static void a64_emit_function_address(A64Emitter *emitter,
@@ -356,7 +437,7 @@ static void a64_emit_prepare_call(A64Emitter *emitter) {
 
 static void a64_emit_preserved_guest_flags(A64Emitter *emitter) {
     const uint32_t preserve_mask =
-        ~(uint32_t)(FLAG_CF | FLAG_ZF | FLAG_SF | FLAG_OF);
+            ~(uint32_t) (FLAG_CF | FLAG_ZF | FLAG_SF | FLAG_OF);
     a64_emit_ldr_w(emitter, A64_X12, A64_X20, offsetof(VCPU, flags));
     a64_emit_mov_w_imm(emitter, A64_X13, preserve_mask);
     a64_emit_and_w(emitter, A64_X12, A64_X12, A64_X13);
@@ -404,7 +485,7 @@ static void a64_emit_arithmetic_flags(A64Emitter *emitter, int subtract) {
 }
 
 static size_t a64_reg_offset(unsigned guest_reg) {
-    return offsetof(VCPU, regs) + (size_t)guest_reg * sizeof(uint32_t);
+    return offsetof(VCPU, regs) + (size_t) guest_reg * sizeof(uint32_t);
 }
 
 static int a64_guest_reg_valid(unsigned guest_reg) {
@@ -413,15 +494,15 @@ static int a64_guest_reg_valid(unsigned guest_reg) {
 
 static void a64_emit_guest_position(A64Emitter *emitter,
                                     const VM_DecodedOp *op) {
-    const vm_addr_t next_ip = op->ip + (vm_addr_t)sizeof(uint64_t);
-    a64_emit_mov_x_imm(emitter, A64_X8, (uint64_t)op->ip);
+    const vm_addr_t next_ip = op->ip + (vm_addr_t) sizeof(uint64_t);
+    a64_emit_mov_x_imm(emitter, A64_X8, (uint64_t) op->ip);
     a64_emit_str_x(emitter, A64_X8, A64_X20, offsetof(VCPU, last_ip));
-    a64_emit_mov_x_imm(emitter, A64_X8, (uint64_t)next_ip);
+    a64_emit_mov_x_imm(emitter, A64_X8, (uint64_t) next_ip);
     a64_emit_str_x(emitter, A64_X8, A64_X20, offsetof(VCPU, ip));
 }
 
 static void a64_emit_store_ip(A64Emitter *emitter, vm_addr_t target) {
-    a64_emit_mov_x_imm(emitter, A64_X8, (uint64_t)target);
+    a64_emit_mov_x_imm(emitter, A64_X8, (uint64_t) target);
     a64_emit_str_x(emitter, A64_X8, A64_X20, offsetof(VCPU, ip));
 }
 
@@ -444,40 +525,187 @@ static void a64_patch_test_branch(A64Emitter *emitter,
         return;
     }
     word = branch_if_nonzero ? 0x37000000u : 0x36000000u;
-    word |= ((uint32_t)bit & 0x1Fu) << 19u;
-    word |= ((uint32_t)distance & 0x3FFFu) << 5u;
-    word |= (uint32_t)rt;
+    word |= ((uint32_t) bit & 0x1Fu) << 19u;
+    word |= ((uint32_t) distance & 0x3FFFu) << 5u;
+    word |= (uint32_t) rt;
     emitter->words[branch_index] = word;
 }
 
-static void a64_patch_cond_branch(A64Emitter *emitter,
-                                  size_t branch_index,
-                                  unsigned condition) {
-    size_t distance;
+static void a64_patch_test_branch_to(A64Emitter *emitter,
+                                     size_t branch_index,
+                                     size_t target_word,
+                                     unsigned rt,
+                                     unsigned bit,
+                                     int branch_if_nonzero) {
+    const int64_t distance = (int64_t) target_word - (int64_t) branch_index;
+    uint32_t word;
+
+    if (!emitter || branch_index >= emitter->count || rt > 31u || bit > 31u) {
+        if (emitter) {
+            emitter->failed = 1;
+        }
+        return;
+    }
+
+    if (distance < -(1ll << 13) || distance >= (1ll << 13)) {
+        emitter->failed = 1;
+        return;
+    }
+
+    word = branch_if_nonzero ? 0x37000000u : 0x36000000u;
+
+    word |= ((uint32_t) bit & 0x1Fu) << 19u;
+    word |= ((uint32_t) distance & 0x3FFFu) << 5u;
+    word |= (uint32_t) rt;
+
+    emitter->words[branch_index] = word;
+}
+
+
+static void a64_patch_cond_branch_to(A64Emitter *emitter,
+                                     size_t branch_index,
+                                     size_t target_word,
+                                     unsigned condition) {
+    const int64_t distance = (int64_t) target_word - (int64_t) branch_index;
     if (!emitter || branch_index >= emitter->count || condition > 15u) {
         if (emitter) {
             emitter->failed = 1;
         }
         return;
     }
-    distance = emitter->count - branch_index;
-    if (distance > 0x3FFFFu) {
+
+    if (distance < -(1ll << 18) || distance >= (1ll << 18)) {
         emitter->failed = 1;
         return;
     }
+
     emitter->words[branch_index] =
-        0x54000000u | ((uint32_t)distance << 5u) | (uint32_t)condition;
+        0x54000000u |
+        (((uint32_t)distance & 0x7FFFFu) << 5u) |
+        (uint32_t)condition;
 }
+
+static void a64_patch_b_to(A64Emitter *emitter,
+                           size_t branch_index,
+                           size_t target_word) {
+    const int64_t distance = (int64_t) target_word - (int64_t) branch_index;
+    if (!emitter || branch_index >= emitter->count) {
+        if (emitter) {
+            emitter->failed = 1;
+        }
+        return;
+    }
+
+    if (distance < -(1ll << 25) || distance >= (1ll << 25)) {
+        emitter->failed = 1;
+        return;
+    }
+
+    emitter->words[branch_index] = 0x14000000u | ((uint32_t) distance & 0x3ffffffu);
+}
+
+static void a64_apply_fixups(A64Emitter *emitter,
+                             const size_t *op_words,
+                             uint32_t op_count,
+                             size_t epilogue_word) {
+    if (!emitter || !op_words) {
+        if (emitter) {
+            emitter->failed = 1;
+        }
+        return;
+    }
+
+    for (size_t i = 0u;
+         i < emitter->fixup_count && !emitter->failed;
+         ++i) {
+        const A64BranchFixup *fixup = &emitter->fixups[i];
+        size_t target_word;
+
+        switch (fixup->target_kind) {
+            case A64_FIXUP_TARGET_OP:
+                if (fixup->target_op_index >= op_count) {
+                    emitter->failed = 1;
+                    return;
+                }
+
+                target_word =
+                    op_words[fixup->target_op_index];
+                break;
+
+            case A64_FIXUP_TARGET_EPILOGUE:
+                target_word = epilogue_word;
+                break;
+
+            default:
+                emitter->failed = 1;
+                return;
+        }
+
+        switch (fixup->kind) {
+            case A64_FIXUP_B:
+                a64_patch_b_to(emitter,
+                               fixup->word_index,
+                               target_word);
+                break;
+
+            case A64_FIXUP_TBZ:
+                a64_patch_test_branch_to(emitter,
+                                         fixup->word_index,
+                                         target_word,
+                                         fixup->rt,
+                                         fixup->bit,
+                                         0);
+                break;
+
+            case A64_FIXUP_TBNZ:
+                a64_patch_test_branch_to(emitter,
+                                         fixup->word_index,
+                                         target_word,
+                                         fixup->rt,
+                                         fixup->bit,
+                                         1);
+                break;
+
+            case A64_FIXUP_BCOND:
+                a64_patch_cond_branch_to(emitter,
+                                         fixup->word_index,
+                                         target_word,
+                                         fixup->condition);
+                break;
+
+            default:
+                emitter->failed = 1;
+                return;
+        }
+    }
+}
+
+
 
 static void a64_emit_b_to(A64Emitter *emitter, size_t target_index) {
     const int64_t distance =
-        (int64_t)target_index - (int64_t)emitter->count;
+            (int64_t) target_index - (int64_t) emitter->count;
     if (distance < -(1ll << 25) || distance >= (1ll << 25)) {
         emitter->failed = 1;
         return;
     }
     a64_emit(emitter,
-             0x14000000u | ((uint32_t)distance & 0x03FFFFFFu));
+             0x14000000u | ((uint32_t) distance & 0x03FFFFFFu));
+}
+
+static int a64_is_branch(uint8_t op) {
+    switch (op) {
+        case OP_JMP:
+        case OP_RJMP:
+        case OP_JZ:
+        case OP_JNZ:
+        case OP_RJZ:
+        case OP_RJNZ:
+            return 1;
+
+        default:
+            return 0;
+    }
 }
 
 static void a64_emit_conditional_ip(A64Emitter *emitter,
@@ -507,13 +735,66 @@ static void a64_emit_memory_address(A64Emitter *emitter,
                    A64_X8,
                    A64_X20,
                    a64_reg_offset(base_guest_reg));
-    a64_emit_mov_w_imm(emitter, A64_X9, (uint32_t)immediate);
+    a64_emit_mov_w_imm(emitter, A64_X9, (uint32_t) immediate);
     a64_emit_add_w(emitter, A64_X2, A64_X8, A64_X9);
 }
+static void a64_add_op_fixup(A64Emitter *emitter,
+                             A64FixupKind kind,
+                             size_t word_index,
+                             uint32_t target_op_index,
+                             unsigned rt,
+                             unsigned bit,
+                             unsigned condition) {
+    if (!emitter || emitter->failed) {
+        return;
+    }
 
+    if (emitter->fixup_count >=
+        sizeof(emitter->fixups) / sizeof(emitter->fixups[0])) {
+        emitter->failed = 1;
+        return;
+    }
+
+    A64BranchFixup *fixup =
+        &emitter->fixups[emitter->fixup_count++];
+
+    fixup->kind = kind;
+    fixup->target_kind = A64_FIXUP_TARGET_OP;
+    fixup->word_index = word_index;
+    fixup->target_op_index = target_op_index;
+    fixup->rt = rt;
+    fixup->bit = bit;
+    fixup->condition = condition;
+}
+
+static void a64_add_epilogue_fixup(A64Emitter *emitter,
+                                   A64FixupKind kind,
+                                   size_t word_index,
+                                   unsigned condition) {
+    if (!emitter || emitter->failed) {
+        return;
+    }
+
+    if (emitter->fixup_count >=
+        sizeof(emitter->fixups) / sizeof(emitter->fixups[0])) {
+        emitter->failed = 1;
+        return;
+    }
+
+    A64BranchFixup *fixup =
+        &emitter->fixups[emitter->fixup_count++];
+
+    fixup->kind = kind;
+    fixup->target_kind = A64_FIXUP_TARGET_EPILOGUE;
+    fixup->word_index = word_index;
+    fixup->target_op_index = 0u;
+    fixup->rt = 0u;
+    fixup->bit = 0u;
+    fixup->condition = condition;
+}
 static vm_addr_t a64_relative_target(const VM_DecodedOp *op) {
-    const int64_t target = (int64_t)op->ip + (int64_t)op->imm;
-    return (vm_addr_t)target;
+    const int64_t target = (int64_t) op->ip + (int64_t) op->imm;
+    return (vm_addr_t) target;
 }
 
 static int a64_direct_branch_target(const VM_DecodedOp *op,
@@ -525,7 +806,7 @@ static int a64_direct_branch_target(const VM_DecodedOp *op,
         case OP_JMP:
         case OP_JZ:
         case OP_JNZ:
-            *target = (vm_addr_t)op->imm;
+            *target = (vm_addr_t) op->imm;
             return 1;
         case OP_RJMP:
         case OP_RJZ:
@@ -538,13 +819,12 @@ static int a64_direct_branch_target(const VM_DecodedOp *op,
 }
 
 static int a64_find_block_target(const VmJitBlock *block,
-                                 uint32_t current_index,
                                  vm_addr_t target,
                                  uint32_t *target_index) {
     if (!block || !target_index) {
         return 0;
     }
-    for (uint32_t i = 0u; i <= current_index && i < block->count; i++) {
+    for (uint32_t i = 0u; i < block->count; ++i) {
         if (block->ops[i].ip == target) {
             *target_index = i;
             return 1;
@@ -555,36 +835,53 @@ static int a64_find_block_target(const VmJitBlock *block,
 
 static void a64_emit_native_backedge(A64Emitter *emitter,
                                      uint8_t op,
+                                     vm_addr_t target_ip,
                                      size_t target_word) {
-    size_t condition_exit = SIZE_MAX;
-    size_t budget_exit;
+    size_t condition_fallthrough = SIZE_MAX;
+
     const int conditional =
-        op == OP_JZ || op == OP_JNZ || op == OP_RJZ || op == OP_RJNZ;
+        op == OP_JZ ||
+        op == OP_JNZ ||
+        op == OP_RJZ ||
+        op == OP_RJNZ;
 
     if (conditional) {
-        const int take_when_zero_set = op == OP_JZ || op == OP_RJZ;
-        a64_emit_ldr_w(emitter, A64_X8, A64_X20, offsetof(VCPU, flags));
-        condition_exit = emitter->count;
+        a64_emit_ldr_w(emitter,
+                       A64_X8,
+                       A64_X20,
+                       offsetof(VCPU, flags));
+
+        condition_fallthrough = emitter->count;
         a64_emit(emitter, 0u);
-        /* Exit the native loop when the architectural branch is not taken. */
-        (void)take_when_zero_set;
     }
-    a64_emit_cmp_w_imm(emitter, A64_X21, VM_JIT_NATIVE_LOOP_BUDGET);
-    budget_exit = emitter->count;
+    a64_emit_store_ip(emitter, target_ip);
+
+    a64_emit_cmp_w_imm(emitter,
+                       A64_X21,
+                       VM_JIT_NATIVE_LOOP_BUDGET);
+
+    const size_t budget_exit = emitter->count;
     a64_emit(emitter, 0u);
+
+    a64_add_epilogue_fixup(emitter,
+                           A64_FIXUP_BCOND,
+                           budget_exit,
+                           2u);
+
     a64_emit_b_to(emitter, target_word);
 
     if (conditional) {
-        const int take_when_zero_set = op == OP_JZ || op == OP_RJZ;
-        a64_patch_test_branch(emitter,
-                              condition_exit,
-                              A64_X8,
-                              3u,
-                              take_when_zero_set ? 0 : 1);
-    }
-    a64_patch_cond_branch(emitter, budget_exit, 2u); /* b.hs */
-}
+        const int take_when_zero_set =
+            op == OP_JZ || op == OP_RJZ;
 
+        a64_patch_test_branch(
+            emitter,
+            condition_fallthrough,
+            A64_X8,
+            3u,
+            take_when_zero_set ? 0 : 1);
+    }
+}
 static int vm_jit_arm64_available(void) {
     return sizeof(void *) == 8u && sizeof(size_t) == 8u;
 }
@@ -601,6 +898,15 @@ static int vm_jit_arm64_supports_opcode(uint8_t op) {
         case OP_SUBI:
         case OP_CMP:
         case OP_CMPI:
+        case OP_AND:
+        case OP_OR:
+        case OP_XOR:
+        case OP_NOT:
+        case OP_SHL:
+        case OP_SHR:
+        case OP_SAR:
+        case OP_ROL:
+        case OP_ROR:
         case OP_LOAD:
         case OP_LOAD32:
         case OP_STORE:
@@ -626,14 +932,47 @@ static int vm_jit_arm64_terminates_block(uint8_t op) {
         case OP_STORE32:
         case OP_JMP:
         case OP_RJMP:
+            return 1;
         case OP_JZ:
         case OP_JNZ:
         case OP_RJZ:
         case OP_RJNZ:
-            return 1;
+            return 0;
         default:
             return 0;
     }
+}
+
+static void a64_emit_conditional_exit(A64Emitter *emitter,
+                                      vm_addr_t target,
+                                      int take_when_zero_set) {
+    a64_emit_ldr_w(emitter,
+                   A64_X8,
+                   A64_X20,
+                   offsetof(VCPU, flags));
+
+    const size_t fallthrough_branch = emitter->count;
+    a64_emit(emitter, 0u);
+
+    a64_emit_store_ip(emitter, target);
+
+    const size_t exit_branch = emitter->count;
+    a64_emit(emitter, 0u);
+
+    a64_add_epilogue_fixup(emitter,
+                           A64_FIXUP_B,
+                           exit_branch,
+                           0u);
+
+    /*
+     * JZ:  skip taken path when ZF == 0 -> TBZ
+     * JNZ: skip taken path when ZF == 1 -> TBNZ
+     */
+    a64_patch_test_branch(emitter,
+                          fallthrough_branch,
+                          A64_X8,
+                          3u,
+                          take_when_zero_set ? 0 : 1);
 }
 
 static void a64_emit_one(A64Emitter *emitter,
@@ -647,7 +986,7 @@ static void a64_emit_one(A64Emitter *emitter,
                 emitter->failed = 1;
                 return;
             }
-            a64_emit_mov_w_imm(emitter, A64_X8, (uint32_t)op->imm);
+            a64_emit_mov_w_imm(emitter, A64_X8, (uint32_t) op->imm);
             a64_emit_str_w(emitter, A64_X8, A64_X20, a64_reg_offset(op->rd));
             a64_emit_logic_flags(emitter, A64_X8);
             return;
@@ -705,7 +1044,7 @@ static void a64_emit_one(A64Emitter *emitter,
                            a64_reg_offset(op->op == OP_INC ? op->rd : op->rs1));
             a64_emit_mov_w_imm(emitter,
                                A64_X9,
-                               op->op == OP_INC ? 1u : (uint32_t)op->imm);
+                               op->op == OP_INC ? 1u : (uint32_t) op->imm);
             if (op->op == OP_SUBI) {
                 a64_emit_subs_w(emitter, A64_X10, A64_X8, A64_X9);
             } else {
@@ -732,10 +1071,87 @@ static void a64_emit_one(A64Emitter *emitter,
                 a64_emit_ldr_w(emitter, A64_X9, A64_X20,
                                a64_reg_offset(op->rs1));
             } else {
-                a64_emit_mov_w_imm(emitter, A64_X9, (uint32_t)op->imm);
+                a64_emit_mov_w_imm(emitter, A64_X9, (uint32_t) op->imm);
             }
             a64_emit_subs_w(emitter, A64_X10, A64_X8, A64_X9);
             a64_emit_arithmetic_flags(emitter, 1);
+            return;
+        case OP_AND:
+        case OP_OR:
+        case OP_XOR:
+            if (!a64_guest_reg_valid(op->rd) ||
+                !a64_guest_reg_valid(op->rs1) ||
+                !a64_guest_reg_valid(op->rs2)) {
+                emitter->failed = 1;
+                return;
+            }
+            a64_emit_ldr_w(emitter, A64_X8, A64_X20,
+                           a64_reg_offset(op->rs1));
+            a64_emit_ldr_w(emitter, A64_X9, A64_X20,
+                           a64_reg_offset(op->rs2));
+            if (op->op == OP_AND) {
+                a64_emit_and_w(emitter, A64_X10, A64_X8, A64_X9);
+            } else if (op->op == OP_OR) {
+                a64_emit_orr_w(emitter, A64_X10, A64_X8, A64_X9);
+            } else {
+                a64_emit_eor_w(emitter, A64_X10, A64_X8, A64_X9);
+            }
+            a64_emit_str_w(emitter, A64_X10, A64_X20,
+                           a64_reg_offset(op->rd));
+            a64_emit_logic_flags(emitter, A64_X10);
+            return;
+        case OP_NOT:
+            if (!a64_guest_reg_valid(op->rd) ||
+                !a64_guest_reg_valid(op->rs1)) {
+                emitter->failed = 1;
+                return;
+            }
+            a64_emit_ldr_w(emitter, A64_X8, A64_X20,
+                           a64_reg_offset(op->rs1));
+            a64_emit_mvn_w(emitter, A64_X10, A64_X8);
+            a64_emit_str_w(emitter, A64_X10, A64_X20,
+                           a64_reg_offset(op->rd));
+            a64_emit_logic_flags(emitter, A64_X10);
+            return;
+        case OP_SHL:
+        case OP_SHR:
+        case OP_SAR:
+        case OP_ROL:
+        case OP_ROR:
+            if (!a64_guest_reg_valid(op->rd) ||
+                !a64_guest_reg_valid(op->rs1) ||
+                !a64_guest_reg_valid(op->rs2)) {
+                emitter->failed = 1;
+                return;
+            }
+            a64_emit_ldr_w(emitter, A64_X8, A64_X20,
+                           a64_reg_offset(op->rs1));
+            a64_emit_ldr_w(emitter, A64_X9, A64_X20,
+                           a64_reg_offset(op->rs2));
+            switch (op->op) {
+                case OP_SHL:
+                    a64_emit_lslv_w(emitter, A64_X10, A64_X8, A64_X9);
+                    break;
+                case OP_SHR:
+                    a64_emit_lsrv_w(emitter, A64_X10, A64_X8, A64_X9);
+                    break;
+                case OP_SAR:
+                    a64_emit_asrv_w(emitter, A64_X10, A64_X8, A64_X9);
+                    break;
+                case OP_ROL:
+                    a64_emit_neg_w(emitter, A64_X9, A64_X9);
+                    a64_emit_rorv_w(emitter, A64_X10, A64_X8, A64_X9);
+                    break;
+                case OP_ROR:
+                    a64_emit_rorv_w(emitter, A64_X10, A64_X8, A64_X9);
+                    break;
+                default:
+                    emitter->failed = 1;
+                    return;
+            }
+            a64_emit_str_w(emitter, A64_X10, A64_X20,
+                           a64_reg_offset(op->rd));
+            a64_emit_logic_flags(emitter, A64_X10);
             return;
         case OP_LOAD:
         case OP_LOAD32: {
@@ -784,16 +1200,16 @@ static void a64_emit_one(A64Emitter *emitter,
             return;
         }
         case OP_JMP:
-            a64_emit_store_ip(emitter, (vm_addr_t)op->imm);
+            a64_emit_store_ip(emitter, (vm_addr_t) op->imm);
             return;
         case OP_RJMP:
             a64_emit_store_ip(emitter, a64_relative_target(op));
             return;
         case OP_JZ:
-            a64_emit_conditional_ip(emitter, (vm_addr_t)op->imm, 1);
+            a64_emit_conditional_ip(emitter, (vm_addr_t) op->imm, 1);
             return;
         case OP_JNZ:
-            a64_emit_conditional_ip(emitter, (vm_addr_t)op->imm, 0);
+            a64_emit_conditional_ip(emitter, (vm_addr_t) op->imm, 0);
             return;
         case OP_RJZ:
             a64_emit_conditional_ip(emitter, a64_relative_target(op), 1);
@@ -828,46 +1244,255 @@ static int vm_jit_arm64_compile(const VmJitBlock *block,
                                 VmJitCode *out) {
     A64Emitter emitter;
     size_t op_words[VM_JIT_BLOCK_MAX_OPS];
-    if (!block || block->count == 0u || block->count > VM_JIT_BLOCK_MAX_OPS ||
-        !memory || !memory->read8 || !memory->read32 ||
-        !memory->write8 || !memory->write32 || !out) {
+
+    if (!block ||
+        block->count == 0u ||
+        block->count > VM_JIT_BLOCK_MAX_OPS ||
+        !memory ||
+        !memory->read8 ||
+        !memory->read32 ||
+        !memory->write8 ||
+        !memory->write32 ||
+        !out) {
         return 0;
     }
+
     memset(&emitter, 0, sizeof(emitter));
 
-    a64_emit_stp_pre(&emitter, A64_X19, A64_X20, A64_SP, -16);
-    a64_emit_stp_pre(&emitter, A64_X21, A64_X22, A64_SP, -16);
-    a64_emit_stp_pre(&emitter, A64_X29, A64_X30, A64_SP, -16);
+    /*
+     * Prologue.
+     *
+     * x19 = VM *
+     * x20 = VCPU *
+     * w21 = number of guest instructions executed in this entry
+     */
+    a64_emit_stp_pre(&emitter,
+                     A64_X19,
+                     A64_X20,
+                     A64_SP,
+                     -16);
+
+    a64_emit_stp_pre(&emitter,
+                     A64_X21,
+                     A64_X22,
+                     A64_SP,
+                     -16);
+
+    a64_emit_stp_pre(&emitter,
+                     A64_X29,
+                     A64_X30,
+                     A64_SP,
+                     -16);
+
     a64_emit_mov_x(&emitter, A64_X19, A64_X0);
     a64_emit_mov_x(&emitter, A64_X20, A64_X1);
     a64_emit_mov_w_imm(&emitter, A64_X21, 0u);
 
-    for (uint32_t i = 0u; i < block->count && !emitter.failed; i++) {
-        vm_addr_t target;
-        uint32_t target_index;
+    for (uint32_t i = 0u;
+         i < block->count && !emitter.failed;
+         ++i) {
+        const VM_DecodedOp *op = &block->ops[i];
+
+        vm_addr_t target = 0;
+        uint32_t target_index = 0u;
+
         op_words[i] = emitter.count;
-        a64_emit_one(&emitter, &block->ops[i], memory);
-        a64_emit_add_w_imm(&emitter, A64_X21, A64_X21, 1u);
-        if (a64_direct_branch_target(&block->ops[i], &target) &&
-            a64_find_block_target(block, i, target, &target_index)) {
+
+        const int is_branch =
+            a64_is_branch(op->op);
+
+        int has_direct_target = 0;
+        int target_in_block = 0;
+
+        if (is_branch) {
+            has_direct_target =
+                a64_direct_branch_target(op, &target);
+
+            if (!has_direct_target) {
+                emitter.failed = 1;
+                break;
+            }
+
+            target_in_block =
+                a64_find_block_target(block,
+                                      target,
+                                      &target_index);
+        }
+
+        /*
+         * Ordinary non-control-flow instruction.
+         */
+        if (!is_branch) {
+            a64_emit_one(&emitter, op, memory);
+
+            a64_emit_add_w_imm(&emitter,
+                               A64_X21,
+                               A64_X21,
+                               1u);
+            continue;
+        }
+
+        a64_emit_guest_position(&emitter, op);
+
+        a64_emit_add_w_imm(&emitter,
+                           A64_X21,
+                           A64_X21,
+                           1u);
+
+        /*
+         * ------------------------------------------------------------
+         * 1. Intra-region backedge / self edge
+         * ------------------------------------------------------------
+         */
+        if (target_in_block &&
+            target_index <= i) {
             a64_emit_native_backedge(&emitter,
-                                     block->ops[i].op,
+                                     op->op,
+                                     target,
                                      op_words[target_index]);
+            continue;
+        }
+
+        /*
+         * ------------------------------------------------------------
+         * 2. Intra-region forward edge
+         * ------------------------------------------------------------
+         */
+        if (target_in_block) {
+            switch (op->op) {
+                case OP_JMP:
+                case OP_RJMP: {
+                    const size_t branch_word =
+                        emitter.count;
+
+                    a64_emit(&emitter, 0u);
+
+                    a64_add_op_fixup(&emitter,
+                                     A64_FIXUP_B,
+                                     branch_word,
+                                     target_index,
+                                     0u,
+                                     0u,
+                                     0u);
+                    break;
+                }
+
+                case OP_JZ:
+                case OP_RJZ:
+                case OP_JNZ:
+                case OP_RJNZ: {
+                    a64_emit_ldr_w(&emitter,
+                                   A64_X8,
+                                   A64_X20,
+                                   offsetof(VCPU, flags));
+
+                    const size_t branch_word =
+                        emitter.count;
+
+                    a64_emit(&emitter, 0u);
+
+                    const int jump_when_set =
+                        op->op == OP_JZ ||
+                        op->op == OP_RJZ;
+
+                    a64_add_op_fixup(
+                        &emitter,
+                        jump_when_set
+                            ? A64_FIXUP_TBNZ
+                            : A64_FIXUP_TBZ,
+                        branch_word,
+                        target_index,
+                        A64_X8,
+                        3u,
+                        0u);
+                    break;
+                }
+
+                default:
+                    emitter.failed = 1;
+                    break;
+            }
+
+            continue;
+        }
+
+        /*
+         * ------------------------------------------------------------
+         * 3. External edge
+         * ------------------------------------------------------------
+         *
+         * Conditional external edges are side exits.
+         *
+         * Unconditional branches still terminate region construction,
+         * so after storing their target IP we can naturally fall into
+         * the common epilogue.
+         */
+        switch (op->op) {
+            case OP_JZ:
+            case OP_RJZ:
+            case OP_JNZ:
+            case OP_RJNZ: {
+                const int take_when_zero_set =
+                    op->op == OP_JZ ||
+                    op->op == OP_RJZ;
+
+                a64_emit_conditional_exit(
+                    &emitter,
+                    target,
+                    take_when_zero_set);
+                break;
+            }
+
+            case OP_JMP:
+            case OP_RJMP:
+                a64_emit_store_ip(&emitter, target);
+                break;
+
+            default:
+                emitter.failed = 1;
+                break;
         }
     }
 
-    a64_emit_mov_w(&emitter, A64_X0, A64_X21);
-    a64_emit_ldp_post(&emitter, A64_X29, A64_X30, A64_SP, 16);
-    a64_emit_ldp_post(&emitter, A64_X21, A64_X22, A64_SP, 16);
-    a64_emit_ldp_post(&emitter, A64_X19, A64_X20, A64_SP, 16);
+    const size_t epilogue_word = emitter.count;
+
+    a64_apply_fixups(&emitter,
+                     op_words,
+                     block->count,
+                     epilogue_word);
+
+    a64_emit_mov_w(&emitter,
+                   A64_X0,
+                   A64_X21);
+
+    a64_emit_ldp_post(&emitter,
+                      A64_X29,
+                      A64_X30,
+                      A64_SP,
+                      16);
+
+    a64_emit_ldp_post(&emitter,
+                      A64_X21,
+                      A64_X22,
+                      A64_SP,
+                      16);
+
+    a64_emit_ldp_post(&emitter,
+                      A64_X19,
+                      A64_X20,
+                      A64_SP,
+                      16);
+
     a64_emit(&emitter, 0xD65F03C0u); /* ret */
 
     if (emitter.failed) {
         return 0;
     }
-    return vm_jit_code_publish(emitter.words, emitter.count, out);
-}
 
+    return vm_jit_code_publish(emitter.words,
+                               emitter.count,
+                               out);
+}
 #else
 
 static int vm_jit_arm64_available(void) {
@@ -875,21 +1500,21 @@ static int vm_jit_arm64_available(void) {
 }
 
 static int vm_jit_arm64_supports_opcode(uint8_t op) {
-    (void)op;
+    (void) op;
     return 0;
 }
 
 static int vm_jit_arm64_terminates_block(uint8_t op) {
-    (void)op;
+    (void) op;
     return 1;
 }
 
 static int vm_jit_arm64_compile(const VmJitBlock *block,
                                 const VmJitMemoryOps *memory,
                                 VmJitCode *out) {
-    (void)block;
-    (void)memory;
-    (void)out;
+    (void) block;
+    (void) memory;
+    (void) out;
     return 0;
 }
 

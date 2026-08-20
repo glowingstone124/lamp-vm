@@ -26,6 +26,9 @@ uint32_t vm_fetch64_exec_cpu_ex(VM *vm,
                                 uint32_t *host_pa_out);
 uint32_t vm_fetch64_exec_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint64_t *out_inst);
 uint32_t vm_fetch64_exec(VM *vm, vm_addr_t addr, uint64_t *out_inst);
+void vm_ram_enable_write_tracking(VM *vm);
+uint64_t vm_ram_page_generation_acquire(const VM *vm, uint32_t pa);
+void vm_ram_mark_written(VM *vm, uint32_t pa, size_t size);
 uint32_t vm_atomic_load32_acquire_cpu(VM *vm, VCPU *cpu, vm_addr_t addr);
 void vm_atomic_store32_release_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint32_t value);
 uint32_t vm_atomic_exchange32_seqcst_cpu(VM *vm, VCPU *cpu, vm_addr_t addr, uint32_t value);
