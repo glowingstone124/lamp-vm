@@ -17,6 +17,7 @@ cmake-build-debug/
 /disk.img
 /disk.img.gz
 /rootfs.ext4
+/coremark/
 /busybox-*/
 /busybox-*.tar.*
 /dist/
