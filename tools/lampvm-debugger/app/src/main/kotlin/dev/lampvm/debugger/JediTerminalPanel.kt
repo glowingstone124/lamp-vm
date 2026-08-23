@@ -26,6 +26,7 @@ import java.awt.Font
 import java.io.IOException
 import javax.swing.JPanel
 import kotlinx.coroutines.delay
+import kotlin.time.Duration.Companion.milliseconds
 
 @Composable
 internal fun TerminalPanel(
@@ -45,7 +46,7 @@ internal fun TerminalPanel(
                 LaunchedEffect(session) {
                     while (true) {
                         pendingInputBytes = session.pendingSerialInputBytes
-                        delay(50)
+                        delay(50.milliseconds)
                     }
                 }
                 Column(Modifier.fillMaxSize()) {

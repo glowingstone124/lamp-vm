@@ -128,8 +128,7 @@ The read-only procfs backend currently provides:
 
 `/proc/meminfo` is intentionally labeled as an estimate: the kernel does not yet
 have a page allocator that can report exact free/active/cache page accounting.
-Host RSS is observable separately in `/proc/lampvm` and in the Serial SDL metrics
-line.
+Host RSS is observable separately in `/proc/lampvm`.
 
 ## Syscall ABI (Current)
 

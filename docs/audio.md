@@ -57,9 +57,8 @@ reusable IOVA setup, producer full checks, submission, and completion reaping.
 
 Valid PCM payloads are copied into an SDL3 audio stream opened as S16LE,
 stereo, 48 kHz. SDL owns any conversion needed by the selected host device.
-Audio and video initialize independent SDL subsystems, so closing the display
-does not accidentally tear down audio first. This is the same SDL3 path on
-Linux and macOS; there is no CoreAudio-specific renderer or driver code.
+This is the same SDL3 audio path on Linux and macOS; there is no
+CoreAudio-specific renderer or driver code.
 
 The host applies bounded queue backpressure at roughly one second of PCM. If
 SDL audio cannot be opened (including a deliberately headless run), the

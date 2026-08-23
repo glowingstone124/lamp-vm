@@ -4,3 +4,6 @@
 [submodule "user"]
 	path = user
 	url = https://github.com/glowingstone124/lamp-userspace
+[submodule "coremark"]
+	path = coremark
+	url = https://github.com/eembc/coremark.git

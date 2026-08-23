@@ -27,6 +27,10 @@ fun main() {
         check(instructions.isNotEmpty() && instructions.first().mnemonic != ".quad") {
             "initial guest code could not be disassembled"
         }
+        val reportedCpuFrequency = vm.readMmio(0x0074c05cu, 4).toLittleEndianUInt()
+        check(reportedCpuFrequency == 125_000_000u) {
+            "SYSINFO MMIO returned an unexpected CPU frequency: $reportedCpuFrequency"
+        }
 
         vm.start()
         val serial = ArrayList<Byte>()
@@ -114,4 +118,12 @@ private fun ByteArray.containsSequence(sequence: ByteArray): Boolean {
         if (matches) return true
     }
     return false
+}
+
+private fun ByteArray.toLittleEndianUInt(): UInt {
+    check(size == 4) { "expected a 32-bit MMIO register" }
+    return (this[0].toUInt() and 0xffu) or
+        ((this[1].toUInt() and 0xffu) shl 8) or
+        ((this[2].toUInt() and 0xffu) shl 16) or
+        ((this[3].toUInt() and 0xffu) shl 24)
 }

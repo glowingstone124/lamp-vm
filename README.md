@@ -73,6 +73,29 @@ On Apple Silicon this produces
 VM core and Kotlin/Native bridge and uses the Compose debugger as the default
 LampVM graphical startup experience.
 
+### Package `disk.img` for distribution
+
+The raw image is intentionally 512 MiB so the guest has room to grow, but most
+of it is empty and compresses very well. Package it without modifying the
+source image:
+
+```bash
+bash tools/package_disk_image.sh --input disk.img --output dist/disk.img.gz
+```
+
+For a smaller package when `zstd` is available:
+
+```bash
+bash tools/package_disk_image.sh --input disk.img --output dist/disk.img.zst --format zstd
+```
+
+Before running the VM, restore the raw filename expected by the launcher:
+
+```bash
+gzip -dc dist/disk.img.gz > disk.img
+# or: zstd -d -c dist/disk.img.zst > disk.img
+```
+
 Notes:
 - On Apple Silicon, CMake is configured to build `arm64`.
 - Linux links `libm` and enables `_POSIX_C_SOURCE=200809L` together with

@@ -123,6 +123,9 @@ class LampVmSession private constructor(private var handle: Long) : AutoCloseabl
     fun readMemory(address: UInt, size: Int): ByteArray =
         NativeBindings.readMemory(requireHandle(), address.toInt(), size)
 
+    fun readMmio(address: UInt, size: Int): ByteArray =
+        NativeBindings.readMmio(requireHandle(), address.toInt(), size)
+
     fun readFramebuffer(): IntArray =
         NativeBindings.readFramebuffer(requireHandle())
 

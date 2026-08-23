@@ -9,6 +9,7 @@
 #include "interrupt.h"
 #include "io.h"
 #include "memory.h"
+#include "mmio.h"
 #include "engines/engine.h"
 #include "io_devices/disk/disk.h"
 #include "io_devices/ether/ether.h"
@@ -420,6 +421,47 @@ lamp_debug_status_t lamp_debug_read_memory(lamp_debug_vm_t *handle,
         return LAMP_DEBUG_INVALID_STATE;
     }
     memcpy(destination, handle->vm->memory + address, size);
+    return LAMP_DEBUG_OK;
+}
+
+lamp_debug_status_t lamp_debug_read_mmio(lamp_debug_vm_t *handle,
+                                         uint32_t address,
+                                         uint8_t *destination,
+                                         size_t size) {
+    uint64_t range_end;
+    uint64_t word_address;
+
+    if (!handle || !handle->vm || (!destination && size != 0u)) {
+        return LAMP_DEBUG_INVALID_ARGUMENT;
+    }
+    if (!lamp_debug_can_inspect(handle)) {
+        lamp_debug_set_error(handle, "pause the VM before reading MMIO");
+        return LAMP_DEBUG_INVALID_STATE;
+    }
+    range_end = (uint64_t)address + size;
+    if (range_end > (uint64_t)UINT32_MAX + 1u) {
+        lamp_debug_set_error(handle, "MMIO range overflows address space");
+        return LAMP_DEBUG_INVALID_ARGUMENT;
+    }
+
+    for (word_address = (uint64_t)address & ~3ull;
+         word_address < range_end;
+         word_address += 4u) {
+        MMIO_Device *device = find_mmio(handle->vm, (uint32_t)word_address);
+        uint32_t value;
+        if (!device || !device->read32 ||
+            word_address + 3u > device->end) {
+            lamp_debug_set_error(handle, "MMIO range contains an unreadable address");
+            return LAMP_DEBUG_INVALID_ARGUMENT;
+        }
+        value = device->read32(handle->vm, (uint32_t)word_address);
+        for (uint32_t byte = 0u; byte < 4u; byte++) {
+            const uint64_t current = word_address + byte;
+            if (current >= address && current < range_end) {
+                destination[current - address] = (uint8_t)(value >> (byte * 8u));
+            }
+        }
+    }
     return LAMP_DEBUG_OK;
 }
 

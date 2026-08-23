@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sched.h>
+#include <signal.h>
 #if defined(__linux__)
 #include <sys/resource.h>
 #include <sys/syscall.h>
@@ -442,6 +443,8 @@ void vm_error(const char *fmt, ...) {
     fflush(stderr);
 }
 
+VM *g_host_dump_vm = NULL;
+
 VM *vm_create(size_t memory_size,
               const uint64_t *program,
               size_t program_size,
@@ -452,6 +455,7 @@ VM *vm_create(size_t memory_size,
     VM *vm = malloc(sizeof(VM));
     if (!vm)
         return NULL;
+    g_host_dump_vm = vm;
 
     memset(vm, 0, sizeof(VM));
     vm->smp_cores = (smp_cores > 0) ? smp_cores : 1;
@@ -1025,7 +1029,30 @@ static void init_ethernet_backend_from_cli(VM *vm, const char *net_mode) {
     ether_init(vm, &backend);
 }
 
+static void vm_host_signal_dump_state(int sig) {
+    (void)sig;
+    extern VM *g_host_dump_vm;
+    VM *vm = g_host_dump_vm;
+    if (!vm) {
+        return;
+    }
+    fprintf(stderr, "\n[host-dump] vCPU state:\n");
+    for (int i = 0; i < vm->smp_cores; i++) {
+        VCPU *cpu = &vm->cpus[i];
+        fprintf(stderr,
+                "[host-dump] core=%d ip=0x%08zx last_ip=0x%08zx flags=0x%x "
+                "csp=%u dsp=%u isp=%u r30=0x%08x r31=0x%08x r0=0x%08x r1=0x%08x r2=0x%08x\n",
+                i, cpu->ip, cpu->last_ip, (unsigned)cpu->flags,
+                (unsigned)cpu->csp, (unsigned)cpu->dsp, (unsigned)cpu->isp,
+                (unsigned)cpu->regs[30], (unsigned)cpu->regs[31],
+                (unsigned)cpu->regs[0], (unsigned)cpu->regs[1],
+                (unsigned)cpu->regs[2]);
+    }
+}
+
 int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    signal(SIGUSR1, vm_host_signal_dump_state);
     VM_RUNTIME_LOG("Lamp VM version 1.0.0-rc1\n");
 #ifdef DEBUG_BUILD
     VM_RUNTIME_LOG("This copy was built with debug flags and may be slower.\n");

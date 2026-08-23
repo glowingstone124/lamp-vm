@@ -15,6 +15,7 @@ cmake-build-debug/
 /bios/boot.bin
 /bios/*.elf
 /disk.img
+/disk.img.gz
 /rootfs.ext4
 /busybox-*/
 /busybox-*.tar.*

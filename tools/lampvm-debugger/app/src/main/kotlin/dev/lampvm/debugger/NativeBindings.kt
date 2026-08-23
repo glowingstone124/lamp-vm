@@ -57,6 +57,7 @@ internal object NativeBindings {
     external fun stats(handle: Long): LongArray
     external fun cpu(handle: Long, coreId: Int): LongArray
     external fun readMemory(handle: Long, address: Int, size: Int): ByteArray
+    external fun readMmio(handle: Long, address: Int, size: Int): ByteArray
     external fun readFramebuffer(handle: Long): IntArray
     external fun sendKey(handle: Long, scanCode: Int, extended: Boolean, pressed: Boolean)
     external fun sendMouse(handle: Long, deltaX: Int, deltaY: Int, buttons: Int)

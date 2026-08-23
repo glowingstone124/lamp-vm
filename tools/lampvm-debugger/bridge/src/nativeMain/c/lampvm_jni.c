@@ -21,6 +21,8 @@ extern int32_t lamp_kn_cpu(int64_t handle, int32_t core_id,
                            uint64_t *output, int32_t capacity);
 extern int32_t lamp_kn_read_memory(int64_t handle, int32_t address,
                                   uint8_t *destination, int32_t size);
+extern int32_t lamp_kn_read_mmio(int64_t handle, int32_t address,
+                                uint8_t *destination, int32_t size);
 extern int32_t lamp_kn_read_framebuffer(int64_t handle,
                                        uint32_t *destination,
                                        int32_t pixel_capacity);
@@ -203,6 +205,32 @@ Java_dev_lampvm_debugger_NativeBindings_readMemory(
                                      status == 0 ? 0 : JNI_ABORT);
     if (status != 0) {
         throw_native_error(env, handle, "failed to read guest memory");
+        return NULL;
+    }
+    return result;
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_dev_lampvm_debugger_NativeBindings_readMmio(
+    JNIEnv *env, jobject self, jlong handle, jint address, jint size) {
+    jbyteArray result;
+    jbyte *bytes;
+    int32_t status;
+    (void)self;
+    if (size < 0) {
+        throw_native_error(env, handle, "MMIO size must not be negative");
+        return NULL;
+    }
+    result = (*env)->NewByteArray(env, size);
+    if (!result || size == 0) return result;
+    bytes = (*env)->GetByteArrayElements(env, result, NULL);
+    if (!bytes) return NULL;
+    status = lamp_kn_read_mmio((int64_t)handle, (int32_t)address,
+                               (uint8_t *)bytes, (int32_t)size);
+    (*env)->ReleaseByteArrayElements(env, result, bytes,
+                                     status == 0 ? 0 : JNI_ABORT);
+    if (status != 0) {
+        throw_native_error(env, handle, "failed to read MMIO registers");
         return NULL;
     }
     return result;

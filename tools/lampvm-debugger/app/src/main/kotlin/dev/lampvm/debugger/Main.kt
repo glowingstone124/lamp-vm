@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -64,6 +63,14 @@ private val LampColors: ColorScheme = darkColorScheme(
     error = Color(0xFFFF7B86),
 )
 
+private const val DEFAULT_MEMORY_INSPECT_BYTES = 512
+private const val MAX_MEMORY_INSPECT_BYTES = 4 * 1024
+
+private enum class MemoryReadMode(val label: String) {
+    Ram("RAM"),
+    Mmio("MMIO"),
+}
+
 fun main() = application {
     Window(
         onCloseRequest = ::exitApplication,
@@ -89,7 +96,9 @@ private fun DebuggerScreen() {
     var stats by remember { mutableStateOf<VmStats?>(null) }
     var cpu by remember { mutableStateOf<CpuSnapshot?>(null) }
     var selectedCore by remember { mutableStateOf(0) }
-    var memoryAddress by remember { mutableStateOf("0x0000201c") }
+    var memoryStartAddress by remember { mutableStateOf("0x0000201c") }
+    var memoryOffset by remember { mutableStateOf("0x00000200") }
+    var memoryReadMode by remember { mutableStateOf(MemoryReadMode.Ram) }
     var memoryFollowsIp by remember { mutableStateOf(true) }
     var memory by remember { mutableStateOf(ByteArray(0)) }
     var disassembly by remember { mutableStateOf(emptyList<DisassembledInstruction>()) }
@@ -105,12 +114,27 @@ private fun DebuggerScreen() {
                 if (coreId != selectedCore) selectedCore = coreId
                 val snapshot = active.cpu(coreId)
                 cpu = snapshot
-                val address = if (memoryFollowsIp) {
-                    snapshot.ip.toUInt().also { memoryAddress = it.hex32() }
+                val (startAddress, byteCount) = if (memoryFollowsIp) {
+                    val start = snapshot.ip.toUInt()
+                    val count = minOf(
+                        DEFAULT_MEMORY_INSPECT_BYTES.toLong(),
+                        latest.guestRamBytes.toLong() - start.toLong(),
+                    ).coerceAtLeast(1L).toInt()
+                    memoryStartAddress = start.hex32()
+                    memoryOffset = count.toUInt().hex32()
+                    start to count
                 } else {
-                    parseAddress(memoryAddress)
+                    parseMemoryRange(
+                        memoryStartAddress,
+                        memoryOffset,
+                        memoryReadMode.takeIf { it == MemoryReadMode.Ram }
+                            ?.let { latest.guestRamBytes.toLong() },
+                    )
                 }
-                memory = active.readMemory(address, 256)
+                memory = when (memoryReadMode) {
+                    MemoryReadMode.Ram -> active.readMemory(startAddress, byteCount)
+                    MemoryReadMode.Mmio -> active.readMmio(startAddress, byteCount)
+                }
                 val disassemblyStart = if (snapshot.ip >= 40uL) {
                     snapshot.ip.toUInt() - 40u
                 } else {
@@ -258,29 +282,39 @@ private fun DebuggerScreen() {
                     instructions = disassembly,
                     instructionPointer = cpu?.ip,
                     coreId = selectedCore,
-                    modifier = Modifier.weight(1.15f).fillMaxHeight(),
+                    modifier = Modifier.weight(1.1f).fillMaxHeight(),
                 )
                 Column(
-                    modifier = Modifier.weight(1.35f).fillMaxHeight(),
+                    modifier = Modifier.weight(1.45f).fillMaxHeight(),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
                     MemoryPanel(
-                        address = memoryAddress,
-                        onAddressChange = {
-                            memoryAddress = it
+                        startAddress = memoryStartAddress,
+                        onStartAddressChange = {
+                            memoryStartAddress = it
                             memoryFollowsIp = false
+                        },
+                        offset = memoryOffset,
+                        onOffsetChange = {
+                            memoryOffset = it
+                            memoryFollowsIp = false
+                        },
+                        readMode = memoryReadMode,
+                        onReadModeChange = {
+                            memoryReadMode = it
+                            if (it == MemoryReadMode.Mmio) memoryFollowsIp = false
                         },
                         followsIp = memoryFollowsIp,
                         onFollowsIpChange = { memoryFollowsIp = it },
                         inspectable = stats?.state != VmState.Running,
                         bytes = memory,
                         onRefresh = ::inspect,
-                        modifier = Modifier.weight(0.9f),
+                        modifier = Modifier.weight(1.15f),
                     )
                     TerminalPanel(
                         session = session,
                         state = stats?.state ?: session?.state,
-                        modifier = Modifier.weight(1.1f),
+                        modifier = Modifier.weight(0.85f),
                     )
                 }
             }
@@ -600,8 +634,12 @@ private fun DisassemblyPanel(
 
 @Composable
 private fun MemoryPanel(
-    address: String,
-    onAddressChange: (String) -> Unit,
+    startAddress: String,
+    onStartAddressChange: (String) -> Unit,
+    offset: String,
+    onOffsetChange: (String) -> Unit,
+    readMode: MemoryReadMode,
+    onReadModeChange: (MemoryReadMode) -> Unit,
     followsIp: Boolean,
     onFollowsIpChange: (Boolean) -> Unit,
     inspectable: Boolean,
@@ -612,24 +650,46 @@ private fun MemoryPanel(
     Panel("MEMORY", modifier) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(
-                value = address,
-                onValueChange = onAddressChange,
-                label = { Text("Address") },
+                value = startAddress,
+                onValueChange = onStartAddressChange,
+                label = { Text("Start") },
                 singleLine = true,
-                modifier = Modifier.widthIn(max = 220.dp),
+                modifier = Modifier.weight(1f),
             )
+            Spacer(Modifier.width(8.dp))
+            OutlinedTextField(
+                value = offset,
+                onValueChange = onOffsetChange,
+                label = { Text("Offset (bytes)") },
+                singleLine = true,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedButton(onClick = {
+                onReadModeChange(
+                    if (readMode == MemoryReadMode.Ram) MemoryReadMode.Mmio
+                    else MemoryReadMode.Ram,
+                )
+            }) {
+                Text("Mode: ${readMode.label}")
+            }
             Spacer(Modifier.width(8.dp))
             OutlinedButton(onClick = onRefresh, enabled = inspectable) {
                 Text("Read")
             }
             Spacer(Modifier.width(8.dp))
-            OutlinedButton(onClick = { onFollowsIpChange(!followsIp) }) {
+            OutlinedButton(
+                onClick = { onFollowsIpChange(!followsIp) },
+                enabled = readMode == MemoryReadMode.Ram,
+            ) {
                 Text(if (followsIp) "Following IP" else "Follow IP")
             }
         }
         Spacer(Modifier.height(8.dp))
         Text(
-            if (inspectable) "256 bytes from $address"
+            if (inspectable) "${readMode.label}: $startAddress + $offset bytes (max 4 KiB)"
             else "Live memory is locked, pause the VM to inspect",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 11.sp,
@@ -643,7 +703,7 @@ private fun MemoryPanel(
             SelectionContainer {
                 Text(
                     if (bytes.isEmpty()) "No memory snapshot yet"
-                    else bytes.toHexDump(parseAddress(address)),
+                    else bytes.toHexDump(parseAddress(startAddress)),
                     fontFamily = FontFamily.Monospace,
                     fontSize = 12.sp,
                     lineHeight = 18.sp,
@@ -685,6 +745,23 @@ private fun parseAddress(value: String): UInt = value.trim()
     .removePrefix("0x")
     .removePrefix("0X")
     .toUIntOrNull(16) ?: 0u
+
+private fun parseMemoryRange(startValue: String, offsetValue: String, memoryBytes: Long?): Pair<UInt, Int> {
+    val start = parseAddress(startValue)
+    val size = parseAddress(offsetValue).toLong()
+    require(size > 0L) { "Memory offset must be greater than zero" }
+    require(size <= MAX_MEMORY_INSPECT_BYTES) {
+        "Memory inspector supports ranges up to $MAX_MEMORY_INSPECT_BYTES bytes"
+    }
+    if (memoryBytes != null) {
+        require(start.toLong() + size <= memoryBytes) { "Memory range is outside guest RAM" }
+    } else {
+        require(start.toLong() + size <= (UInt.MAX_VALUE.toLong() + 1L)) {
+            "MMIO range overflows address space"
+        }
+    }
+    return start to size.toInt()
+}
 
 private fun UInt.hex32(): String = "0x${toString(16).padStart(8, '0')}"
 private fun ULong.hex64(): String = "0x${toString(16).padStart(8, '0')}"

@@ -33,6 +33,7 @@ import lampvm.capi.lamp_debug_get_stats
 import lampvm.capi.lamp_debug_last_error
 import lampvm.capi.lamp_debug_pause
 import lampvm.capi.lamp_debug_read_memory
+import lampvm.capi.lamp_debug_read_mmio
 import lampvm.capi.lamp_debug_read_framebuffer
 import lampvm.capi.lamp_debug_request_stop
 import lampvm.capi.lamp_debug_resume
@@ -179,6 +180,19 @@ fun readMemory(
     destination: CPointer<UByteVar>?,
     size: Int,
 ): Int = lamp_debug_read_memory(
+    nativeHandle(handle),
+    address.toUInt(),
+    destination,
+    size.convert(),
+).toInt()
+
+@CName("lamp_kn_read_mmio")
+fun readMmio(
+    handle: Long,
+    address: Int,
+    destination: CPointer<UByteVar>?,
+    size: Int,
+): Int = lamp_debug_read_mmio(
     nativeHandle(handle),
     address.toUInt(),
     destination,

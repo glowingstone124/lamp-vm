@@ -123,6 +123,13 @@ LAMP_DEBUG_EXPORT lamp_debug_status_t lamp_debug_read_memory(
     uint32_t address,
     uint8_t *destination,
     size_t size);
+/* Reads device registers through their MMIO read callbacks. The requested
+ * range must be fully covered by registered readable MMIO devices. */
+LAMP_DEBUG_EXPORT lamp_debug_status_t lamp_debug_read_mmio(
+    lamp_debug_vm_t *handle,
+    uint32_t address,
+    uint8_t *destination,
+    size_t size);
 LAMP_DEBUG_EXPORT lamp_debug_status_t lamp_debug_write_memory(
     lamp_debug_vm_t *handle,
     uint32_t address,
