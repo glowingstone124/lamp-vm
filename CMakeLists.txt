@@ -58,6 +58,9 @@ set(SOURCES
         src/engines/jit/code_memory.c
         src/engines/jit/runtime.c
         src/engines/jit/arm64/codegen_arm64.c
+        src/engines/jit/arm64/arm64_emitter.c
+        src/engines/jit/arm64/arm64_branch.c
+        src/engines/jit/arm64/arm64_ops.c
         src/engines/jit/arm64/memory_arm64.c
         src/engines/jit/x86_64/codegen_x86_64.c
         src/engines/jit/x86_64/memory_x86_64.c

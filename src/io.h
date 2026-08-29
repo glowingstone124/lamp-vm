@@ -1,6 +1,7 @@
 #ifndef VM_IO_H
 #define VM_IO_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 void accept_io(VM *vm, int addr, int value);
@@ -8,9 +9,17 @@ int vm_serial_rx_enqueue(VM *vm, uint8_t c);
 int vm_serial_tx_enqueue(VM *vm, uint8_t c);
 int vm_serial_tx_dequeue(VM *vm, uint8_t *c);
 int vm_ps2_kbd_enqueue(VM *vm, uint8_t c);
+int vm_ps2_kbd_enqueue_sequence(VM *vm, const uint8_t *bytes, size_t count);
+int vm_ps2_kbd_enqueue_sequence_if_ready(VM *vm, const uint8_t *bytes,
+                                          size_t count);
 int vm_ps2_mouse_enqueue(VM *vm, uint8_t c);
 int vm_ps2_mouse_enqueue_packet(VM *vm, uint8_t flags,
                                 uint8_t delta_x, uint8_t delta_y);
+int vm_ps2_mouse_enqueue_delta(VM *vm, int32_t delta_x, int32_t delta_y,
+                               uint8_t buttons);
+int vm_ps2_mouse_enqueue_delta_if_ready(VM *vm, int32_t delta_x,
+                                        int32_t delta_y, uint8_t buttons);
+int vm_ps2_input_ready(VM *vm);
 uint8_t vm_ps2_read_data(VM *vm);
 uint8_t vm_ps2_read_status(VM *vm);
 void vm_ps2_reassert_irq(VM *vm);
@@ -55,6 +64,9 @@ enum IO_TABLE {
 #define PS2_STATUS_SYSTEM 0x04
 #define PS2_STATUS_CMD_DATA 0x08
 #define PS2_STATUS_AUX_DATA 0x20
+/* Virtual extension: the front output byte is a controller/device command
+ * response and must not be consumed by an input IRQ decoder. */
+#define PS2_STATUS_COMMAND_RESPONSE 0x40
 
 #define FB_ACCEL_CMD_SCROLL_UP_8PX 0x01
 #define FB_ACCEL_CMD_CLEAR 0x02

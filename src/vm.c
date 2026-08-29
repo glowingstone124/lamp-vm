@@ -758,6 +758,7 @@ VM *vm_create(size_t memory_size,
     vm->ps2_mouse_enabled = 1u;
     vm->ps2_kbd_scanning = 1u;
     vm->ps2_mouse_reporting = 1u;
+    vm->ps2_input_ready = 0u;
     vm->ps2_mouse_sample_rate = 100u;
     vm->ps2_mouse_resolution = 2u;
     vm->io[PS2_STATUS] = vm->ps2_status;

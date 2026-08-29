@@ -504,20 +504,20 @@ lamp_debug_status_t lamp_debug_send_key(lamp_debug_vm_t *handle,
                                          uint8_t set1_scancode,
                                          uint8_t extended,
                                          uint8_t pressed) {
-    int queued = 1;
+    uint8_t sequence[2];
+    size_t count = 0u;
     if (!handle || !handle->vm || set1_scancode == 0u ||
         set1_scancode > 0x7fu) {
         return LAMP_DEBUG_INVALID_ARGUMENT;
     }
     if (extended != 0u) {
-        queued = vm_ps2_kbd_enqueue(handle->vm, 0xe0u);
+        sequence[count++] = 0xe0u;
     }
-    queued = vm_ps2_kbd_enqueue(
-        handle->vm,
-        pressed != 0u ? set1_scancode :
-                         (uint8_t)(set1_scancode | 0x80u)) && queued;
-    if (!queued) {
-        lamp_debug_set_error(handle, "guest keyboard input queue is full");
+    sequence[count++] = pressed != 0u ? set1_scancode :
+                                       (uint8_t)(set1_scancode | 0x80u);
+    if (!vm_ps2_kbd_enqueue_sequence_if_ready(handle->vm, sequence, count)) {
+        lamp_debug_set_error(
+            handle, "guest PS/2 keyboard is not ready or queue is full");
         return LAMP_DEBUG_IO_ERROR;
     }
     return LAMP_DEBUG_OK;
@@ -527,37 +527,21 @@ lamp_debug_status_t lamp_debug_send_mouse(lamp_debug_vm_t *handle,
                                            int32_t delta_x,
                                            int32_t delta_y,
                                            uint8_t buttons) {
-    int64_t remaining_x = delta_x;
-    int64_t remaining_y = delta_y;
-    int queued = 1;
     if (!handle || !handle->vm || (buttons & ~0x07u) != 0u) {
         return LAMP_DEBUG_INVALID_ARGUMENT;
     }
-    do {
-        int packet_x = (int)remaining_x;
-        int packet_y = (int)remaining_y;
-        int ps2_y;
-        uint8_t flags = 0x08u;
-        if (remaining_x > 127) packet_x = 127;
-        if (remaining_x < -127) packet_x = -127;
-        if (remaining_y > 127) packet_y = 127;
-        if (remaining_y < -127) packet_y = -127;
-        remaining_x -= packet_x;
-        remaining_y -= packet_y;
-        ps2_y = -packet_y;
-        if ((buttons & LAMP_DEBUG_MOUSE_LEFT) != 0u) flags |= 0x01u;
-        if ((buttons & LAMP_DEBUG_MOUSE_RIGHT) != 0u) flags |= 0x02u;
-        if ((buttons & LAMP_DEBUG_MOUSE_MIDDLE) != 0u) flags |= 0x04u;
-        if (packet_x < 0) flags |= 0x10u;
-        if (ps2_y < 0) flags |= 0x20u;
-        queued = vm_ps2_mouse_enqueue_packet(
-            handle->vm,
-            flags,
-            (uint8_t)(int8_t)packet_x,
-            (uint8_t)(int8_t)ps2_y) && queued;
-    } while (remaining_x != 0 || remaining_y != 0);
-    if (!queued) {
-        lamp_debug_set_error(handle, "guest mouse input queue is full");
+    if (delta_x > LAMP_DEBUG_MOUSE_MAX_DELTA ||
+        delta_x < -LAMP_DEBUG_MOUSE_MAX_DELTA ||
+        delta_y > LAMP_DEBUG_MOUSE_MAX_DELTA ||
+        delta_y < -LAMP_DEBUG_MOUSE_MAX_DELTA) {
+        lamp_debug_set_error(
+            handle, "guest PS/2 mouse delta is too large for one report");
+        return LAMP_DEBUG_INVALID_ARGUMENT;
+    }
+    if (!vm_ps2_mouse_enqueue_delta_if_ready(handle->vm, delta_x, delta_y,
+                                              buttons)) {
+        lamp_debug_set_error(
+            handle, "guest PS/2 mouse is not ready or queue is full");
         return LAMP_DEBUG_IO_ERROR;
     }
     return LAMP_DEBUG_OK;

@@ -917,10 +917,12 @@ static int run_selftest_ps2_controller(void) {
     init_ivt(vm);
 
     int ok = 1;
+    ok = ok && !vm_ps2_input_ready(vm);
     ok = ok && ((vm_ps2_read_status(vm) & PS2_STATUS_OUT_FULL) == 0u);
 
     accept_io(vm, PS2_COMMAND, 0x20u);
     ok = ok && ((vm_ps2_read_status(vm) & PS2_STATUS_OUT_FULL) != 0u);
+    ok = ok && ((vm_ps2_read_status(vm) & PS2_STATUS_COMMAND_RESPONSE) != 0u);
     ok = ok && (vm_ps2_read_data(vm) == 0x03u);
 
     accept_io(vm, PS2_DATA, 0xF2u);
@@ -934,12 +936,117 @@ static int run_selftest_ps2_controller(void) {
 
     accept_io(vm, PS2_COMMAND, 0xD4u);
     accept_io(vm, PS2_DATA, 0xF4u);
+    ok = ok && vm_ps2_input_ready(vm);
     ok = ok && ((vm_ps2_read_status(vm) & PS2_STATUS_AUX_DATA) != 0u);
     ok = ok && (vm_ps2_read_data(vm) == 0xFAu);
 
     ok = ok && vm_ps2_mouse_enqueue(vm, 0x08u);
     ok = ok && ((vm_ps2_read_status(vm) & PS2_STATUS_AUX_DATA) != 0u);
     ok = ok && (vm_ps2_read_data(vm) == 0x08u);
+
+    /* An extended key is one logical input event. Leave one controller slot
+     * free and verify that E0 plus the make code are rejected together. */
+    for (uint32_t i = 0u; i < 510u; i++) {
+        if (!vm_ps2_mouse_enqueue(vm, (uint8_t)(i ^ 0xA5u))) {
+            ok = 0;
+        }
+    }
+    {
+        const uint8_t extended_up[] = { 0xE0u, 0x48u };
+        const uint16_t head_before = vm->ps2_out_head;
+        const uint16_t legacy_head_before = vm->ps2_kbd_head;
+        if (vm_ps2_kbd_enqueue_sequence(vm, extended_up,
+                                         sizeof(extended_up))) {
+            ok = 0;
+        }
+        if (vm->ps2_out_head != head_before) {
+            ok = 0;
+        }
+        if (vm->ps2_kbd_head != legacy_head_before) {
+            ok = 0;
+        }
+    }
+    for (uint32_t i = 0u; i < 510u; i++) {
+        if (vm_ps2_read_data(vm) != (uint8_t)(i ^ 0xA5u)) {
+            ok = 0;
+        }
+    }
+    {
+        const uint8_t extended_up[] = { 0xE0u, 0x48u };
+        if (!vm_ps2_kbd_enqueue_sequence(vm, extended_up,
+                                         sizeof(extended_up)) ||
+            vm_ps2_read_data(vm) != 0xE0u ||
+            vm_ps2_read_data(vm) != 0x48u) {
+            ok = 0;
+        }
+    }
+
+    /* The controller has one ordered stream even when keyboard and mouse
+     * producers race. A packet must remain after the complete key sequence. */
+    {
+        const uint8_t extended_left[] = { 0xE0u, 0x4Bu };
+        if (!vm_ps2_kbd_enqueue_sequence(vm, extended_left,
+                                         sizeof(extended_left)) ||
+            !vm_ps2_mouse_enqueue_packet(vm, 0x09u, 0x01u, 0x02u) ||
+            vm_ps2_read_data(vm) != 0xE0u ||
+            vm_ps2_read_data(vm) != 0x4Bu ||
+            vm_ps2_read_data(vm) != 0x09u ||
+            vm_ps2_read_data(vm) != 0x01u ||
+            vm_ps2_read_data(vm) != 0x02u) {
+            ok = 0;
+        }
+    }
+
+    /* Large relative motion is split into complete packets and preserves
+     * the sign convention used by the kernel (guest Y grows downward). */
+    {
+        const int queued = vm_ps2_mouse_enqueue_delta(vm, 300, -260, 0x01u);
+        uint8_t values[9];
+        for (uint32_t i = 0u; i < 9u; i++) {
+            values[i] = vm_ps2_read_data(vm);
+        }
+        if (!queued || values[0] != 0x09u || values[1] != 0x7Fu ||
+            values[2] != 0x7Fu || values[3] != 0x09u ||
+            values[4] != 0x7Fu || values[5] != 0x7Fu ||
+            values[6] != 0x09u || values[7] != 0x2Eu ||
+            values[8] != 0x06u) {
+            ok = 0;
+        }
+    }
+
+    /* A report larger than the controller FIFO is rejected before its first
+     * packet is published. The debugger frontend splits such motion before
+     * calling the public API. */
+    {
+        const uint16_t head_before = vm->ps2_out_head;
+        if (vm_ps2_mouse_enqueue_delta(vm, INT32_MAX, INT32_MIN, 0x00u) ||
+            vm->ps2_out_head != head_before) {
+            ok = 0;
+        }
+    }
+
+    /* With only three controller slots free, a three-packet motion update
+     * must fail without publishing its first packet. */
+    for (uint32_t i = 0u; i < 508u; i++) {
+        if (!vm_ps2_mouse_enqueue(vm, (uint8_t)(i ^ 0x3Cu))) {
+            ok = 0;
+        }
+    }
+    {
+        const uint16_t head_before = vm->ps2_out_head;
+        const int queued = vm_ps2_mouse_enqueue_delta(vm, 300, -260, 0x00u);
+        if (queued || vm->ps2_out_head != head_before) {
+            ok = 0;
+        }
+    }
+    {
+        for (uint32_t i = 0u; i < 508u; i++) {
+            const uint8_t value = vm_ps2_read_data(vm);
+            if (value != (uint8_t)(i ^ 0x3Cu)) {
+                ok = 0;
+            }
+        }
+    }
 
     /* The active 8042 path must keep working after the compatibility-only
      * legacy mouse FIFO fills up. The kernel does not consume that FIFO. */
@@ -959,8 +1066,10 @@ static int run_selftest_ps2_controller(void) {
     }
     {
         const uint16_t head_before = vm->ps2_out_head;
+        const uint16_t legacy_head_before = vm->ps2_mouse_head;
         ok = ok && !vm_ps2_mouse_enqueue_packet(vm, 0x09u, 0x01u, 0x02u);
         ok = ok && vm->ps2_out_head == head_before;
+        ok = ok && vm->ps2_mouse_head == legacy_head_before;
     }
     for (uint32_t i = 0u; i < 509u; i++) {
         ok = ok && vm_ps2_read_data(vm) == (uint8_t)i;
@@ -982,6 +1091,36 @@ static int run_selftest_ps2_controller(void) {
     ok = ok && ((vm_interrupt_read_pending32(vm, BSP_CORE, 0u) &
                  (1u << INT_MOUSE)) != 0u);
     ok = ok && (vm_ps2_read_data(vm) == 0x09u);
+
+    /* Debugger reports must leave room for the controller's largest response
+     * burst (mouse status: ACK plus three bytes). A full report FIFO must
+     * therefore reject a new host event atomically instead of starving a
+     * later guest command. */
+    for (uint32_t i = 0u; i < 507u; i++) {
+        ok = ok && vm_ps2_mouse_enqueue(vm, (uint8_t)(i ^ 0x19u));
+    }
+    {
+        const uint8_t key[] = { 0x1Eu };
+        const uint16_t head_before = vm->ps2_out_head;
+        ok = ok && !vm_ps2_kbd_enqueue_sequence_if_ready(
+            vm, key, sizeof(key));
+        ok = ok && vm->ps2_out_head == head_before;
+    }
+    for (uint32_t i = 0u; i < 507u; i++) {
+        ok = ok && vm_ps2_read_data(vm) == (uint8_t)(i ^ 0x19u);
+    }
+
+    /* Device-side shutdown must revoke the debug injection gate atomically. */
+    accept_io(vm, PS2_DATA, 0xF5u);
+    ok = ok && !vm_ps2_input_ready(vm);
+    ok = ok && (vm_ps2_read_data(vm) == 0xFAu);
+    {
+        const uint8_t key[] = { 0x1Eu };
+        const uint16_t head_before = vm->ps2_out_head;
+        ok = ok && !vm_ps2_kbd_enqueue_sequence_if_ready(
+            vm, key, sizeof(key));
+        ok = ok && vm->ps2_out_head == head_before;
+    }
 
     vm_destroy(vm);
     return ok;

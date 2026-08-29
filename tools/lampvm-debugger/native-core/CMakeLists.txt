@@ -23,6 +23,9 @@ set(LAMPVM_SOURCES
     ${LAMPVM_ROOT}/src/engines/jit/code_memory.c
     ${LAMPVM_ROOT}/src/engines/jit/runtime.c
     ${LAMPVM_ROOT}/src/engines/jit/arm64/codegen_arm64.c
+    ${LAMPVM_ROOT}/src/engines/jit/arm64/arm64_emitter.c
+    ${LAMPVM_ROOT}/src/engines/jit/arm64/arm64_branch.c
+    ${LAMPVM_ROOT}/src/engines/jit/arm64/arm64_ops.c
     ${LAMPVM_ROOT}/src/engines/jit/arm64/memory_arm64.c
     ${LAMPVM_ROOT}/src/engines/jit/x86_64/codegen_x86_64.c
     ${LAMPVM_ROOT}/src/engines/jit/x86_64/memory_x86_64.c
@@ -53,36 +56,57 @@ set(LAMPVM_SOURCES
     ${LAMPVM_ROOT}/src/io_devices/pcie/pcie.c
     ${LAMPVM_ROOT}/src/io_devices/time/timer.c
     ${LAMPVM_ROOT}/src/float.c
+    ${LAMPVM_ROOT}/src/selftest.c
     ${LAMPVM_ROOT}/src/vnc.c
 )
 
 add_library(lampvm_core SHARED ${LAMPVM_SOURCES})
 target_include_directories(lampvm_core PUBLIC ${LAMPVM_ROOT}/include)
 target_include_directories(lampvm_core PRIVATE ${LAMPVM_ROOT}/src)
-target_compile_definitions(lampvm_core PRIVATE LAMPVM_EMBEDDED=1)
+target_compile_definitions(lampvm_core PRIVATE LAMPVM_DEBUG_CORE_BUILD=1)
 
-find_package(SDL3 CONFIG REQUIRED)
+if(APPLE)
+    set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "" FORCE)
+endif()
+
+find_package(SDL3 CONFIG QUIET)
+if(SDL3_FOUND)
+    if(TARGET SDL3::SDL3)
+        target_link_libraries(lampvm_core PRIVATE SDL3::SDL3)
+    else()
+        if(DEFINED SDL3_INCLUDE_DIRS)
+            target_include_directories(lampvm_core PRIVATE ${SDL3_INCLUDE_DIRS})
+        endif()
+        if(DEFINED SDL3_LIBRARIES)
+            target_link_libraries(lampvm_core PRIVATE ${SDL3_LIBRARIES})
+        endif()
+    endif()
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SDL3 REQUIRED sdl3)
+    target_include_directories(lampvm_core PRIVATE ${SDL3_INCLUDE_DIRS})
+    target_link_directories(lampvm_core PRIVATE ${SDL3_LIBRARY_DIRS})
+    target_link_libraries(lampvm_core PRIVATE ${SDL3_LIBRARIES})
+    target_compile_options(lampvm_core PRIVATE ${SDL3_CFLAGS_OTHER})
+endif()
+
 find_package(Threads REQUIRED)
-target_link_libraries(lampvm_core PRIVATE SDL3::SDL3 Threads::Threads)
+target_link_libraries(lampvm_core PRIVATE Threads::Threads)
 
 if(UNIX AND NOT APPLE)
+    target_link_libraries(lampvm_core PRIVATE m)
     target_compile_definitions(lampvm_core PRIVATE
         _POSIX_C_SOURCE=200809L
         _DEFAULT_SOURCE
     )
-    target_link_libraries(lampvm_core PRIVATE m)
-endif()
-
-if(APPLE)
-    set_target_properties(lampvm_core PROPERTIES
-        INSTALL_NAME_DIR "@rpath"
-        BUILD_WITH_INSTALL_RPATH TRUE
-    )
 endif()
 
 target_compile_options(lampvm_core PRIVATE
+    -fno-omit-frame-pointer
     -Wall
     -Wextra
     -Wpedantic
     -Wshadow
+    -Wstrict-prototypes
+    -Wmissing-prototypes
 )

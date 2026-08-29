@@ -42,7 +42,8 @@ fun main() {
             serial += vm.readSerial().toList()
         }
         check(serial.isNotEmpty()) { "guest serial TX did not reach the debugger FIFO" }
-        check(serial.toByteArray().decodeToString().contains("LAMP")) {
+        val bootLog = serial.toByteArray().decodeToString()
+        check(bootLog.contains("LAMP") || bootLog.contains("Octans")) {
             "debugger FIFO did not contain the expected guest boot log"
         }
         check(serial.toByteArray().containsSequence("\r\n".encodeToByteArray())) {
@@ -51,8 +52,60 @@ fun main() {
         check(vm.writeSerial("\n") == 1) {
             "guest serial RX did not accept direct terminal input"
         }
+        val keySerialStart = serial.size
         vm.sendKey(scanCode = 0x1e, extended = false, pressed = true)
         vm.sendKey(scanCode = 0x1e, extended = false, pressed = false)
+        var keyEchoed = false
+        repeat(100) {
+            Thread.sleep(10)
+            serial += vm.readSerial().toList()
+            if (serial.drop(keySerialStart).contains('a'.code.toByte())) {
+                keyEchoed = true
+                return@repeat
+            }
+        }
+        check(keyEchoed) {
+            "guest keyboard input was accepted but not consumed by the kernel"
+        }
+        val shiftSerialStart = serial.size
+        vm.sendKey(scanCode = 0x2a, extended = false, pressed = true)
+        vm.sendKey(scanCode = 0x1e, extended = false, pressed = true)
+        vm.sendKey(scanCode = 0x1e, extended = false, pressed = false)
+        vm.sendKey(scanCode = 0x2a, extended = false, pressed = false)
+        vm.sendKey(scanCode = 0x30, extended = false, pressed = true)
+        vm.sendKey(scanCode = 0x30, extended = false, pressed = false)
+        var shiftReleased = false
+        repeat(100) {
+            Thread.sleep(10)
+            serial += vm.readSerial().toList()
+            val shifted = serial.drop(shiftSerialStart)
+            if (shifted.contains('A'.code.toByte()) &&
+                shifted.contains('b'.code.toByte())
+            ) {
+                shiftReleased = true
+                return@repeat
+            }
+        }
+        check(shiftReleased) {
+            "guest keyboard did not release left Shift (Set-1 0xAA)"
+        }
+        val keypadSerialStart = serial.size
+        vm.sendKey(scanCode = 0x45, extended = false, pressed = true)
+        vm.sendKey(scanCode = 0x45, extended = false, pressed = false)
+        vm.sendKey(scanCode = 0x4f, extended = false, pressed = true)
+        vm.sendKey(scanCode = 0x4f, extended = false, pressed = false)
+        var keypadEchoed = false
+        repeat(100) {
+            Thread.sleep(10)
+            serial += vm.readSerial().toList()
+            if (serial.drop(keypadSerialStart).contains('1'.code.toByte())) {
+                keypadEchoed = true
+                return@repeat
+            }
+        }
+        check(keypadEchoed) {
+            "guest NumLock/keypad input was not consumed by the kernel"
+        }
         vm.sendMouse(deltaX = 3, deltaY = -2, buttons = 1)
         vm.sendMouse(deltaX = 0, deltaY = 0, buttons = 0)
 

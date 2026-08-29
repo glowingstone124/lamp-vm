@@ -33,6 +33,7 @@ import java.awt.event.MouseEvent
 import java.awt.event.MouseMotionAdapter
 import java.awt.image.BufferedImage
 import java.awt.image.DataBufferInt
+import kotlin.math.roundToInt
 import javax.swing.JPanel
 import javax.swing.Timer
 
@@ -58,7 +59,7 @@ internal fun VmVgaWindow(
 
     Window(
         onCloseRequest = onCloseRequest,
-        title = "LampVM Display",
+        title = "Octans Display",
         state = rememberWindowState(size = DpSize(800.dp, 640.dp)),
     ) {
         SwingPanel(
@@ -84,10 +85,14 @@ private class VgaPanel(private val session: LampVmSession) : JPanel() {
     }.getOrNull()
     private var captured = false
     private var mouseButtons = 0
+    private var reportedMouseButtons = 0
     private var lastScreenPosition: Point? = null
     private var expectedWarpPosition: Point? = null
-    private var pendingDeltaX = 0L
-    private var pendingDeltaY = 0L
+    private var pointerWarpAvailable = false
+    private var guestCapsLock = false
+    private var guestNumLock = false
+    private var pendingDeltaX = 0.0
+    private var pendingDeltaY = 0.0
     private var inputError: String? = null
     private val mouseFlushTimer = Timer(16) { flushMouseMotion() }.apply {
         isCoalesce = true
@@ -123,19 +128,28 @@ private class VgaPanel(private val session: LampVmSession) : JPanel() {
                 if (event.keyCode == KeyEvent.VK_G && event.isControlDown &&
                     (event.isAltDown || event.isMetaDown)
                 ) {
+                    releaseInputState()
                     releasePointer()
                     event.consume()
                     return
                 }
-                val key = awtToPs2(event.keyCode) ?: return
-                if (pressedKeys.putIfAbsent(event.keyCode, key) == null) {
-                    sendKey(key, pressed = true)
+                val key = awtToPs2(event) ?: return
+                val identity = event.keyCode * 8 + event.keyLocation
+                if (pressedKeys.putIfAbsent(identity, key) == null &&
+                    !sendKey(key, pressed = true)
+                ) {
+                    pressedKeys.remove(identity)
                 }
                 event.consume()
             }
 
             override fun keyReleased(event: KeyEvent) {
-                pressedKeys.remove(event.keyCode)?.let { sendKey(it, pressed = false) }
+                val identity = event.keyCode * 8 + event.keyLocation
+                pressedKeys[identity]?.let { key ->
+                    if (sendKey(key, pressed = false)) {
+                        pressedKeys.remove(identity)
+                    }
+                }
                 event.consume()
             }
         })
@@ -198,45 +212,75 @@ private class VgaPanel(private val session: LampVmSession) : JPanel() {
 
     private fun capturePointer() {
         captured = true
-        hiddenCursor?.let { cursor = it }
+        /* Without Robot (for example before Accessibility permission is
+         * granted on macOS) the pointer cannot be recentered. Keep it visible
+         * instead of hiding a pointer that will stop at the panel edge. */
+        cursor = java.awt.Cursor.getDefaultCursor()
+        lastScreenPosition = runCatching { MouseInfo.getPointerInfo()?.location }
+            .getOrNull()
+        syncHostLockState()
         requestFocusInWindow()
-        lastScreenPosition = MouseInfo.getPointerInfo()?.location
-        recenterPointer()
+        pointerWarpAvailable = recenterPointer()
+        if (pointerWarpAvailable) {
+            hiddenCursor?.let { cursor = it }
+        }
         repaint()
+    }
+
+    private fun syncHostLockState() {
+        val toolkit = Toolkit.getDefaultToolkit()
+        listOf(
+            KeyEvent.VK_CAPS_LOCK to 0x3a,
+            KeyEvent.VK_NUM_LOCK to 0x45,
+        ).forEach { (keyCode, scanCode) ->
+            val enabled = runCatching { toolkit.getLockingKeyState(keyCode) }
+                .getOrDefault(false)
+            if (enabled) {
+                val key = Ps2Key(scanCode)
+                if (sendKey(key, pressed = true)) {
+                    sendKey(key, pressed = false)
+                }
+            }
+        }
     }
 
     private fun releasePointer() {
         captured = false
         expectedWarpPosition = null
+        pointerWarpAvailable = false
+        pendingDeltaX = 0.0
+        pendingDeltaY = 0.0
         lastScreenPosition = null
-        pendingDeltaX = 0
-        pendingDeltaY = 0
         cursor = java.awt.Cursor.getDefaultCursor()
         repaint()
     }
 
     private fun handleMotion(event: MouseEvent) {
         if (!captured) return
-        val current = Point(event.xOnScreen, event.yOnScreen)
-        val warp = expectedWarpPosition
-        if (warp != null && current.distanceSq(warp) <= 9L) {
-            expectedWarpPosition = null
-            lastScreenPosition = current
-            return
+        expectedWarpPosition?.let { expected ->
+            val errorX = event.xOnScreen - expected.x
+            val errorY = event.yOnScreen - expected.y
+            if (kotlin.math.abs(errorX) <= 3 && kotlin.math.abs(errorY) <= 3) {
+                expectedWarpPosition = null
+                lastScreenPosition = Point(event.xOnScreen, event.yOnScreen)
+                return
+            }
         }
-
+        val current = Point(event.xOnScreen, event.yOnScreen)
         val previous = lastScreenPosition
         lastScreenPosition = current
-        if (previous != null) {
-            pendingDeltaX = (pendingDeltaX + current.x - previous.x)
-                .coerceIn(-32_768L, 32_768L)
-            pendingDeltaY = (pendingDeltaY + current.y - previous.y)
-                .coerceIn(-32_768L, 32_768L)
-        }
+        if (previous == null) return
+        val dx = current.x - previous.x
+        val dy = current.y - previous.y
+        if (dx == 0 && dy == 0) return
 
-        // Warp only near an edge. Warping after every event can produce a
-        // synthetic reverse movement on macOS/HiDPI displays and cancel the
-        // physical delta before it reaches the guest.
+        val scale = guestScale()
+        pendingDeltaX = (pendingDeltaX + dx / scale).coerceIn(-8_192.0, 8_192.0)
+        pendingDeltaY = (pendingDeltaY + dy / scale).coerceIn(-8_192.0, 8_192.0)
+
+        /* Keep normal motion relative and warp only near an edge. A warp for
+         * every event can arrive after the next real event and double-count
+         * absolute screen coordinates on macOS. */
         if (event.x < 48 || event.y < 48 ||
             event.x >= width - 48 || event.y >= height - 48
         ) {
@@ -244,60 +288,102 @@ private class VgaPanel(private val session: LampVmSession) : JPanel() {
         }
     }
 
-    private fun recenterPointer() {
-        val mover = robot ?: return
-        val origin = runCatching { locationOnScreen }.getOrNull() ?: return
-        val center = Point(origin.x + width / 2, origin.y + height / 2)
-        expectedWarpPosition = center
-        mover.mouseMove(center.x, center.y)
+    private fun recenterPointer(): Boolean {
+        val mover = robot ?: return false
+        val origin = runCatching { locationOnScreen }.getOrNull() ?: return false
+        val target = Point(origin.x + width / 2, origin.y + height / 2)
+        expectedWarpPosition = target
+        return runCatching {
+            mover.mouseMove(target.x, target.y)
+            true
+        }.getOrElse {
+            expectedWarpPosition = null
+            pointerWarpAvailable = false
+            cursor = java.awt.Cursor.getDefaultCursor()
+            false
+        }
     }
 
     private fun releaseInputState() {
-        pressedKeys.values.forEach { sendKey(it, pressed = false) }
-        pressedKeys.clear()
+        pressedKeys.toMap().forEach { (identity, key) ->
+            if (sendKey(key, pressed = false)) {
+                pressedKeys.remove(identity)
+            }
+        }
+        listOf(
+            guestCapsLock to Ps2Key(0x3a),
+            guestNumLock to Ps2Key(0x45),
+        ).forEach { (enabled, key) ->
+            if (enabled && sendKey(key, pressed = true)) {
+                sendKey(key, pressed = false)
+            }
+        }
         flushMouseMotion()
-        if (mouseButtons != 0) {
+        if (mouseButtons != 0 || reportedMouseButtons != 0) {
             mouseButtons = 0
             sendMouseNow(0, 0)
         }
     }
 
-    private fun sendKey(key: Ps2Key, pressed: Boolean) {
-        runCatching { session.sendKey(key.scanCode, key.extended, pressed) }
-            .onSuccess {
+    private fun sendKey(key: Ps2Key, pressed: Boolean): Boolean {
+        return runCatching {
+            session.sendKey(key.scanCode, key.extended, pressed)
+        }.fold(
+            onSuccess = {
+                if (pressed && !key.extended) {
+                    when (key.scanCode) {
+                        0x3a -> guestCapsLock = !guestCapsLock
+                        0x45 -> guestNumLock = !guestNumLock
+                    }
+                }
                 inputError = null
-            }
-            .onFailure {
+                true
+            },
+            onFailure = {
                 inputError = it.message ?: "keyboard input failed"
                 repaint()
-            }
+                false
+            },
+        )
     }
 
     private fun flushMouseMotion() {
-        if (pendingDeltaX == 0L && pendingDeltaY == 0L) return
-        val deltaX = pendingDeltaX.coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt()
-        val deltaY = pendingDeltaY.coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt()
-        pendingDeltaX = 0
-        pendingDeltaY = 0
-        sendMouseNow(deltaX, deltaY)
+        session.flushPendingInput()
+        if (pendingDeltaX == 0.0 && pendingDeltaY == 0.0 &&
+            mouseButtons == reportedMouseButtons
+        ) return
+        val deltaX = pendingDeltaX.roundToInt()
+        val deltaY = pendingDeltaY.roundToInt()
+        if (deltaX == 0 && deltaY == 0 &&
+            mouseButtons == reportedMouseButtons
+        ) return
+        if (sendMouseNow(deltaX, deltaY)) {
+            pendingDeltaX -= deltaX.toDouble()
+            pendingDeltaY -= deltaY.toDouble()
+        }
     }
 
-    private fun sendMouseNow(deltaX: Int, deltaY: Int) {
-        runCatching { session.sendMouse(deltaX, deltaY, mouseButtons and 0x07) }
-            .onSuccess {
+    private fun sendMouseNow(deltaX: Int, deltaY: Int): Boolean {
+        return runCatching {
+            session.sendMouse(deltaX, deltaY, mouseButtons and 0x07)
+        }.fold(
+            onSuccess = {
+                reportedMouseButtons = mouseButtons and 0x07
                 inputError = null
-            }
-            .onFailure {
+                true
+            },
+            onFailure = {
                 inputError = it.message ?: "mouse input failed"
                 repaint()
-            }
+                false
+            },
+        )
     }
-}
 
-private fun Point.distanceSq(other: Point): Long {
-    val dx = x.toLong() - other.x.toLong()
-    val dy = y.toLong() - other.y.toLong()
-    return dx * dx + dy * dy
+    private fun guestScale(): Double {
+        if (width <= 0 || height <= 0) return 1.0
+        return minOf(width.toDouble() / VGA_WIDTH, height.toDouble() / VGA_HEIGHT)
+    }
 }
 
 private data class Ps2Key(val scanCode: Int, val extended: Boolean = false)
@@ -309,7 +395,7 @@ private fun Int.toLampButton(): Int = when (this) {
     else -> 0
 }
 
-private fun awtToPs2(keyCode: Int): Ps2Key? = when (keyCode) {
+private fun awtToPs2(event: KeyEvent): Ps2Key? = when (event.keyCode) {
     KeyEvent.VK_ESCAPE -> Ps2Key(0x01)
     KeyEvent.VK_1 -> Ps2Key(0x02)
     KeyEvent.VK_2 -> Ps2Key(0x03)
@@ -337,8 +423,8 @@ private fun awtToPs2(keyCode: Int): Ps2Key? = when (keyCode) {
     KeyEvent.VK_P -> Ps2Key(0x19)
     KeyEvent.VK_OPEN_BRACKET -> Ps2Key(0x1a)
     KeyEvent.VK_CLOSE_BRACKET -> Ps2Key(0x1b)
-    KeyEvent.VK_ENTER -> Ps2Key(0x1c)
-    KeyEvent.VK_CONTROL -> Ps2Key(0x1d)
+    KeyEvent.VK_ENTER -> Ps2Key(0x1c, event.keyLocation == KeyEvent.KEY_LOCATION_NUMPAD)
+    KeyEvent.VK_CONTROL -> Ps2Key(0x1d, event.keyLocation == KeyEvent.KEY_LOCATION_RIGHT)
     KeyEvent.VK_A -> Ps2Key(0x1e)
     KeyEvent.VK_S -> Ps2Key(0x1f)
     KeyEvent.VK_D -> Ps2Key(0x20)
@@ -351,7 +437,9 @@ private fun awtToPs2(keyCode: Int): Ps2Key? = when (keyCode) {
     KeyEvent.VK_SEMICOLON -> Ps2Key(0x27)
     KeyEvent.VK_QUOTE -> Ps2Key(0x28)
     KeyEvent.VK_BACK_QUOTE -> Ps2Key(0x29)
-    KeyEvent.VK_SHIFT -> Ps2Key(0x2a)
+    KeyEvent.VK_SHIFT -> Ps2Key(
+        if (event.keyLocation == KeyEvent.KEY_LOCATION_RIGHT) 0x36 else 0x2a,
+    )
     KeyEvent.VK_BACK_SLASH -> Ps2Key(0x2b)
     KeyEvent.VK_Z -> Ps2Key(0x2c)
     KeyEvent.VK_X -> Ps2Key(0x2d)
@@ -363,7 +451,15 @@ private fun awtToPs2(keyCode: Int): Ps2Key? = when (keyCode) {
     KeyEvent.VK_COMMA -> Ps2Key(0x33)
     KeyEvent.VK_PERIOD -> Ps2Key(0x34)
     KeyEvent.VK_SLASH -> Ps2Key(0x35)
-    KeyEvent.VK_ALT, KeyEvent.VK_META -> Ps2Key(0x38)
+    KeyEvent.VK_ALT -> Ps2Key(
+        0x38,
+        event.keyLocation == KeyEvent.KEY_LOCATION_RIGHT,
+    )
+    KeyEvent.VK_ALT_GRAPH -> Ps2Key(0x38, extended = true)
+    KeyEvent.VK_META -> Ps2Key(
+        if (event.keyLocation == KeyEvent.KEY_LOCATION_RIGHT) 0x5c else 0x5b,
+        extended = true,
+    )
     KeyEvent.VK_SPACE -> Ps2Key(0x39)
     KeyEvent.VK_CAPS_LOCK -> Ps2Key(0x3a)
     KeyEvent.VK_UP -> Ps2Key(0x48, extended = true)
@@ -371,5 +467,48 @@ private fun awtToPs2(keyCode: Int): Ps2Key? = when (keyCode) {
     KeyEvent.VK_RIGHT -> Ps2Key(0x4d, extended = true)
     KeyEvent.VK_DOWN -> Ps2Key(0x50, extended = true)
     KeyEvent.VK_DELETE -> Ps2Key(0x53, extended = true)
+    KeyEvent.VK_INSERT -> Ps2Key(0x52, extended = true)
+    KeyEvent.VK_HOME -> Ps2Key(0x47, extended = true)
+    KeyEvent.VK_END -> Ps2Key(0x4f, extended = true)
+    KeyEvent.VK_PAGE_UP -> Ps2Key(0x49, extended = true)
+    KeyEvent.VK_PAGE_DOWN -> Ps2Key(0x51, extended = true)
+    KeyEvent.VK_NUM_LOCK -> Ps2Key(0x45)
+    KeyEvent.VK_SCROLL_LOCK -> Ps2Key(0x46)
+    KeyEvent.VK_F1 -> Ps2Key(0x3b)
+    KeyEvent.VK_F2 -> Ps2Key(0x3c)
+    KeyEvent.VK_F3 -> Ps2Key(0x3d)
+    KeyEvent.VK_F4 -> Ps2Key(0x3e)
+    KeyEvent.VK_F5 -> Ps2Key(0x3f)
+    KeyEvent.VK_F6 -> Ps2Key(0x40)
+    KeyEvent.VK_F7 -> Ps2Key(0x41)
+    KeyEvent.VK_F8 -> Ps2Key(0x42)
+    KeyEvent.VK_F9 -> Ps2Key(0x43)
+    KeyEvent.VK_F10 -> Ps2Key(0x44)
+    KeyEvent.VK_F11 -> Ps2Key(0x57)
+    KeyEvent.VK_F12 -> Ps2Key(0x58)
+    KeyEvent.VK_NUMPAD0 -> keypadKey(event, 0x52)
+    KeyEvent.VK_NUMPAD1 -> keypadKey(event, 0x4f)
+    KeyEvent.VK_NUMPAD2 -> keypadKey(event, 0x50)
+    KeyEvent.VK_NUMPAD3 -> keypadKey(event, 0x51)
+    KeyEvent.VK_NUMPAD4 -> keypadKey(event, 0x4b)
+    KeyEvent.VK_NUMPAD5 -> keypadKey(event, 0x4c)
+    KeyEvent.VK_NUMPAD6 -> keypadKey(event, 0x4d)
+    KeyEvent.VK_NUMPAD7 -> keypadKey(event, 0x47)
+    KeyEvent.VK_NUMPAD8 -> keypadKey(event, 0x48)
+    KeyEvent.VK_NUMPAD9 -> keypadKey(event, 0x49)
+    KeyEvent.VK_DECIMAL -> keypadKey(event, 0x53)
+    KeyEvent.VK_ADD -> Ps2Key(0x4e)
+    KeyEvent.VK_SUBTRACT -> Ps2Key(0x4a)
+    KeyEvent.VK_MULTIPLY -> Ps2Key(0x37)
+    KeyEvent.VK_DIVIDE -> Ps2Key(0x35, extended = true)
     else -> null
+}
+
+private fun keypadKey(event: KeyEvent, scanCode: Int): Ps2Key {
+    /* AWT uses the same VK_NUMPAD* codes for both modes. The key character
+     * tells us whether this event represents a digit or navigation; the
+     * resulting Ps/2 key is retained for the matching release event. */
+    val numeric = event.keyChar in '0'..'9' ||
+        (scanCode == 0x53 && event.keyChar == '.')
+    return Ps2Key(scanCode, extended = !numeric)
 }

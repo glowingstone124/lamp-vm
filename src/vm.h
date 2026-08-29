@@ -443,6 +443,7 @@ struct VM{
     uint8_t ps2_mouse_enabled;
     uint8_t ps2_kbd_scanning;
     uint8_t ps2_mouse_reporting;
+    uint8_t ps2_input_ready;
     uint8_t ps2_kbd_expect;
     uint8_t ps2_mouse_expect;
     uint8_t ps2_mouse_sample_rate;

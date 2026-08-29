@@ -1,5 +1,7 @@
 package dev.lampvm.debugger
 
+import java.util.ArrayDeque
+
 enum class VmState {
     Created,
     Running,
@@ -47,9 +49,22 @@ data class CpuSnapshot(
     val bootstrapProcessor: Boolean,
 )
 
+private sealed interface DeferredPs2Input {
+    data class Key(val scanCode: Int, val extended: Boolean, val pressed: Boolean) :
+        DeferredPs2Input
+
+    data class Mouse(val deltaX: Int, val deltaY: Int, val buttons: Int) :
+        DeferredPs2Input
+}
+
+/* Must stay below LAMP_DEBUG_MOUSE_MAX_DELTA. Keeping a little headroom also
+ * leaves space for the controller's response FIFO reservation. */
+private const val MAX_PS2_MOUSE_DELTA_PER_REPORT = 16_384
+
 class LampVmSession private constructor(private var handle: Long) : AutoCloseable {
     private val serialInputLock = Any()
     private val deferredSerialInput = DeferredSerialInput()
+    private val deferredPs2Input = ArrayDeque<DeferredPs2Input>()
 
     val state: VmState
         get() = VmState.fromNative(NativeBindings.state(requireHandle()))
@@ -61,6 +76,7 @@ class LampVmSession private constructor(private var handle: Long) : AutoCloseabl
         val current = requireHandle()
         NativeBindings.start(current)
         flushDeferredSerialInput(current)
+        flushDeferredPs2Input(current)
     }
 
     fun pause(timeoutMillis: Long = 2_000) = synchronized(serialInputLock) {
@@ -73,12 +89,14 @@ class LampVmSession private constructor(private var handle: Long) : AutoCloseabl
             /* Queue serial input before publishing the step request so the
              * paused vCPU can observe its interrupt during this step. */
             flushDeferredSerialInput(current)
+            flushDeferredPs2Input(current)
             NativeBindings.step(current, coreId, timeoutMillis)
         }
 
     fun resume() = synchronized(serialInputLock) {
         val current = requireHandle()
         flushDeferredSerialInput(current)
+        flushDeferredPs2Input(current)
         NativeBindings.resume(current)
     }
 
@@ -126,22 +144,42 @@ class LampVmSession private constructor(private var handle: Long) : AutoCloseabl
     fun readMmio(address: UInt, size: Int): ByteArray =
         NativeBindings.readMmio(requireHandle(), address.toInt(), size)
 
-    fun readFramebuffer(): IntArray =
-        NativeBindings.readFramebuffer(requireHandle())
+    fun readFramebuffer(): IntArray = synchronized(serialInputLock) {
+        val current = requireHandle()
+        /* VGA polling is also the retry clock for PS/2 events queued while
+         * the guest is still completing controller initialization. */
+        flushDeferredPs2Input(current)
+        NativeBindings.readFramebuffer(current)
+    }
 
     fun sendKey(scanCode: Int, extended: Boolean, pressed: Boolean) =
-        NativeBindings.sendKey(requireHandle(), scanCode, extended, pressed)
+        synchronized(serialInputLock) {
+            enqueuePs2Input(
+                DeferredPs2Input.Key(scanCode, extended, pressed),
+            )
+            flushDeferredPs2Input(requireHandle())
+        }
 
     fun sendMouse(deltaX: Int, deltaY: Int, buttons: Int) =
-        NativeBindings.sendMouse(requireHandle(), deltaX, deltaY, buttons)
+        synchronized(serialInputLock) {
+            enqueuePs2Input(DeferredPs2Input.Mouse(deltaX, deltaY, buttons))
+            flushDeferredPs2Input(requireHandle())
+        }
+
+    internal fun flushPendingInput() = synchronized(serialInputLock) {
+        if (handle != 0L) {
+            flushDeferredPs2Input(handle)
+        }
+    }
 
     fun readSerial(capacity: Int = 8_192): ByteArray {
         val current = requireHandle()
         synchronized(serialInputLock) {
-            if (deferredSerialInput.size > 0 &&
-                VmState.fromNative(NativeBindings.state(current)) != VmState.Paused
-            ) {
-                flushDeferredSerialInput(current)
+            if (VmState.fromNative(NativeBindings.state(current)) != VmState.Paused) {
+                if (deferredSerialInput.size > 0) {
+                    flushDeferredSerialInput(current)
+                }
+                flushDeferredPs2Input(current)
             }
         }
         return NativeBindings.serialRead(current, capacity)
@@ -168,6 +206,7 @@ class LampVmSession private constructor(private var handle: Long) : AutoCloseabl
             if (current != 0L) {
                 handle = 0L
                 deferredSerialInput.clear()
+                deferredPs2Input.clear()
                 NativeBindings.destroy(current)
             }
         }
@@ -176,11 +215,74 @@ class LampVmSession private constructor(private var handle: Long) : AutoCloseabl
     private fun flushDeferredSerialInput(current: Long): Int =
         deferredSerialInput.flush { NativeBindings.serialWrite(current, it) }
 
+    private fun enqueuePs2Input(input: DeferredPs2Input) {
+        check(deferredPs2Input.size < PS2_INPUT_QUEUE_CAPACITY) {
+            "guest PS/2 input queue is full"
+        }
+        deferredPs2Input.addLast(input)
+    }
+
+    private fun flushDeferredPs2Input(current: Long) {
+        while (deferredPs2Input.isNotEmpty()) {
+            val input = deferredPs2Input.peekFirst()
+            try {
+                when (input) {
+                    is DeferredPs2Input.Key -> NativeBindings.sendKey(
+                        current,
+                        input.scanCode,
+                        input.extended,
+                        input.pressed,
+                    )
+                    is DeferredPs2Input.Mouse -> {
+                        /* A single host event can exceed the 8-bit PS/2
+                         * packet range. Send one bounded atomic report at a
+                         * time and retain the remainder at the queue front
+                         * if the event spans multiple reports. */
+                        val chunkX = input.deltaX.coerceIn(
+                            -MAX_PS2_MOUSE_DELTA_PER_REPORT,
+                            MAX_PS2_MOUSE_DELTA_PER_REPORT,
+                        )
+                        val chunkY = input.deltaY.coerceIn(
+                            -MAX_PS2_MOUSE_DELTA_PER_REPORT,
+                            MAX_PS2_MOUSE_DELTA_PER_REPORT,
+                        )
+                        NativeBindings.sendMouse(
+                            current,
+                            chunkX,
+                            chunkY,
+                            input.buttons,
+                        )
+                        deferredPs2Input.removeFirst()
+                        val remainingX = input.deltaX - chunkX
+                        val remainingY = input.deltaY - chunkY
+                        if (remainingX != 0 || remainingY != 0) {
+                            deferredPs2Input.addFirst(
+                                DeferredPs2Input.Mouse(
+                                    remainingX,
+                                    remainingY,
+                                    input.buttons,
+                                ),
+                            )
+                        }
+                        continue
+                    }
+                }
+            } catch (_: Exception) {
+                /* The controller may still be booting or temporarily full.
+                 * Keep ordering intact and retry on the next input/tick. */
+                return
+            }
+            deferredPs2Input.removeFirst()
+        }
+    }
+
     private fun requireHandle(): Long = handle.also {
         check(it != 0L) { "Lamp VM session is closed" }
     }
 
     companion object {
+        private const val PS2_INPUT_QUEUE_CAPACITY = 4_096
+
         fun create(
             programPath: String,
             diskPath: String = "",

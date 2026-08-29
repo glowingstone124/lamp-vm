@@ -23,6 +23,9 @@ extern "C" {
 #define LAMP_DEBUG_MOUSE_LEFT 0x01u
 #define LAMP_DEBUG_MOUSE_RIGHT 0x02u
 #define LAMP_DEBUG_MOUSE_MIDDLE 0x04u
+/* Maximum absolute delta that one debugger report can publish atomically.
+ * Larger host motions should be split into multiple reports. */
+#define LAMP_DEBUG_MOUSE_MAX_DELTA 21463
 
 typedef struct lamp_debug_vm lamp_debug_vm_t;
 

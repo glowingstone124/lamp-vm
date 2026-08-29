@@ -2,6 +2,8 @@
 
 A small 32-bit VM with SMP support, MMIO devices, interrupts, and a custom ISA.
 
+> This project is temporarily on hold due to personal reasons.
+
 ## Current Status
 
 - VM boots and runs custom binaries (`--bin`).
